@@ -33,9 +33,11 @@ test('passing on the first attempt stops immediately', async () => {
     const workerResult = { message: 'created' };
     let calls = 0;
     const result = await runTask(projectPath, task({ maxAttempts: 3 }), {
-      runWorker: async workerPath => {
+      runWorker: async (workerPath, workerTask, context) => {
         calls++;
         assert.equal(workerPath, projectPath);
+        assert.equal(workerTask.id, 'task-1');
+        assert.deepEqual(context, { attempt: 1, previousAttempt: null });
         fs.writeFileSync(path.join(workerPath, 'result.txt'), 'ready');
         return workerResult;
       },
@@ -56,11 +58,13 @@ test('passing on the first attempt stops immediately', async () => {
 test('first verification fails and second passes', async () => {
   await inProject(async projectPath => {
     let calls = 0;
+    const contexts = [];
     const result = await runTask(projectPath, task({ maxAttempts: 3 }), {
-      runWorker: async () => {
+      runWorker: async (_workerPath, _workerTask, context) => {
+        contexts.push(context);
         calls++;
         if (calls === 2) fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
-        return { call: calls };
+        return { call: calls, resultText: 'worker output' };
       },
     });
 
@@ -70,8 +74,29 @@ test('first verification fails and second passes', async () => {
       [1, 'failed'],
       [2, 'passed'],
     ]);
-    assert.deepEqual(result.attempts.map(attempt => attempt.worker), [{ call: 1 }, { call: 2 }]);
+    assert.deepEqual(result.attempts.map(attempt => attempt.worker), [
+      { call: 1, resultText: 'worker output' },
+      { call: 2, resultText: 'worker output' },
+    ]);
     assert.deepEqual(result.attempts.map(attempt => attempt.verification.passed), [false, true]);
+    assert.deepEqual(contexts, [
+      { attempt: 1, previousAttempt: null },
+      {
+        attempt: 2,
+        previousAttempt: {
+          number: 1,
+          status: 'failed',
+          verification: {
+            passed: false,
+            exitCode: 1,
+            timedOut: false,
+            stdout: '',
+            stderr: '',
+          },
+        },
+      },
+    ]);
+    assert.ok(Object.hasOwn(result.attempts[0].verification, 'durationMs'));
   });
 });
 
@@ -118,8 +143,10 @@ test('maxAttempts: 1 performs only one attempt', async () => {
 test('worker error is recorded and retried', async () => {
   await inProject(async projectPath => {
     let calls = 0;
+    const contexts = [];
     const result = await runTask(projectPath, task({ maxAttempts: 2 }), {
-      runWorker: async () => {
+      runWorker: async (_workerPath, _workerTask, context) => {
+        contexts.push(context);
         calls++;
         if (calls === 1) throw new TypeError('worker crashed');
         fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
@@ -136,6 +163,48 @@ test('worker error is recorded and retried', async () => {
     });
     assert.equal(result.attempts[1].status, 'passed');
     assert.equal(result.attempts[1].verification.passed, true);
+    assert.deepEqual(contexts, [
+      { attempt: 1, previousAttempt: null },
+      {
+        attempt: 2,
+        previousAttempt: {
+          number: 1,
+          status: 'worker_error',
+          error: { name: 'TypeError', message: 'worker crashed' },
+        },
+      },
+    ]);
+  });
+});
+
+test('third attempt receives only the immediately preceding attempt', async () => {
+  await inProject(async projectPath => {
+    const contexts = [];
+    const result = await runTask(projectPath, task({ maxAttempts: 3 }), {
+      runWorker: async (_workerPath, _workerTask, context) => {
+        contexts.push(context);
+        if (context.attempt === 3) fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+        return { attempt: context.attempt, resultText: 'private worker output' };
+      },
+    });
+
+    assert.equal(result.status, 'passed');
+    assert.deepEqual(result.attempts.map(attempt => attempt.status), ['failed', 'failed', 'passed']);
+    assert.deepEqual(contexts[2], {
+      attempt: 3,
+      previousAttempt: {
+        number: 2,
+        status: 'failed',
+        verification: {
+          passed: false,
+          exitCode: 1,
+          timedOut: false,
+          stdout: '',
+          stderr: '',
+        },
+      },
+    });
+    assert.deepEqual(result.attempts.map(attempt => attempt.worker.attempt), [1, 2, 3]);
   });
 });
 
