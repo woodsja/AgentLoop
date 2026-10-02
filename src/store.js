@@ -20,6 +20,7 @@ const paths = {
   config: resolveConfigPath(),
   state: path.join(root, 'state'),
   tasks: path.join(root, 'state', 'tasks'),
+  taskRuns: path.join(root, 'state', 'task-runs'),
   pending: path.join(root, 'state', 'tasks', 'pending'),
   running: path.join(root, 'state', 'tasks', 'running'),
   done: path.join(root, 'state', 'tasks', 'done'),
@@ -74,7 +75,7 @@ function loadConfig() {
 const config = loadConfig();
 
 function ensureDirs() {
-  for (const directory of [paths.pending, paths.running, paths.done, paths.results, paths.logs]) {
+  for (const directory of [paths.pending, paths.running, paths.done, paths.taskRuns, paths.results, paths.logs]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 }
@@ -179,6 +180,31 @@ function writeTask(task, stage) {
 
   ensureDirs();
   writeJsonAtomic(taskPath(task.id, stage), task);
+}
+
+function taskRunPath(id) {
+  if (typeof id !== 'string' || !id.trim()) {
+    throw new Error('Task run id is required.');
+  }
+
+  const filename = `${crypto.createHash('sha256').update(id).digest('hex')}.json`;
+  return path.join(paths.taskRuns, filename);
+}
+
+function writeTaskRunState(record) {
+  const filePath = taskRunPath(record?.id);
+  writeJsonAtomic(filePath, record);
+}
+
+function readTaskRunState(id) {
+  try {
+    return JSON.parse(fs.readFileSync(taskRunPath(id), 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function listTasks(stage) {
@@ -426,6 +452,8 @@ module.exports = {
   moveTask,
   readTask,
   writeTask,
+  writeTaskRunState,
+  readTaskRunState,
   listTasks,
   writeResult,
   appendLogLine,
