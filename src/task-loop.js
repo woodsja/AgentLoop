@@ -23,15 +23,25 @@ async function runTask(projectPath, inputTask, options) {
       typeof options.runWorker !== 'function') {
     throw new TypeError('options.runWorker must be a function');
   }
+  if (options.onStateChange !== undefined && typeof options.onStateChange !== 'function') {
+    throw new TypeError('options.onStateChange must be a function');
+  }
 
   const task = normalizeTaskContract(inputTask);
   const attempts = [];
+  async function emitState(status, activeAttempt) {
+    if (options.onStateChange) {
+      await options.onStateChange(structuredClone({ task, status, activeAttempt, attempts }));
+    }
+  }
 
   for (let number = 1; number <= task.maxAttempts; number++) {
+    await emitState('working', number);
     const previousAttempt = attempts.length === 0 ? null : snapshotAttempt(attempts[attempts.length - 1]);
     const context = { attempt: number, previousAttempt };
+    let result;
     try {
-      const result = await executeTask(projectPath, task, {
+      result = await executeTask(projectPath, task, {
         runWorker: (workerPath, workerTask) => options.runWorker(workerPath, workerTask, context),
         verificationTimeoutMs: options.verificationTimeoutMs,
       });
@@ -41,10 +51,6 @@ async function runTask(projectPath, inputTask, options) {
         worker: result.worker,
         verification: result.verification,
       });
-
-      if (result.status === 'passed') {
-        return { task, status: 'passed', attempts };
-      }
     } catch (error) {
       attempts.push({
         number,
@@ -52,8 +58,15 @@ async function runTask(projectPath, inputTask, options) {
         error: { name: error.name, message: error.message },
       });
     }
+
+    if (result && result.status === 'passed') {
+      await emitState('passed', null);
+      return { task, status: 'passed', attempts };
+    }
+    if (number < task.maxAttempts) await emitState('working', null);
   }
 
+  await emitState('needs_planning', null);
   return { task, status: 'needs_planning', attempts };
 }
 

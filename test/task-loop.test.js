@@ -272,3 +272,176 @@ test('runWorker is required before attempts begin', async () => {
   await assert.rejects(runTask(process.cwd(), task(), {}),
     /options\.runWorker must be a function/);
 });
+
+test('first-attempt pass emits working then passed with normalized task', async () => {
+  await inProject(async projectPath => {
+    const states = [];
+    const result = await runTask(projectPath, task({ maxAttempts: 3 }), {
+      onStateChange: state => states.push(state),
+      runWorker: async () => {
+        fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+      },
+    });
+
+    assert.deepEqual(states.map(({ status, activeAttempt, attempts }) =>
+      [status, activeAttempt, attempts.length]), [
+      ['working', 1, 0],
+      ['passed', null, 1],
+    ]);
+    assert.deepEqual(Object.keys(states[0]), ['task', 'status', 'activeAttempt', 'attempts']);
+    assert.deepEqual(states[0].task, result.task);
+    assert.deepEqual(states[1].attempts, result.attempts);
+  });
+});
+
+test('failed verification then pass emits completed failed attempt before retry', async () => {
+  await inProject(async projectPath => {
+    const states = [];
+    let calls = 0;
+    const result = await runTask(projectPath, task({ maxAttempts: 3 }), {
+      onStateChange: state => states.push(state),
+      runWorker: async () => {
+        if (++calls === 2) fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+      },
+    });
+
+    assert.deepEqual(states.map(({ status, activeAttempt, attempts }) =>
+      [status, activeAttempt, attempts.map(attempt => attempt.status)]), [
+      ['working', 1, []],
+      ['working', null, ['failed']],
+      ['working', 2, ['failed']],
+      ['passed', null, ['failed', 'passed']],
+    ]);
+    assert.deepEqual(states[1].attempts[0], result.attempts[0]);
+  });
+});
+
+test('worker error is present in completed-attempt state', async () => {
+  await inProject(async projectPath => {
+    const states = [];
+    await runTask(projectPath, task({ maxAttempts: 2 }), {
+      onStateChange: state => states.push(state),
+      runWorker: async () => {
+        if (states.length === 1) throw new TypeError('worker crashed');
+        fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+      },
+    });
+
+    assert.deepEqual(states[1].attempts, [{
+      number: 1,
+      status: 'worker_error',
+      error: { name: 'TypeError', message: 'worker crashed' },
+    }]);
+    assert.equal(states[1].activeAttempt, null);
+  });
+});
+
+test('exhausted attempts emit one needs_planning terminal state', async () => {
+  await inProject(async projectPath => {
+    const states = [];
+    const result = await runTask(projectPath, task({ maxAttempts: 2 }), {
+      onStateChange: state => states.push(state),
+      runWorker: async () => {},
+    });
+
+    assert.deepEqual(states.map(({ status, activeAttempt, attempts }) =>
+      [status, activeAttempt, attempts.length]), [
+      ['working', 1, 0],
+      ['working', null, 1],
+      ['working', 2, 1],
+      ['needs_planning', null, 2],
+    ]);
+    assert.deepEqual(states[3].attempts, result.attempts);
+  });
+});
+
+test('async state callback finishes before a worker begins', async () => {
+  await inProject(async projectPath => {
+    let release;
+    let entered;
+    const callbackEntered = new Promise(resolve => { entered = resolve; });
+    const callbackReleased = new Promise(resolve => { release = resolve; });
+    let workerCalls = 0;
+    const pending = runTask(projectPath, task({ maxAttempts: 1 }), {
+      onStateChange: async state => {
+        if (state.activeAttempt === 1) {
+          entered();
+          await callbackReleased;
+        }
+      },
+      runWorker: async () => { workerCalls++; },
+    });
+
+    await callbackEntered;
+    assert.equal(workerCalls, 0);
+    release();
+    await pending;
+    assert.equal(workerCalls, 1);
+  });
+});
+
+test('callback mutation cannot change internal task, attempts, or later snapshots', async () => {
+  await inProject(async projectPath => {
+    const states = [];
+    let calls = 0;
+    const result = await runTask(projectPath, task({ maxAttempts: 2 }), {
+      onStateChange: state => {
+        assert.equal(state.task.goal, 'Create result.txt');
+        assert.deepEqual(state.task.acceptance, ['result.txt exists']);
+        assert.equal(state.attempts.length, [0, 1, 1, 2][states.length]);
+        assert.ok(state.attempts.every(attempt => attempt.status !== 'changed'));
+        assert.ok(state.attempts.every(attempt => attempt.worker.message === 'original'));
+        states.push(state);
+        state.task.goal = 'changed';
+        state.task.acceptance.push('changed');
+        if (state.attempts[0]) {
+          state.attempts[0].status = 'changed';
+          state.attempts[0].worker.message = 'changed';
+          state.attempts[0].verification.stdout = 'changed';
+        }
+        state.attempts.push({ number: 99, status: 'changed' });
+      },
+      runWorker: async (_workerPath, workerTask) => {
+        assert.equal(workerTask.goal, 'Create result.txt');
+        assert.deepEqual(workerTask.acceptance, ['result.txt exists']);
+        if (++calls === 2) fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+        return { message: 'original' };
+      },
+    });
+
+    assert.equal(calls, 2);
+    assert.equal(result.task.goal, 'Create result.txt');
+    assert.deepEqual(result.task.acceptance, ['result.txt exists']);
+    assert.deepEqual(result.attempts.map(attempt => attempt.status), ['failed', 'passed']);
+    assert.deepEqual(result.attempts.map(attempt => attempt.worker.message), ['original', 'original']);
+    assert.equal(result.attempts[0].verification.stdout, '');
+    assert.equal(states[2].attempts[0].worker.message, 'changed');
+    assert.equal(states[3].attempts[0].worker.message, 'changed');
+    assert.equal(states[3].attempts[1].worker.message, 'original');
+    assert.equal(states[2].attempts.length, 2);
+    assert.equal(states[3].attempts.length, 3);
+  });
+});
+
+test('state callback rejection stops execution before another worker attempt', async () => {
+  await inProject(async projectPath => {
+    let calls = 0;
+    const failure = new Error('state write failed');
+    await assert.rejects(runTask(projectPath, task({ maxAttempts: 3 }), {
+      onStateChange: async state => {
+        if (state.status === 'working' && state.activeAttempt === null) throw failure;
+      },
+      runWorker: async () => { calls++; },
+    }), error => error === failure);
+    assert.equal(calls, 1);
+  });
+});
+
+test('invalid state callback is rejected before any worker runs', async () => {
+  let calls = 0;
+  await assert.rejects(runTask(process.cwd(), task(), {
+    onStateChange: 'not a function',
+    runWorker: async () => { calls++; },
+  }), /options\.onStateChange must be a function/);
+  assert.equal(calls, 0);
+});
