@@ -2,6 +2,51 @@
 const http = require('node:http');
 
 const store = require('./store');
+const { createRalphTaskService } = require('./ralph-task-service');
+
+let defaultRalphTaskService;
+
+function ralphTaskService() {
+  if (!defaultRalphTaskService) {
+    defaultRalphTaskService = createRalphTaskService({
+      config: store.config,
+      workerTimeoutMs: store.config.taskTimeoutMin * 60 * 1000,
+    });
+  }
+  return defaultRalphTaskService;
+}
+
+function boundedOutput(value) {
+  const limit = 4000;
+  const marker = '[truncated]';
+  return value.length > limit ? marker + value.slice(-(limit - marker.length)) : value;
+}
+
+function compactRalphResult(result) {
+  return {
+    id: result.task.id,
+    status: result.status,
+    attempts: result.attempts.map((attempt) => {
+      const compact = { number: attempt.number, status: attempt.status };
+      if (attempt.status === 'worker_error') {
+        compact.error = {
+          name: attempt.error.name,
+          message: attempt.error.message,
+        };
+      } else {
+        const verification = attempt.verification;
+        compact.verification = {
+          passed: verification.passed,
+          exitCode: verification.exitCode,
+          timedOut: verification.timedOut,
+          stdout: boundedOutput(verification.stdout),
+          stderr: boundedOutput(verification.stderr),
+        };
+      }
+      return compact;
+    }),
+  };
+}
 
 // A non-numeric config value reaches http.request as-is and fails every tool call.
 function dashboardPort() {
@@ -149,6 +194,27 @@ const tools = [
     },
     annotations: { readOnlyHint: false },
   },
+  {
+    name: 'ralph_run_task',
+    description: 'Run a structured Ralph task in a project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string' },
+        id: { type: 'string' },
+        goal: { type: 'string' },
+        acceptance: { type: 'array', items: { type: 'string' }, minItems: 1 },
+        verification: { type: 'string' },
+        worker: { type: 'string', enum: ['codex', 'claude'] },
+        maxAttempts: { type: 'integer', minimum: 1, maximum: 10 },
+        reviewPolicy: { type: 'string', enum: ['none', 'risk', 'always'] },
+        model: { type: 'string' },
+      },
+      required: ['projectPath', 'id', 'goal', 'acceptance', 'verification', 'worker'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false },
+  },
 ];
 
 function daemonError(response) {
@@ -157,7 +223,7 @@ function daemonError(response) {
     : `Daemon request failed (${response.statusCode}).`;
 }
 
-async function callTool(params) {
+async function callTool(params, options = {}) {
   const name = params && typeof params.name === 'string' ? params.name : '';
   const args = params && params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments)
     ? params.arguments
@@ -210,6 +276,26 @@ async function callTool(params) {
     return response.statusCode >= 200 && response.statusCode < 300
       ? toolResult(structuredValue(response.value))
       : toolFailure(daemonError(response));
+  }
+
+  if (name === 'ralph_run_task') {
+    const task = {
+      id: args.id,
+      goal: args.goal,
+      acceptance: args.acceptance,
+      verification: args.verification,
+      worker: args.worker,
+    };
+    for (const field of ['maxAttempts', 'reviewPolicy', 'model']) {
+      if (args[field] !== undefined) task[field] = args[field];
+    }
+
+    try {
+      const service = options.ralphTaskService ?? ralphTaskService();
+      return toolResult(compactRalphResult(await service.run(args.projectPath, task)));
+    } catch (error) {
+      return toolFailure(error.message);
+    }
   }
 
   return toolFailure(`Unknown tool: ${name}.`);
