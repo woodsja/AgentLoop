@@ -7,7 +7,9 @@ const net = require('node:net');
 const { spawn, spawnSync } = require('node:child_process');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
-const WORKSPACE = path.join(REPO_ROOT, 'workspace');
+// Each harness process gets its own workspace so overlapping test runs cannot
+// wipe or reseed each other's scenario projects mid-loop.
+const WORKSPACE = path.join(REPO_ROOT, 'workspace', `run-${process.pid}`);
 const FIXTURES = path.join(__dirname, 'fixtures', 'project');
 const SCENARIOS_DIR = path.join(__dirname, 'scenarios');
 const DEFAULT_PORT = 5761;
@@ -227,6 +229,9 @@ async function startDaemon(overridePort) {
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-harness-'));
   const tempConfigPath = path.join(tempDir, 'config.json');
+  // A private state directory keeps the harness daemon off a live daemon's
+  // heartbeat, which would otherwise make the child exit as "already running".
+  const stateDir = path.join(tempDir, 'state');
 
   const testConfig = {
     dashboardPort: port,
@@ -253,12 +258,14 @@ async function startDaemon(overridePort) {
     env: {
       ...process.env,
       AGENTLOOP_CONFIG_PATH: tempConfigPath,
+      AGENTLOOP_STATE_DIR: stateDir,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 
   child.port = port;
   child.tempDir = tempDir;
+  child.stateDir = stateDir;
 
   try {
     await waitForReady(child, port);
@@ -295,17 +302,12 @@ function stopDaemon(child) {
 }
 
 function cleanWorkspace() {
-  if (!fs.existsSync(WORKSPACE)) {
-    return;
-  }
-  const entries = fs.readdirSync(WORKSPACE);
-  for (const entry of entries) {
-    rmrf(path.join(WORKSPACE, entry));
-  }
+  rmrf(WORKSPACE);
 }
 
 function collectActual(id, projectDir, mockState, waited, child) {
-  const events = readNdjson(path.join(REPO_ROOT, 'state', 'events.ndjson'));
+  const stateDir = (child && child.stateDir) || path.join(REPO_ROOT, 'state');
+  const events = readNdjson(path.join(stateDir, 'events.ndjson'));
   const invocations = readNdjson(path.join(mockState, 'invocations.ndjson'));
   const recent = waited.foundRecent || {};
   const verdicts = events

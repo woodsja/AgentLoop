@@ -1,0 +1,232 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const {
+  createJob,
+  createJobStore,
+  markTerminal,
+  recordCiState,
+  recordCorrectiveCycle,
+  recordDelivery,
+  recordFailure,
+  recordPullRequest,
+  resolveStateDir,
+  selectIssueForJobs,
+  summarizeRalphAttempt,
+} = require('../src/autopilot-state');
+const { selectReadyIssue } = require('../src/autopilot-github');
+
+const temporaryDirectories = new Set();
+
+test.afterEach(() => {
+  for (const directory of temporaryDirectories) fs.rmSync(directory, { recursive: true, force: true });
+  temporaryDirectories.clear();
+});
+
+function temporaryDirectory() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-state-'));
+  temporaryDirectories.add(directory);
+  return directory;
+}
+
+function newJob(store, number = 7, title = 'Fix totals') {
+  return createJob({
+    projectName: 'finance-dashboard',
+    repo: 'example/finance',
+    issue: { number, title },
+    branch: `ralph/issue-${number}-fix-totals`,
+    worktreePath: `/worktrees/issue-${number}`,
+    now: store.now,
+  });
+}
+
+test('persists the delivered branch and commit and rejects a foreign branch', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory);
+  const job = newJob(store, 9);
+  assert.deepEqual(job.delivery, { branch: null, commit: null, pushed: false });
+
+  recordDelivery(job, { branch: 'ralph/issue-9-fix-totals', commit: 'abc123', pushed: true });
+  store.save(job);
+  assert.deepEqual(createJobStore(directory).load(9).delivery, { branch: 'ralph/issue-9-fix-totals', commit: 'abc123', pushed: true });
+
+  assert.throws(() => recordDelivery(job, { branch: 'main', commit: 'def456', pushed: true }), /does not match job branch/);
+  assert.equal(job.delivery.commit, 'abc123');
+});
+
+test('persists every job field and reloads it through a fresh store', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory, { now: () => '2026-10-03T00:00:00.000Z' });
+  const job = newJob(store);
+  job.runs = 1;
+  job.status = 'passed';
+  job.baseRef = 'origin/main';
+  job.ralph = { status: 'passed', attempts: 2, taskId: 'autopilot:example/finance#7' };
+  recordPullRequest(job, { number: 31, url: 'https://github.com/example/finance/pull/31' });
+  recordCiState(job, 'red', 'pytest failed');
+  recordCorrectiveCycle(job);
+  recordFailure(job, 'ci', new Error('pytest failed'), store.now);
+  store.save(job);
+
+  const reloaded = createJobStore(directory).load(7);
+  assert.deepEqual(reloaded, job);
+  assert.equal(reloaded.issue.title, 'Fix totals');
+  assert.equal(reloaded.branch, 'ralph/issue-7-fix-totals');
+  assert.equal(reloaded.worktreePath, '/worktrees/issue-7');
+  assert.deepEqual(reloaded.pr, { number: 31, url: 'https://github.com/example/finance/pull/31' });
+  assert.deepEqual(reloaded.ci, { state: 'red', details: 'pytest failed' });
+  assert.equal(reloaded.correctiveCycles, 1);
+  assert.deepEqual(reloaded.failures, [{ at: '2026-10-03T00:00:00.000Z', run: 1, phase: 'ci', message: 'pytest failed' }]);
+  assert.equal(reloaded.terminal, false);
+  assert.deepEqual(createJobStore(directory).list().map(value => value.issue.number), [7]);
+});
+
+test('persists normalized CI observations with workflow run identifiers', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory, { now: () => '2026-10-03T00:00:00.000Z' });
+  const job = newJob(store);
+  const runs = [{ databaseId: 77, status: 'completed', conclusion: 'failure', name: 'test', workflowName: 'CI', url: 'https://example/run/77', startedAt: null, updatedAt: null }];
+  recordCiState(job, { state: 'red', details: 'CI (#77): completed/failure', prNumber: 31, headCommit: 'abc123', runs });
+  store.save(job);
+
+  const reloaded = createJobStore(directory).load(7);
+  assert.deepEqual(reloaded.ci, { state: 'red', details: 'CI (#77): completed/failure', prNumber: 31, headCommit: 'abc123', runs });
+  assert.throws(() => recordCiState(job, { state: 'failure', runs: [] }), /pending, green, or red/);
+  assert.throws(() => recordCiState(job, { state: 'green', runs: [{ databaseId: 0, status: 'completed' }] }), /normalized workflow runs/);
+});
+
+test('persists red CI diagnostics and the single corrective cycle before correction', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory, { now: () => '2026-10-03T00:00:00.000Z' });
+  const job = newJob(store);
+  recordCiState(job, { state: 'red', details: 'CI (#77): completed/failure', headCommit: 'abc123', diagnostics: 'pytest failed' });
+  recordCorrectiveCycle(job, { redCommit: 'abc123', diagnostics: 'pytest failed' });
+  store.save(job);
+
+  const reloaded = createJobStore(directory).load(7);
+  assert.equal(reloaded.ci.diagnostics, 'pytest failed');
+  assert.deepEqual(reloaded.correction, { cycle: 1, status: 'eligible', redCommit: 'abc123', diagnostics: 'pytest failed', commit: null });
+  assert.equal(reloaded.correctiveCycles, 1);
+  assert.throws(() => recordCorrectiveCycle(job, { redCommit: 'abc123' }), /only one CI corrective cycle/);
+  assert.throws(() => recordCiState(job, { state: 'red', diagnostics: 7 }), /diagnostics must be a string/);
+
+  const long = 'x'.repeat(50000);
+  recordCiState(job, { state: 'red', diagnostics: long });
+  assert.ok(job.ci.diagnostics.length <= 16000);
+  job.correction.status = 'bogus';
+  assert.throws(() => store.save(job), /invalid corrective cycle state/);
+});
+
+test('writes atomically and leaves no temporary files behind', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory);
+  const job = newJob(store);
+  store.save(job);
+  job.status = 'running';
+  store.save(job);
+  assert.deepEqual(fs.readdirSync(directory), ['issue-7.json']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'issue-7.json'), 'utf8')).status, 'running');
+});
+
+test('missing state is empty but malformed state is never silently ignored', () => {
+  const directory = temporaryDirectory();
+  assert.deepEqual(createJobStore(path.join(directory, 'missing')).list(), []);
+  assert.equal(createJobStore(directory).load(3), null);
+  fs.writeFileSync(path.join(directory, 'issue-3.json'), '{"schemaVersion": 1, ');
+  // A leftover temporary file from an interrupted write is not a job.
+  fs.writeFileSync(path.join(directory, '.issue-4.json.1.tmp'), 'partial');
+  assert.throws(() => createJobStore(directory).load(3), /malformed/);
+  assert.throws(() => createJobStore(directory).list(), /malformed/);
+});
+
+test('rejects an incomplete recovery record instead of treating it as a fresh job', () => {
+  const directory = temporaryDirectory();
+  const job = newJob(createJobStore(directory));
+  delete job.branch;
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'issue-7.json'), JSON.stringify(job));
+  assert.throws(() => createJobStore(directory).load(7), /missing branch/);
+});
+
+test('rejects recovery records that omit a required field or corrupt diagnostics', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory);
+  const job = newJob(store);
+  delete job.baseRef;
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'issue-7.json'), JSON.stringify(job));
+  assert.throws(() => store.load(7), /invalid base ref/);
+
+  job.baseRef = null;
+  job.failures = [{ at: '2026-10-03T00:00:00.000Z', run: 0, phase: 'ralph' }];
+  fs.writeFileSync(path.join(directory, 'issue-7.json'), JSON.stringify(job));
+  assert.throws(() => store.load(7), /invalid failure diagnostics/);
+});
+
+test('terminal state and bounded failure diagnostics survive reload', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory);
+  const job = newJob(store);
+  for (let index = 0; index < 25; index++) recordFailure(job, 'preparing', `failure ${index}`);
+  recordFailure(job, 'ralph', 'x'.repeat(10000));
+  markTerminal(job, 'needs_planning');
+  store.save(job);
+  const reloaded = store.load(7);
+  assert.equal(reloaded.terminal, true);
+  assert.equal(reloaded.terminalState, 'needs_planning');
+  assert.equal(reloaded.failures.length, 20);
+  assert.ok(reloaded.failures.at(-1).message.length <= 4000);
+});
+
+test('per-issue lock blocks a live owner and reclaims a lock from a dead or rebooted owner', () => {
+  const directory = temporaryDirectory();
+  const live = createJobStore(directory, { pid: 100, bootId: 'boot-a', isProcessAlive: () => true });
+  const lock = live.acquire(7);
+  assert.throws(() => live.acquire(7), /already owned by running process 100/);
+  lock.release();
+  live.acquire(7);
+
+  const afterCrash = createJobStore(directory, { pid: 200, bootId: 'boot-a', isProcessAlive: () => false });
+  afterCrash.acquire(7).release();
+
+  createJobStore(directory, { pid: 300, bootId: 'boot-a', isProcessAlive: () => true }).acquire(8);
+  const afterReboot = createJobStore(directory, { pid: 300, bootId: 'boot-b', isProcessAlive: () => true });
+  afterReboot.acquire(8).release();
+});
+
+test('selection resumes unfinished jobs first and never restarts terminal or passed jobs', () => {
+  const store = createJobStore(temporaryDirectory());
+  const issues = [1, 2, 3, 4].map(number => ({ number, title: `Issue ${number}` }));
+  const terminal = markTerminal(newJob(store, 1), 'needs_planning');
+  const passed = Object.assign(newJob(store, 2), { status: 'passed' });
+  const interrupted = Object.assign(newJob(store, 4), { status: 'running' });
+
+  const resumed = selectIssueForJobs(issues, [terminal, passed, interrupted], selectReadyIssue);
+  assert.equal(resumed.issue.number, 4);
+  assert.equal(resumed.job, interrupted);
+
+  const fresh = selectIssueForJobs(issues, [terminal, passed], selectReadyIssue);
+  assert.equal(fresh.issue.number, 3);
+  assert.equal(fresh.job, null);
+  assert.equal(selectIssueForJobs(issues.slice(0, 2), [terminal, passed], selectReadyIssue), null);
+});
+
+test('state directory defaults per project and honors a configured override', () => {
+  assert.equal(resolveStateDir('finance-dashboard', {}, '/state'), path.join('/state', 'finance-dashboard'));
+  assert.equal(resolveStateDir('finance-dashboard', { stateDir: '/custom' }, '/state'), path.resolve('/custom'));
+  assert.throws(() => resolveStateDir('../escape', {}, '/state'), /simple project name/);
+});
+
+test('summarizes the last Ralph attempt for diagnostics', () => {
+  assert.equal(summarizeRalphAttempt({ number: 2, status: 'worker_error', error: { message: 'codex crashed' } }),
+    'attempt 2: worker_error: codex crashed');
+  assert.match(summarizeRalphAttempt({
+    number: 1, status: 'failed', verification: { exitCode: 1, timedOut: false, stdout: '', stderr: 'AssertionError' },
+  }), /attempt 1: failed; verification exit 1\nAssertionError/);
+  assert.equal(summarizeRalphAttempt(undefined), null);
+});

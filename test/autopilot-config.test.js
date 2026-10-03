@@ -16,6 +16,7 @@ const expectedFinanceDashboard = {
   humanLabel: 'ready-for-human',
   worker: 'codex',
   maxAttempts: 2,
+  prepareVenv: true,
   verification: '.venv/bin/finance-dashboard check && .venv/bin/python -m pytest && .venv/bin/ruff check && git diff --check',
   autoMerge: false,
 };
@@ -56,6 +57,22 @@ test('configPath overrides the repository-root configuration path', () => {
   });
 });
 
+test('defaults the normal worker to Codex when no explicit worker is configured', () => {
+  const config = validProject();
+  delete config.worker;
+  const configPath = writeConfig({ demo: config });
+  assert.equal(loadProjectConfig('demo', { configPath }).worker, 'codex');
+});
+
+test('defaults attempts to two but preserves an explicit project retry limit', () => {
+  const defaulted = validProject();
+  delete defaulted.maxAttempts;
+  const configPath = writeConfig({ defaulted, explicit: { ...validProject(), maxAttempts: 3 } });
+
+  assert.equal(loadProjectConfig('defaulted', { configPath }).maxAttempts, 2);
+  assert.equal(loadProjectConfig('explicit', { configPath }).maxAttempts, 3);
+});
+
 test('unknown projects fail with a clear error', () => {
   assert.throws(() => loadProjectConfig('missing-project'), /Unknown autopilot project: missing-project/);
 });
@@ -81,7 +98,8 @@ test('representative invalid project field values are rejected', () => {
     autoMerge: null,
     repo: '  ',
     worker: 'other',
-    maxAttempts: 11,
+    maxAttempts: 1.5,
+    prepareVenv: 'yes',
   };
 
   for (const [field, value] of Object.entries(invalidFields)) {

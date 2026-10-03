@@ -15,22 +15,28 @@ function resolveConfigPath() {
   return path.join(root, 'config.json');
 }
 
+// An isolated state directory lets a harness daemon run beside a live daemon
+// without contending for its heartbeat, queue, or event log.
+const stateRoot = process.env.AGENTLOOP_STATE_DIR
+  ? path.resolve(process.env.AGENTLOOP_STATE_DIR)
+  : path.join(root, 'state');
+
 const paths = {
   root,
   config: resolveConfigPath(),
-  state: path.join(root, 'state'),
-  tasks: path.join(root, 'state', 'tasks'),
-  taskRuns: path.join(root, 'state', 'task-runs'),
-  pending: path.join(root, 'state', 'tasks', 'pending'),
-  running: path.join(root, 'state', 'tasks', 'running'),
-  done: path.join(root, 'state', 'tasks', 'done'),
-  results: path.join(root, 'state', 'results'),
-  logs: path.join(root, 'state', 'logs'),
-  events: path.join(root, 'state', 'events.ndjson'),
-  messages: path.join(root, 'state', 'messages.ndjson'),
-  daemon: path.join(root, 'state', 'daemon.json'),
-  bridge: path.join(root, 'state', 'bridge.json'),
-  mcpToken: path.join(root, 'state', 'mcp-token'),
+  state: stateRoot,
+  tasks: path.join(stateRoot, 'tasks'),
+  taskRuns: path.join(stateRoot, 'task-runs'),
+  pending: path.join(stateRoot, 'tasks', 'pending'),
+  running: path.join(stateRoot, 'tasks', 'running'),
+  done: path.join(stateRoot, 'tasks', 'done'),
+  results: path.join(stateRoot, 'results'),
+  logs: path.join(stateRoot, 'logs'),
+  events: path.join(stateRoot, 'events.ndjson'),
+  messages: path.join(stateRoot, 'messages.ndjson'),
+  daemon: path.join(stateRoot, 'daemon.json'),
+  bridge: path.join(stateRoot, 'bridge.json'),
+  mcpToken: path.join(stateRoot, 'mcp-token'),
 };
 
 // 50 messages x 2000 code points x 4 bytes, plus JSON overhead and headroom.

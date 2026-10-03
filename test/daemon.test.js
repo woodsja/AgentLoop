@@ -176,8 +176,33 @@ test('a checkpoint only adopts a commit that touched the project', () => {
 });
 
 test('a queued loop revalidates its tree before the first checkpoint', () => {
-  assert.match(daemonSource, /sameProjectTree\(loop\.gitAtQueue, gitSnapshot\(loop\.projectPath\)\)/);
+  assert.match(daemonSource, /projectTreeUnchanged\(loop\.gitAtQueue, loop\.projectPath\)/);
   assert.match(daemonSource, /'dirty_project_tree'/);
+});
+
+test('the start gate passes an unchanged tree and rejects real drift', (t) => {
+  const repo = tempRepo();
+
+  if (!repo) {
+    t.skip('git unavailable');
+    return;
+  }
+
+  try {
+    fs.writeFileSync(path.join(repo.dir, 'app.js'), 'one\n');
+    repo.git('add', '-A', '.');
+    repo.git('commit', '-qm', 'seed');
+
+    const queued = daemon.gitSnapshot(repo.dir);
+
+    assert.equal(daemon.projectTreeUnchanged(queued, repo.dir), true);
+
+    fs.writeFileSync(path.join(repo.dir, 'app.js'), 'two\n');
+    assert.equal(daemon.projectTreeUnchanged(queued, repo.dir, 2), false);
+    assert.equal(daemon.projectTreeUnchanged(null, repo.dir, 1), false);
+  } finally {
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+  }
 });
 
 test('the start gate reads the tree, not the revision', () => {

@@ -31,17 +31,28 @@ function validateProject(projectName, project) {
     }
   }
 
+  if (Object.hasOwn(project, 'prepareVenv') && typeof project.prepareVenv !== 'boolean') {
+    throw new TypeError(`prepareVenv for project ${projectName} must be a boolean`);
+  }
+
+  if (Object.hasOwn(project, 'stateDir') && !isNonEmptyString(project.stateDir)) {
+    throw new TypeError(`stateDir for project ${projectName} must be a non-empty string`);
+  }
+
   for (const field of STRING_FIELDS) {
     if (!isNonEmptyString(project[field])) {
       throw new TypeError(`${field} for project ${projectName} must be a non-empty string`);
     }
   }
 
-  if (project.worker !== 'codex' && project.worker !== 'claude') {
+  // Codex is the safe autonomous default.  Claude is intentionally opt-in so
+  // an omitted worker cannot silently select a different CLI.
+  if (Object.hasOwn(project, 'worker') && project.worker !== 'codex' && project.worker !== 'claude') {
     throw new TypeError(`worker for project ${projectName} must be codex or claude`);
   }
 
-  if (!Number.isInteger(project.maxAttempts) || project.maxAttempts < 1 || project.maxAttempts > 10) {
+  if (Object.hasOwn(project, 'maxAttempts') &&
+      (!Number.isInteger(project.maxAttempts) || project.maxAttempts < 1 || project.maxAttempts > 10)) {
     throw new TypeError(`maxAttempts for project ${projectName} must be an integer from 1 through 10`);
   }
 }
@@ -82,7 +93,14 @@ function loadProjectConfig(projectName, options = {}) {
 
   const project = projects[projectName];
   validateProject(projectName, project);
-  return { ...project };
+  return {
+    ...project,
+    worker: project.worker ?? 'codex',
+    // Keep the normal autonomous run bounded, while allowing an explicit
+    // project policy to choose a different retry limit.
+    maxAttempts: project.maxAttempts ?? 2,
+    prepareVenv: project.prepareVenv ?? false,
+  };
 }
 
 module.exports = { loadProjectConfig };

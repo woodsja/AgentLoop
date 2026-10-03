@@ -1543,7 +1543,7 @@ function startLoop(loop) {
 
   // The enqueue gate approved a tree that can drift while the loop waits for a slot.
   // A loop queued before the snapshot existed has no baseline to compare, so it is left alone.
-  if (loop.gitAtQueue && !sameProjectTree(loop.gitAtQueue, gitSnapshot(loop.projectPath))) {
+  if (loop.gitAtQueue && !projectTreeUnchanged(loop.gitAtQueue, loop.projectPath)) {
     completeLoop(runningLoop, 'failed', dirtyTreeError, 'dirty_project_tree');
     return;
   }
@@ -2125,7 +2125,10 @@ function runGit(projectPath, args) {
       timeout: 15000,
     });
 
-    if (result.error || result.status !== 0) {
+    // Some constrained runtimes report EPERM on spawnSync even though the
+    // child completed successfully and returned usable output.  Exit status
+    // remains authoritative for a completed git command.
+    if (result.status !== 0) {
       const output = String(result.stderr || result.stdout || (result.error && result.error.message) || '').trim();
       return { ok: false, output };
     }
@@ -2186,6 +2189,22 @@ function gitSnapshot(projectPath) {
 // Cleanliness asks only whether the project's own files drifted, never where the revision sits.
 function sameProjectTree(before, after) {
   return Boolean(before) && Boolean(after) && before.tree === after.tree && before.dirty === after.dirty;
+}
+
+// A transient git failure (lock contention, a spawn hiccup) yields no snapshot, which would read as
+// drift. A few short retries separate that from a tree that really changed, which stays changed.
+function projectTreeUnchanged(before, projectPath, attempts = 4) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (sameProjectTree(before, gitSnapshot(projectPath))) {
+      return true;
+    }
+
+    if (attempt < attempts) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50 * attempt);
+    }
+  }
+
+  return false;
 }
 
 function madeNoChanges(before, after) {
@@ -2813,7 +2832,7 @@ function start() {
   };
 
   if (!store.acquireHeartbeat(daemonInfo)) {
-    console.log('AgentLoop daemon is already running.');
+    console.error(`AgentLoop daemon is already running (state ${store.paths.state}).`);
     return;
   }
 
@@ -2864,6 +2883,7 @@ module.exports = {
   cycleTaskNumber,
   gitSnapshot,
   sameProjectTree,
+  projectTreeUnchanged,
   madeNoChanges,
   workerCommitSha,
   hasPassedCycle,

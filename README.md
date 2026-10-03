@@ -172,6 +172,18 @@ The shipped `config.json` includes every key above except the optional `enginePa
 
 A model named on the task or loop itself wins over `models`.
 
+## Scheduled autopilot (systemd user timer)
+
+`src/autopilot-systemd.js` installs `ralph-finance-autopilot.service` (a oneshot `node src/autopilot.js --project finance-dashboard` pass) and `ralph-finance-autopilot.timer` (`OnCalendar=*:0/5`, `Persistent=true`) into `~/.config/systemd/user`. It does not start the AgentLoop daemon.
+
+```bash
+node src/autopilot-systemd.js --root /home/woodsja/tools/ralph-autopilot --run-once
+```
+
+It reloads the user manager, runs `systemctl --user enable --now` on the timer, and with `--run-once` starts the service once and fails if that pass fails. It then checks `loginctl show-user <user> --property=Linger`. If lingering is off, it tries `loginctl enable-linger <user>`. If that is refused, it prints the exact error as the permission boundary and leaves the rest of the install in place. Add `--dry-run` to print the units without installing them.
+
+A disabled project, like `finance-dashboard` with `"enabled": false`, makes each scheduled pass exit 0 right away. It does not do issue discovery, cleanup, or workspace preparation.
+
 ## Supported platforms
 
 Windows is the primary path:
