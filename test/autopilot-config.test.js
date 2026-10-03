@@ -20,8 +20,17 @@ const expectedFinanceDashboard = {
   autoMerge: false,
 };
 
+const temporaryDirectories = new Set();
+
+test.after(() => {
+  for (const directory of temporaryDirectories) {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function writeConfig(config) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-autopilot-config-'));
+  temporaryDirectories.add(directory);
   const configPath = path.join(directory, 'projects.json');
   fs.writeFileSync(configPath, typeof config === 'string' ? config : JSON.stringify(config));
   return configPath;
