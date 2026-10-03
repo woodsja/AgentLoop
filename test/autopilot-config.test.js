@@ -1,0 +1,82 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const { loadProjectConfig } = require('../src/autopilot-config');
+
+const expectedFinanceDashboard = {
+  enabled: false,
+  repo: 'woodsja/finance-dashboard',
+  checkout: '/home/woodsja/finance-dashboard',
+  worktreeRoot: '/home/woodsja/worktrees/finance-dashboard',
+  baseBranch: 'main',
+  readyLabel: 'ready-for-agent',
+  humanLabel: 'ready-for-human',
+  worker: 'codex',
+  maxAttempts: 2,
+  verification: '.venv/bin/finance-dashboard check && .venv/bin/python -m pytest && .venv/bin/ruff check && git diff --check',
+  autoMerge: false,
+};
+
+function writeConfig(config) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-autopilot-config-'));
+  const configPath = path.join(directory, 'projects.json');
+  fs.writeFileSync(configPath, typeof config === 'string' ? config : JSON.stringify(config));
+  return configPath;
+}
+
+function validProject() {
+  return { ...expectedFinanceDashboard };
+}
+
+test('loads the shipped finance-dashboard configuration as a new object', () => {
+  const project = loadProjectConfig('finance-dashboard');
+
+  assert.deepEqual(project, expectedFinanceDashboard);
+  assert.notStrictEqual(project, loadProjectConfig('finance-dashboard'));
+});
+
+test('configPath overrides the repository-root configuration path', () => {
+  const configPath = writeConfig({ demo: { ...validProject(), repo: 'example/demo' } });
+
+  assert.deepEqual(loadProjectConfig('demo', { configPath }), {
+    ...validProject(),
+    repo: 'example/demo',
+  });
+});
+
+test('unknown projects fail with a clear error', () => {
+  assert.throws(() => loadProjectConfig('missing-project'), /Unknown autopilot project: missing-project/);
+});
+
+test('malformed JSON and missing configuration files fail closed', () => {
+  const malformedPath = writeConfig('{ not json');
+  const missingPath = path.join(os.tmpdir(), 'ralph-autopilot-does-not-exist.json');
+
+  assert.throws(() => loadProjectConfig('demo', { configPath: malformedPath }), /Invalid JSON/);
+  assert.throws(() => loadProjectConfig('demo', { configPath: missingPath }), /Unable to read autopilot project configuration/);
+});
+
+test('invalid top-level configuration shapes are rejected', () => {
+  for (const config of [[], null, 'projects']) {
+    const configPath = writeConfig(JSON.stringify(config));
+    assert.throws(() => loadProjectConfig('demo', { configPath }), /must be an object mapping/);
+  }
+});
+
+test('representative invalid project field values are rejected', () => {
+  const invalidFields = {
+    enabled: 'false',
+    autoMerge: null,
+    repo: '  ',
+    worker: 'other',
+    maxAttempts: 11,
+  };
+
+  for (const [field, value] of Object.entries(invalidFields)) {
+    const configPath = writeConfig({ demo: { ...validProject(), [field]: value } });
+    assert.throws(() => loadProjectConfig('demo', { configPath }), new RegExp(field));
+  }
+});

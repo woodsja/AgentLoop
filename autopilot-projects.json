@@ -1,0 +1,15 @@
+{
+  "finance-dashboard": {
+    "enabled": false,
+    "repo": "woodsja/finance-dashboard",
+    "checkout": "/home/woodsja/finance-dashboard",
+    "worktreeRoot": "/home/woodsja/worktrees/finance-dashboard",
+    "baseBranch": "main",
+    "readyLabel": "ready-for-agent",
+    "humanLabel": "ready-for-human",
+    "worker": "codex",
+    "maxAttempts": 2,
+    "verification": ".venv/bin/finance-dashboard check && .venv/bin/python -m pytest && .venv/bin/ruff check && git diff --check",
+    "autoMerge": false
+  }
+}
