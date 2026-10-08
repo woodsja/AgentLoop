@@ -189,6 +189,11 @@ test('best-effort cleans a destination created by a failed worktree add', async 
   function failingGit(command, args, options, callback) {
     assert.equal(command, 'git');
     assert.equal(options.shell, false);
+    assert.equal(options.timeout, 60 * 1000);
+    assert.equal(options.killSignal, 'SIGTERM');
+    assert.equal(options.maxBuffer, 1024 * 1024);
+    assert.equal(options.env.GH_PROMPT_DISABLED, '1');
+    assert.equal(options.env.GIT_TERMINAL_PROMPT, '0');
     if (args[0] === 'show-ref') {
       const error = new Error('branch absent');
       error.code = 1;

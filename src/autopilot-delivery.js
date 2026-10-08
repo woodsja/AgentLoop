@@ -1,11 +1,12 @@
 'use strict';
 
 const { execFile } = require('node:child_process');
+const { unattendedOptions } = require('./autopilot-subprocess');
 
 function run(command, args, cwd, executeFile, operation) {
   return new Promise((resolve, reject) => {
     try {
-      executeFile(command, args, { cwd, encoding: 'utf8', maxBuffer: 1024 * 1024, shell: false }, (error, stdout, stderr) => {
+      executeFile(command, args, unattendedOptions({ cwd, encoding: 'utf8', maxBuffer: 1024 * 1024, shell: false }), (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`Autopilot delivery failed while ${operation}${stderr ? `: ${String(stderr).trim()}` : ''}`));
           return;

@@ -2,13 +2,17 @@
 
 // Separate from cli-worker: the reviewer only receives fixed data on stdin.
 const { execFile, spawn } = require('node:child_process');
+const os = require('node:os');
+const { unattendedOptions } = require('./autopilot-subprocess');
 
 const MAX_DIFF_BYTES = 240 * 1024;
 const MAX_CONTEXT_BYTES = 48 * 1024;
 const MAX_OUTPUT_BYTES = 32 * 1024;
 const MAX_STANDARDS_FILES = 64;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
+const DEFAULT_TERMINATION_GRACE_MS = 1000;
 const REVIEW_MODELS = new Set(['sonnet', 'opus']);
+const REVIEW_BUDGET_USD = Object.freeze({ sonnet: 2, opus: 5 });
 
 function isObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function byteLength(value) { return Buffer.byteLength(String(value), 'utf8'); }
@@ -29,13 +33,17 @@ function reviewerEnvironment(base = process.env) {
   delete environment.CLAUDECODE;
   delete environment.CLAUDE_CODE_ENTRYPOINT;
   delete environment.CLAUDE_CODE_SSE_PORT;
+  // The reviewer authenticates Claude itself, but must never inherit a token
+  // that would let prompt content use the daemon's GitHub authority.
+  delete environment.GH_TOKEN;
+  delete environment.GITHUB_TOKEN;
   return environment;
 }
 
 function runCommand(file, args, executeFile, operation, options = {}) {
   return new Promise((resolve, reject) => {
     try {
-      executeFile(file, args, { encoding: 'utf8', maxBuffer: MAX_DIFF_BYTES + 1, shell: false }, (error, stdout) => {
+      executeFile(file, args, unattendedOptions({ encoding: 'utf8', maxBuffer: MAX_DIFF_BYTES + 1, shell: false }), (error, stdout) => {
         if (error) return reject(new Error(`Claude review failed closed: ${operation} is unavailable`));
         try { resolve(bounded(stdout, options.limit || MAX_DIFF_BYTES, operation)); } catch (failure) { reject(failure); }
       });
@@ -54,7 +62,7 @@ async function githubReviewMaterial(project, issue, pullRequest, headCommit, exe
   let pr; let githubIssue;
   try { pr = JSON.parse(prText); githubIssue = JSON.parse(issueText); } catch { throw new Error('Claude review failed closed: GitHub returned malformed review context'); }
   if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha || !isObject(githubIssue) || githubIssue.number !== issue.number || typeof githubIssue.title !== 'string' || typeof githubIssue.body !== 'string') throw new Error('Claude review failed closed: GitHub review context does not match the delivered PR and issue');
-  const diff = await runCommand('gh', ['pr', 'diff', String(pullRequest.number), '--repo', project.repo, '--patch'], executeFile, 'PR diff lookup', { limit: MAX_DIFF_BYTES });
+  const diff = await runCommand('gh', ['pr', 'diff', String(pullRequest.number), '--repo', project.repo], executeFile, 'PR diff lookup', { limit: MAX_DIFF_BYTES });
   if (!diff.trim()) throw new Error('Claude review failed closed: PR diff is absent');
   let finalPr;
   try { finalPr = JSON.parse(await runCommand('gh', prArgs, executeFile, 'PR head recheck')); } catch { throw new Error('Claude review failed closed: GitHub returned malformed PR head'); }
@@ -62,11 +70,19 @@ async function githubReviewMaterial(project, issue, pullRequest, headCommit, exe
   return { diff, issue: githubIssue };
 }
 
+async function assertPrHeadUnchanged(project, pullRequest, headCommit, executeFile, operation = 'model review') {
+  const sha = deliveredSha(headCommit);
+  const prArgs = ['pr', 'view', String(pullRequest.number), '--repo', project.repo, '--json', 'number,headRefOid'];
+  let pr;
+  try { pr = JSON.parse(await runCommand('gh', prArgs, executeFile, 'PR head recheck')); } catch { throw new Error('Claude review failed closed: GitHub returned malformed PR head'); }
+  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha) throw new Error(`Claude review failed closed: PR head changed during ${operation}`);
+}
+
 async function repositoryStandards(project, headCommit, executeFile) {
   if (!project || typeof project.checkout !== 'string' || !project.checkout.trim()) throw new Error('Claude review failed closed: repository checkout is required for standards guidance');
   const sha = deliveredSha(headCommit);
-  const names = await runCommand('git', ['-C', project.checkout, 'ls-tree', '-r', '--name-only', sha], executeFile, 'repository standards lookup', { limit: MAX_CONTEXT_BYTES });
-  const paths = names.split('\n').filter(path => /(^|\/)AGENTS\.md$/.test(path) && /^[^\0\r\n]+$/.test(path));
+  const names = await runCommand('git', ['-C', project.checkout, 'ls-tree', '-r', '--name-only', sha, '--', 'AGENTS.md', ':(glob)**/AGENTS.md'], executeFile, 'repository standards lookup', { limit: MAX_CONTEXT_BYTES });
+  const paths = [...new Set(names.split('\n').filter(path => /(^|\/)AGENTS\.md$/.test(path) && /^[^\0\r\n]+$/.test(path)))];
   if (paths.length > MAX_STANDARDS_FILES) throw new Error('Claude review failed closed: repository standards guidance has too many files');
   const standards = [];
   let totalBytes = 0;
@@ -118,28 +134,50 @@ function parseVerdict(output, model, headCommit) {
   if (verdict.verdict === 'NEEDS_CHANGES' && typeof verdict.findings === 'string' && verdict.findings.trim()) return { reviewer: `claude:${model}`, verdict: 'NEEDS_CHANGES', commit: headCommit, findings: verdict.findings.trim() };
   throw new Error('Claude review failed closed: reviewer findings do not match the verdict');
 }
-function runClaude(executeSpawn, model, prompt, timeoutMs) {
+function runClaude(executeSpawn, model, prompt, timeoutMs, terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS) {
   return new Promise((resolve, reject) => {
-    let child; let stdout = ''; let settled = false; let timer;
+    let child; let stdout = ''; let settled = false; let timer; let killTimer; let closed = false; let terminating = false;
     const finish = error => { if (!settled) { settled = true; clearTimeout(timer); error ? reject(error) : resolve(stdout); } };
-    try { child = executeSpawn('claude', ['-p', '--safe-mode', '--strict-mcp-config', '--permission-mode', 'plan', '--permission-prompts', 'none', '--tools', '', '--output-format', 'json', '--model', model], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, env: reviewerEnvironment() }); } catch { reject(new Error('Claude review failed closed: reviewer process could not start')); return; }
-    timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} finish(new Error('Claude review failed closed: reviewer timed out')); }, timeoutMs);
-    child.stdout.on('data', chunk => { stdout += String(chunk); if (byteLength(stdout) > MAX_OUTPUT_BYTES) { try { child.kill('SIGTERM'); } catch {} finish(new Error('Claude review failed closed: reviewer output exceeds its safe size limit')); } });
+    const terminate = error => {
+      if (terminating) return;
+      terminating = true;
+      try { child.kill('SIGTERM'); } catch {}
+      // Do not leave a term-ignoring CLI consuming a paid session after the
+      // caller has failed closed. `close` clears this when SIGTERM succeeds.
+      killTimer = setTimeout(() => {
+        if (!closed) {
+          try { child.kill('SIGKILL'); } catch {}
+        }
+      }, terminationGraceMs);
+      finish(error);
+    };
+    try { child = executeSpawn('claude', ['-p', '--safe-mode', '--strict-mcp-config', '--permission-mode', 'plan', '--permission-prompts', 'none', '--tools', '', '--no-session-persistence', '--max-budget-usd', String(REVIEW_BUDGET_USD[model]), '--output-format', 'json', '--model', model], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, cwd: os.tmpdir(), env: reviewerEnvironment() }); } catch { reject(new Error('Claude review failed closed: reviewer process could not start')); return; }
+    timer = setTimeout(() => terminate(new Error('Claude review failed closed: reviewer timed out')), timeoutMs);
+    child.stdout.on('data', chunk => { stdout += String(chunk); if (byteLength(stdout) > MAX_OUTPUT_BYTES) terminate(new Error('Claude review failed closed: reviewer output exceeds its safe size limit')); });
     child.stderr.on('data', () => {});
     child.once('error', () => finish(new Error('Claude review failed closed: reviewer process failed')));
-    child.once('close', code => finish(code === 0 ? null : new Error('Claude review failed closed: reviewer exited unsuccessfully')));
-    try { child.stdin.end(prompt); } catch { finish(new Error('Claude review failed closed: reviewer input failed')); }
+    child.once('close', code => { closed = true; clearTimeout(killTimer); finish(code === 0 ? null : new Error('Claude review failed closed: reviewer exited unsuccessfully')); });
+    // `end()` can report EPIPE asynchronously after a fast CLI exit.  Attach
+    // this before writing so EventEmitter never turns it into an uncaught error.
+    child.stdin.once('error', () => terminate(new Error('Claude review failed closed: reviewer input failed')));
+    // A synchronous write failure is just as capable of leaving a live child
+    // behind as an asynchronous EPIPE, so use the same bounded termination
+    // path in both cases.
+    try { child.stdin.end(prompt); } catch { terminate(new Error('Claude review failed closed: reviewer input failed')); }
   });
 }
 function createClaudeReviewAdapter(options = {}) {
-  const executeFile = options.execFile || execFile; const executeSpawn = options.spawn || spawn; const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const executeFile = options.execFile || execFile; const executeSpawn = options.spawn || spawn; const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS; const terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError('Claude review timeoutMs must be a positive integer');
+  if (!Number.isSafeInteger(terminationGraceMs) || terminationGraceMs < 1) throw new TypeError('Claude review terminationGraceMs must be a positive integer');
   return async context => {
     const { project, issue, pullRequest, headCommit, verification } = context || {}; const model = reviewerModel(project);
     const material = await githubReviewMaterial(project, issue, pullRequest, headCommit, executeFile);
     const standards = await repositoryStandards(project, headCommit, executeFile);
-    return parseVerdict(await runClaude(executeSpawn, model, buildReviewPrompt({ repo: project.repo, pullRequest, headCommit, issue: material.issue, standards, verification, diff: material.diff }), timeoutMs), model, headCommit);
+    const output = await runClaude(executeSpawn, model, buildReviewPrompt({ repo: project.repo, pullRequest, headCommit, issue: material.issue, standards, verification, diff: material.diff }), timeoutMs, terminationGraceMs);
+    await assertPrHeadUnchanged(project, pullRequest, headCommit, executeFile);
+    return parseVerdict(output, model, headCommit);
   };
 }
 
-module.exports = { MAX_DIFF_BYTES, MAX_OUTPUT_BYTES, createClaudeReviewAdapter, githubReviewMaterial, repositoryStandards, buildReviewPrompt, parseVerdict, reviewerEnvironment };
+module.exports = { MAX_DIFF_BYTES, MAX_OUTPUT_BYTES, createClaudeReviewAdapter, githubReviewMaterial, repositoryStandards, buildReviewPrompt, parseVerdict, reviewerEnvironment, assertPrHeadUnchanged };

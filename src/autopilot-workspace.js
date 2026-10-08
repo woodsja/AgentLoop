@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
+const { unattendedOptions } = require('./autopilot-subprocess');
 
 const MAX_SLUG_LENGTH = 48;
 
@@ -56,12 +57,12 @@ function gitFailure(operation) {
 function runGit(args, cwd, executeFile = execFile, operation) {
   return new Promise((resolve, reject) => {
     try {
-      executeFile('git', args, {
+      executeFile('git', args, unattendedOptions({
         cwd,
         encoding: 'utf8',
         maxBuffer: 1024 * 1024,
         shell: false,
-      }, (error, stdout) => {
+      }), (error, stdout) => {
         if (error) {
           reject(gitFailure(operation));
           return;
@@ -77,12 +78,12 @@ function runGit(args, cwd, executeFile = execFile, operation) {
 function runGitAllowMissingBranch(args, cwd, executeFile) {
   return new Promise((resolve, reject) => {
     try {
-      executeFile('git', args, {
+      executeFile('git', args, unattendedOptions({
         cwd,
         encoding: 'utf8',
         maxBuffer: 1024 * 1024,
         shell: false,
-      }, (error) => {
+      }), (error) => {
         if (!error) {
           resolve(true);
         } else if (error.code === 1) {

@@ -23,6 +23,11 @@ function stub(commands, responses) {
   return (file, args, options, callback) => {
     commands.push([file, args]);
     assert.equal(options.shell, false);
+    assert.equal(options.timeout, 60 * 1000);
+    assert.equal(options.killSignal, 'SIGTERM');
+    assert.equal(options.maxBuffer, 1024 * 1024);
+    assert.equal(options.env.GH_PROMPT_DISABLED, '1');
+    assert.equal(options.env.GIT_TERMINAL_PROMPT, '0');
     const response = responses.shift() || {};
     callback(response.error || null, response.stdout || '', response.stderr || '');
   };

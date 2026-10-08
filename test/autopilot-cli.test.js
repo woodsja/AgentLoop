@@ -465,8 +465,9 @@ test('a second reviewer block and an interrupted reviewer worker are exhausted w
   assert.match(recovered.failures.at(-1).message, /interrupted after Ralph started/);
 });
 
-test('an always-review project fails closed for absent, invalid, or mismatched review results', async () => {
-  for (const review of [undefined, { reviewer: 'reviewer', verdict: 'PASS', commit: 'other-sha' }, { reviewer: 'reviewer', verdict: 'APPROVE', commit: 'abc123' }]) {
+test('an always-review project fails closed for absent, invalid, mismatched, or finding-bearing PASS review results', async () => {
+  const inheritedFindingPass = Object.assign(Object.create({ findings: 'inherited unresolved defect' }), { reviewer: 'injected-reviewer', verdict: 'PASS', commit: 'abc123' });
+  for (const review of [undefined, { reviewer: 'reviewer', verdict: 'PASS', commit: 'other-sha' }, { reviewer: 'reviewer', verdict: 'APPROVE', commit: 'abc123' }, { reviewer: 'injected-reviewer', verdict: 'PASS', commit: 'abc123', findings: 'src/app.js:1: unresolved defect' }, inheritedFindingPass]) {
     const store = temporaryStore();
     const issue = { number: 231, title: 'Fail closed review', body: '' };
     const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };

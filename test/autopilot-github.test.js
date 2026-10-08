@@ -14,9 +14,22 @@ function ghResponse(stdout, error = null, stderr = '') {
     assert.equal(file, 'gh');
     assert.deepEqual(args, ['issue', 'list', '--repo', 'example/repo', '--state', 'open', '--label', 'ready', '--json', 'number,title,body,state', '--limit', '1000']);
     assert.equal(options.shell, false);
+    assert.equal(options.timeout, 60 * 1000);
+    assert.equal(options.killSignal, 'SIGTERM');
+    assert.equal(options.maxBuffer, 1024 * 1024);
+    assert.equal(options.env.GH_PROMPT_DISABLED, '1');
+    assert.equal(options.env.GIT_TERMINAL_PROMPT, '0');
     callback(error, stdout, stderr);
     return {};
   };
+}
+
+function assertUnattendedGhOptions(options) {
+  assert.equal(options.shell, false);
+  assert.equal(options.timeout, 60 * 1000);
+  assert.equal(options.killSignal, 'SIGTERM');
+  assert.equal(options.env.GH_PROMPT_DISABLED, '1');
+  assert.equal(options.env.GIT_TERMINAL_PROMPT, '0');
 }
 
 test('discovers and normalizes ready issues in oldest issue-number order', async () => {
@@ -61,7 +74,7 @@ test('observes the persisted PR head through GitHub Actions and normalizes workf
   assert.equal((await observe([{ ...base, databaseId: 130, conclusion: 'failure' }, base])).state, 'red');
   assert.deepEqual(calls[0][0], 'gh');
   assert.deepEqual(calls[0][1], ['run', 'list', '--repo', 'example/repo', '--commit', 'deadbeef', '--json', 'databaseId,status,conclusion,name,workflowName,url,startedAt,updatedAt', '--limit', '100']);
-  assert.equal(calls[0][2].shell, false);
+  assertUnattendedGhOptions(calls[0][2]);
 });
 
 test('CI observation rejects malformed Actions responses', async () => {
@@ -88,7 +101,7 @@ test('collects deterministic failed job and log diagnostics without re-running w
   const collect = () => collectCiFailureDiagnostics({ repo: 'example/repo' }, observation, {
     execFile: (file, args, options, callback) => {
       calls.push([file, args]);
-      assert.equal(options.shell, false);
+      assertUnattendedGhOptions(options);
       callback(null, args.includes('--log-failed') ? log : jobs, '');
     },
   });

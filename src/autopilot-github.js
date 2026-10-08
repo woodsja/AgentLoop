@@ -1,6 +1,7 @@
 'use strict';
 
 const { execFile } = require('node:child_process');
+const { unattendedOptions } = require('./autopilot-subprocess');
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -9,7 +10,7 @@ function isPlainObject(value) {
 function runGh(args, executeFile, operation = 'GitHub issue discovery', maxBuffer = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     try {
-      executeFile('gh', args, { encoding: 'utf8', maxBuffer, shell: false }, (error, stdout, stderr) => {
+      executeFile('gh', args, unattendedOptions({ encoding: 'utf8', maxBuffer, shell: false }), (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`${operation} failed: gh exited unsuccessfully${stderr ? `: ${String(stderr).trim()}` : ''}`));
           return;

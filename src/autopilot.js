@@ -91,7 +91,10 @@ function handToHuman(job, phase, message, now) {
 function matchingPass(review, commit) {
   if (!review || typeof review !== 'object' || Array.isArray(review)
     || typeof review.reviewer !== 'string' || !review.reviewer.trim()
-    || review.verdict !== 'PASS' || review.commit !== commit) return null;
+    || review.verdict !== 'PASS' || review.commit !== commit
+    // Injected adapters are untrusted too: a PASS cannot smuggle unresolved
+    // findings past the one-shot merge-readiness gate.
+    || (review.findings !== undefined && review.findings !== '')) return null;
   return { reviewer: review.reviewer, verdict: 'PASS', commit };
 }
 
