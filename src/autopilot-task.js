@@ -46,6 +46,24 @@ function buildAutopilotTask(project, issue, instructions) {
 // instructions, and the persisted red-CI diagnostics.  Verification is the
 // same deterministic project command as the original run.
 function buildCorrectiveTask(project, issue, instructions, correction) {
+  if (correction && correction.kind === 'review') {
+    if (correction.cycle !== 1 || typeof correction.reviewCommit !== 'string' || !correction.reviewCommit
+      || typeof correction.reviewer !== 'string' || !correction.reviewer.trim()
+      || typeof correction.findings !== 'string' || !correction.findings.trim()) {
+      throw new TypeError('Reviewer corrective task construction requires the one allowed cycle, reviewer identity, findings, and reviewed commit');
+    }
+    const original = buildAutopilotTask(project, issue, instructions);
+    return {
+      ...original,
+      id: `${original.id}:review-correction-${correction.cycle}`,
+      goal: `Address independent code review findings for GitHub issue #${issue.number}: ${issue.title}\n\n`
+        + `The branch contains delivered commit ${correction.reviewCommit}, reviewed by ${correction.reviewer}. `
+        + 'Make the smallest code change that addresses the findings while preserving the original issue requirements. '
+        + 'Do not change CI workflow files merely to silence checks.\n\n'
+        + `Reviewer findings:\n${correction.findings.trim()}\n\n${original.goal}`,
+      acceptance: [...original.acceptance, 'Address the reviewer findings in the task goal with a code change on this branch.'],
+    };
+  }
   if (!correction || correction.cycle !== 1 || typeof correction.diagnostics !== 'string' || !correction.diagnostics.trim()
     || typeof correction.redCommit !== 'string' || !correction.redCommit) {
     throw new TypeError('Corrective task construction requires the one allowed cycle, persisted CI diagnostics, and the red commit');

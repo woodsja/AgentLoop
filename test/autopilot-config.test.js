@@ -98,6 +98,7 @@ test('representative invalid project field values are rejected', () => {
     autoMerge: null,
     repo: '  ',
     worker: 'other',
+    reviewModel: 'haiku',
     maxAttempts: 1.5,
     prepareVenv: 'yes',
   };

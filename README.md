@@ -184,6 +184,8 @@ It reloads the user manager, runs `systemctl --user enable --now` on the timer, 
 
 A disabled project, like `finance-dashboard` with `"enabled": false`, makes each scheduled pass exit 0 right away. It does not do issue discovery, cleanup, or workspace preparation.
 
+Projects may opt into a post-green-CI review gate with `"reviewPolicy": "always"` (or `"risk"`). The default reviewer is a separate, read-only Claude Sonnet process; set `"reviewModel": "opus"` to choose Opus. It fetches the PR patch and issue context through `gh`, reads repository `AGENTS.md` guidance from the delivered commit, has its Claude tools explicitly disabled, and accepts only a strict JSON verdict bound to the delivered SHA.
+
 ## Supported platforms
 
 Windows is the primary path:

@@ -43,6 +43,10 @@ function validateProject(projectName, project) {
     throw new TypeError(`reviewPolicy for project ${projectName} must be none, risk, or always`);
   }
 
+  if (Object.hasOwn(project, 'reviewModel') && !['sonnet', 'opus'].includes(project.reviewModel)) {
+    throw new TypeError(`reviewModel for project ${projectName} must be sonnet or opus`);
+  }
+
   if (Object.hasOwn(project, 'stateDir') && !isNonEmptyString(project.stateDir)) {
     throw new TypeError(`stateDir for project ${projectName} must be a non-empty string`);
   }

@@ -329,6 +329,142 @@ test('an always-review project persists a matching independent PASS before becom
   assert.equal(saved.terminalState, 'ready_for_human_merge');
 });
 
+test('the legacy independentReviewer injection remains a supported review interface', async () => {
+  const store = temporaryStore();
+  const issue = { number: 233, title: 'Preserve reviewer interface', body: '' };
+  const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue], createRalphTaskService: passingRalph,
+  }));
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', details: 'green', prNumber: 99, headCommit: 'abc123', runs: [] }),
+    independentReviewer: async () => ({ reviewer: 'legacy-reviewer', verdict: 'PASS', commit: 'abc123' }),
+  }));
+  assert.deepEqual(createJobStore(store.directory).load(233).review, { reviewer: 'legacy-reviewer', verdict: 'PASS', commit: 'abc123' });
+});
+
+test('a matching reviewer NEEDS_CHANGES is deferred, corrected once, then independently re-reviewed', async () => {
+  const store = temporaryStore();
+  const issue = { number: 234, title: 'Review repair', body: 'Original issue context' };
+  const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue], createRalphTaskService: passingRalph,
+  }));
+  let workerStarted = false;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', details: 'ok', prNumber: 99, headCommit: 'abc123', runs: [] }),
+    reviewPullRequest: async () => ({ reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: 'abc123', findings: 'lib.js:7: validate input' }),
+    prepareIssueWorkspace: async () => { workerStarted = true; },
+  }));
+  let saved = createJobStore(store.directory).load(234);
+  assert.equal(workerStarted, false);
+  assert.equal(saved.status, 'review_correction_eligible');
+  assert.equal(saved.reviewCorrectiveCycles, 1);
+  assert.equal(saved.correctiveCycles, 0);
+  assert.equal(saved.reviewCorrection.findings, 'lib.js:7: validate input');
+
+  let task;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
+    createRalphTaskService: () => ({ run: async (cwd, value) => { task = value; return { status: 'passed', attempts: [{ number: 1 }] }; } }),
+    deliverPassedWork: async ({ workspace }) => ({ branch: workspace.branch, commit: 'def456', pr: { number: 99, url: 'https://github.com/example/repo/pull/99' } }),
+  }));
+  assert.equal(task.id, 'autopilot:example/repo#234:review-correction-1');
+  assert.match(task.goal, /Original issue context/);
+  assert.match(task.goal, /validate input/);
+  assert.doesNotMatch(task.goal, /Fix the failing CI/);
+  saved = createJobStore(store.directory).load(234);
+  assert.equal(saved.delivery.commit, 'def456');
+  assert.equal(saved.review, null);
+
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async (value, identity) => { assert.equal(identity.commit, 'def456'); return { state: 'green', details: 'ok', prNumber: 99, headCommit: 'def456', runs: [] }; },
+    reviewPullRequest: async () => ({ reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'def456' }),
+  }));
+  saved = createJobStore(store.directory).load(234);
+  assert.equal(saved.status, 'ready_for_human_merge');
+  assert.deepEqual(saved.review, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'def456' });
+});
+
+test('a second matching reviewer NEEDS_CHANGES after the reviewer budget is spent is handed to a human', async () => {
+  const store = temporaryStore();
+  const issue = { number: 235, title: 'Review exhausted', body: '' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-235-review-exhausted', worktreePath: null, now: store.now });
+  job.delivery = { branch: job.branch, commit: 'def456', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  job.status = 'awaiting_ci';
+  job.reviewCorrectiveCycles = 1;
+  job.reviewCorrection = { cycle: 1, status: 'delivered', reviewCommit: 'abc123', reviewer: 'claude:sonnet', findings: 'first finding', commit: 'def456' };
+  store.save(job);
+  let workerStarted = false;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => ({ ...project, enabled: true, verification: 'check', reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', details: 'ok', prNumber: 99, headCommit: 'def456', runs: [] }),
+    reviewPullRequest: async () => ({ reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: 'def456', findings: 'second finding' }),
+    prepareIssueWorkspace: async () => { workerStarted = true; },
+  }));
+  const saved = createJobStore(store.directory).load(235);
+  assert.equal(workerStarted, false);
+  assert.equal(saved.status, 'ready_for_human');
+  assert.match(saved.failures.at(-1).message, /second finding/);
+});
+
+test('a second reviewer block and an interrupted reviewer worker are exhausted without duplicate work', async () => {
+  const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };
+  const issue = { number: 235, title: 'Bound review repair', body: '' };
+
+  // This is the durable checkpoint left after the one permitted reviewer
+  // correction has been delivered.  A new block is still reviewed against
+  // the corrected SHA, but cannot start a second worker.
+  const exhaustedStore = temporaryStore();
+  const exhausted = createJob({
+    projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-235-bound-review-repair', worktreePath: null, now: exhaustedStore.now,
+  });
+  exhausted.delivery = { branch: exhausted.branch, commit: 'def456', pushed: true };
+  exhausted.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  exhausted.status = 'awaiting_ci';
+  exhausted.reviewCorrectiveCycles = 1;
+  exhausted.reviewCorrection = { cycle: 1, status: 'delivered', reviewCommit: 'abc123', reviewer: 'claude:sonnet', findings: 'lib.js:7: validate input', commit: 'def456' };
+  exhaustedStore.save(exhausted);
+  let workerStarted = false;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(exhaustedStore, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', details: 'ok', prNumber: 99, headCommit: 'def456', runs: [] }),
+    reviewPullRequest: async () => ({ reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: 'def456', findings: 'lib.js:9: reject malformed totals' }),
+    createRalphTaskService: () => ({ run: async () => { workerStarted = true; } }),
+  }));
+  const blocked = createJobStore(exhaustedStore.directory).load(235);
+  assert.equal(workerStarted, false);
+  assert.equal(blocked.status, 'ready_for_human');
+  assert.equal(blocked.reviewCorrectiveCycles, 1);
+  assert.equal(blocked.correctiveCycles, 0);
+  assert.match(blocked.failures.at(-1).message, /reject malformed totals/);
+
+  // A crash after the reviewer worker began is also spent: a later one-shot
+  // pass records the interruption and never replays the worker or PR work.
+  const interruptedStore = temporaryStore();
+  const interrupted = createJob({
+    projectName: 'demo', repo: 'example/repo', issue: { ...issue, number: 236 }, branch: 'ralph/issue-236-bound-review-repair', worktreePath: null, now: interruptedStore.now,
+  });
+  interrupted.status = 'running';
+  interrupted.ralph = { status: 'running', attempts: 0, taskId: 'autopilot:example/repo#236:review-correction-1' };
+  interrupted.reviewCorrectiveCycles = 1;
+  interrupted.reviewCorrection = { cycle: 1, status: 'running', reviewCommit: 'abc123', reviewer: 'claude:sonnet', findings: 'lib.js:7: validate input', commit: null };
+  interruptedStore.save(interrupted);
+  await runAutopilot(['--project', 'demo'], enabledDependencies(interruptedStore, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [{ ...issue, number: 236 }],
+    createRalphTaskService: () => ({ run: async () => { throw new Error('must not replay reviewer correction'); } }),
+  }));
+  const recovered = createJobStore(interruptedStore.directory).load(236);
+  assert.equal(recovered.status, 'ready_for_human');
+  assert.equal(recovered.reviewCorrection.status, 'failed');
+  assert.match(recovered.failures.at(-1).message, /interrupted after Ralph started/);
+});
+
 test('an always-review project fails closed for absent, invalid, or mismatched review results', async () => {
   for (const review of [undefined, { reviewer: 'reviewer', verdict: 'PASS', commit: 'other-sha' }, { reviewer: 'reviewer', verdict: 'APPROVE', commit: 'abc123' }]) {
     const store = temporaryStore();

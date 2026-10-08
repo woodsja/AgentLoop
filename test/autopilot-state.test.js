@@ -15,6 +15,7 @@ const {
   recordDelivery,
   recordFailure,
   recordPullRequest,
+  recordReview,
   resolveStateDir,
   selectIssueForJobs,
   summarizeRalphAttempt,
@@ -57,6 +58,16 @@ test('persists the delivered branch and commit and rejects a foreign branch', ()
 
   assert.throws(() => recordDelivery(job, { branch: 'main', commit: 'def456', pushed: true }), /does not match job branch/);
   assert.equal(job.delivery.commit, 'abc123');
+});
+
+test('a newly delivered commit invalidates an approval for the prior head', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store, 10);
+  recordDelivery(job, { branch: job.branch, commit: 'abc123', pushed: true });
+  recordReview(job, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123' });
+  recordDelivery(job, { branch: job.branch, commit: 'def456', pushed: true });
+  store.save(job);
+  assert.equal(createJobStore(store.directory).load(10).review, null);
 });
 
 test('persists every job field and reloads it through a fresh store', () => {

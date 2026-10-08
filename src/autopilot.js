@@ -16,6 +16,7 @@ const {
 } = require('./autopilot-workspace');
 const { readRepositoryInstructions } = require('./autopilot-instructions');
 const { prepareRepositoryEnvironment } = require('./autopilot-environment');
+const { createClaudeReviewAdapter } = require('./autopilot-review');
 const { buildAutopilotTask, buildCorrectiveTask } = require('./autopilot-task');
 const { createRalphTaskService } = require('./ralph-task-service');
 const {
@@ -31,6 +32,7 @@ const {
   recordDelivery,
   recordPullRequest,
   recordReview,
+  recordReviewCorrectiveCycle,
   resolveStateDir,
   selectIssueForJobs,
   summarizeRalphAttempt,
@@ -62,6 +64,7 @@ function errorMessage(error) {
 
 // Terminal hand-off for a CI failure the single corrective cycle could not fix.
 const READY_FOR_HUMAN = 'ready_for_human';
+const realReviewAdapter = createClaudeReviewAdapter();
 
 // A verified-but-undelivered change and an already pushed branch are both work
 // that workspace cleanup must never delete.
@@ -74,6 +77,11 @@ function handToHuman(job, phase, message, now) {
   job.status = READY_FOR_HUMAN;
   markTerminal(job, READY_FOR_HUMAN);
   if (job.correction && job.correction.status !== 'delivered') job.correction.status = 'failed';
+  // Reviewer corrections are an independent bounded operation, but they
+  // share the same terminal hand-off.  Do not leave one marked running after
+  // deciding that a human must take over: that misleading checkpoint could
+  // otherwise make crash recovery look like an in-flight worker.
+  if (job.reviewCorrection && job.reviewCorrection.status !== 'delivered') job.reviewCorrection.status = 'failed';
   return job;
 }
 
@@ -85,6 +93,14 @@ function matchingPass(review, commit) {
     || typeof review.reviewer !== 'string' || !review.reviewer.trim()
     || review.verdict !== 'PASS' || review.commit !== commit) return null;
   return { reviewer: review.reviewer, verdict: 'PASS', commit };
+}
+
+function matchingNeedsChanges(review, commit) {
+  if (!review || typeof review !== 'object' || Array.isArray(review)
+    || typeof review.reviewer !== 'string' || !review.reviewer.trim()
+    || review.verdict !== 'NEEDS_CHANGES' || review.commit !== commit
+    || typeof review.findings !== 'string' || !review.findings.trim()) return null;
+  return { reviewer: review.reviewer.trim(), verdict: 'NEEDS_CHANGES', commit, findings: review.findings.trim() };
 }
 
 // The recorded path is provisional until preparation reports the real one, so
@@ -234,9 +250,12 @@ async function run(argv, dependencies = {}) {
       }
       recordCiState(job, observation);
       if (observation.state === 'green') {
-        if (Object.hasOwn(project, 'reviewPolicy') && project.reviewPolicy !== 'none') {
+        if (project.reviewPolicy === 'always' || project.reviewPolicy === 'risk') {
+          // Keep the original injection names working for embedders while the
+          // production default is the concrete, read-only Claude adapter.
           const reviewPullRequest = dependencies.reviewPullRequest
-            || dependencies.independentReview || dependencies.independentReviewer;
+            || dependencies.independentReview || dependencies.independentReviewer
+            || realReviewAdapter;
           let review;
           try {
             review = typeof reviewPullRequest === 'function'
@@ -252,6 +271,7 @@ async function run(argv, dependencies = {}) {
             handToHuman(job, 'review', `Independent review could not be completed: ${errorMessage(error)}`, store.now);
           }
           const pass = matchingPass(review, job.delivery.commit);
+          const needsChanges = matchingNeedsChanges(review, job.delivery.commit);
           if (!job.terminal && pass) {
             // This write is intentionally separate from the terminal state:
             // an on-disk PASS must exist before the PR becomes merge-ready.
@@ -259,6 +279,19 @@ async function run(argv, dependencies = {}) {
             store.save(job);
             job.status = 'ready_for_human_merge';
             markTerminal(job, 'ready_for_human_merge');
+          } else if (!job.terminal && needsChanges) {
+            // Feedback is checkpointed now, but the worker is deliberately
+            // deferred to the next timer pass so review observation remains
+            // side-effect free and restart-safe.
+            if ((job.reviewCorrectiveCycles ?? 0) === 0) {
+              recordReviewCorrectiveCycle(job, {
+                reviewCommit: needsChanges.commit, reviewer: needsChanges.reviewer, findings: needsChanges.findings,
+              });
+              job.status = 'review_correction_eligible';
+              job.ralph = { status: null, attempts: 0, taskId: null };
+            } else {
+              handToHuman(job, 'review', `Independent review still blocks after ${job.reviewCorrectiveCycles} reviewer corrective cycle(s); no further automatic correction will run.\nReviewer: ${needsChanges.reviewer}\nFindings:\n${needsChanges.findings}`, store.now);
+            }
           } else if (!job.terminal) {
             handToHuman(job, 'review', 'Independent review did not return a valid PASS for the delivered head commit.', store.now);
           }
@@ -301,11 +334,12 @@ async function run(argv, dependencies = {}) {
     }
     // The one corrective cycle has been spent once Ralph has started on it;
     // an interrupted correction is never started a second time.
-    const correctionSpent = job && job.correction && job.correction.status === 'running';
+    const correctionSpent = job && ((job.correction && job.correction.status === 'running')
+      || (job.reviewCorrection && job.reviewCorrection.status === 'running'));
     const legacyCorrection = job && job.status === 'correction_eligible' && !job.correction;
     if (correctionSpent || legacyCorrection) {
       handToHuman(job, 'correction', correctionSpent
-        ? 'The CI corrective cycle was interrupted after Ralph started; it is not retried automatically.'
+        ? 'The corrective cycle was interrupted after Ralph started; it is not retried automatically.'
         : `CI was red but no diagnostics were persisted for a corrective cycle.${job.ci && job.ci.details ? `\n${job.ci.details}` : ''}`,
       store.now);
     }
@@ -323,9 +357,10 @@ async function run(argv, dependencies = {}) {
       write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${job.terminalState}; autonomous execution stopped.`);
       return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true, deliverable: false }, job };
     }
-    const correction = job && job.correction && ['eligible', 'passed'].includes(job.correction.status)
-      ? job.correction
-      : null;
+    const ciCorrection = job && job.correction && ['eligible', 'passed'].includes(job.correction.status) ? job.correction : null;
+    const savedReviewCorrection = job && job.reviewCorrection && ['eligible', 'passed'].includes(job.reviewCorrection.status) ? job.reviewCorrection : null;
+    const correction = ciCorrection || savedReviewCorrection;
+    const reviewCorrection = Boolean(savedReviewCorrection && correction === savedReviewCorrection);
     phase = 'preparing';
     job.issue.title = candidate.title;
     job.runs += 1;
@@ -338,7 +373,7 @@ async function run(argv, dependencies = {}) {
     // Resetting to the red head here would discard that verified correction
     // and make a safe delivery retry impossible.
     const correctionHead = correction && correction.status === 'passed' && job.delivery
-      && job.delivery.commit ? job.delivery.commit : correction && correction.redCommit;
+      && job.delivery.commit ? job.delivery.commit : correction && (reviewCorrection ? correction.reviewCommit : correction.redCommit);
     workspace = await prepareWorkspace(project, candidate, {
       branch: job.branch,
       ...(correction ? { headCommit: correctionHead } : {}),
@@ -357,7 +392,7 @@ async function run(argv, dependencies = {}) {
       const instructions = await discoverInstructions(workspace.worktreePath);
       await prepareEnvironment(workspace.worktreePath, project, { instructions });
       const task = correction
-        ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, correction)
+        ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(project, candidate, instructions);
       const service = createService(dependencies.ralphOptions || {});
       phase = 'running';
@@ -378,8 +413,10 @@ async function run(argv, dependencies = {}) {
         const diagnostic = summarizeRalphAttempt(attempts[attempts.length - 1]);
         if (correction) {
           // The single corrective cycle could not pass local verification.
-          handToHuman(job, 'correction', `CI corrective cycle ended with Ralph status ${outcome.status}`
-            + `${diagnostic ? `\n${diagnostic}` : ''}\nCI diagnostics:\n${correction.diagnostics}`, store.now);
+          const label = reviewCorrection ? 'Reviewer corrective cycle' : 'CI corrective cycle';
+          const diagnostics = reviewCorrection ? `Reviewer: ${correction.reviewer}\nFindings:\n${correction.findings}` : `CI diagnostics:\n${correction.diagnostics}`;
+          handToHuman(job, 'correction', `${label} ended with Ralph status ${outcome.status}`
+            + `${diagnostic ? `\n${diagnostic}` : ''}\n${diagnostics}`, store.now);
           outcome = { ...outcome, status: READY_FOR_HUMAN };
         } else {
           markTerminal(job, outcome.status);
@@ -409,8 +446,8 @@ async function run(argv, dependencies = {}) {
           ralphStatus: job.ralph && job.ralph.status,
           // A correction is pushed to the same branch only as a new commit.
           ...(correction ? {
-            previousCommit: correction.redCommit,
-            commitMessage: `ralph: fix CI for #${candidate.number}`,
+            previousCommit: reviewCorrection ? correction.reviewCommit : correction.redCommit,
+            commitMessage: reviewCorrection ? `ralph: address review for #${candidate.number}` : `ralph: fix CI for #${candidate.number}`,
           } : {}),
         },
         { onProgress: checkpointDelivery },
@@ -420,8 +457,9 @@ async function run(argv, dependencies = {}) {
       // metadata so a git-only delivery adapter can still finish a passed job.
       if (delivery.pr) recordPullRequest(job, delivery.pr);
       if (correction) {
-        if (job.delivery.commit === correction.redCommit) {
-          const error = new Error(`Autopilot delivery refused: correction produced no change from ${correction.redCommit}`);
+        const previousCommit = reviewCorrection ? correction.reviewCommit : correction.redCommit;
+        if (job.delivery.commit === previousCommit) {
+          const error = new Error(`Autopilot delivery refused: correction produced no change from ${previousCommit}`);
           error.code = 'AUTOPILOT_NO_CHANGES';
           throw error;
         }
@@ -461,12 +499,17 @@ async function run(argv, dependencies = {}) {
           // An observation failure (gh outage, mismatched head) says nothing
           // about the delivered work; keep polling and never restart Ralph.
           job.status = 'awaiting_ci';
-        } else if (job.correction && job.correction.status !== 'delivered'
+        } else if (((job.correction && job.correction.status !== 'delivered')
+          || (job.reviewCorrection && job.reviewCorrection.status !== 'delivered'))
           && (error.code === 'AUTOPILOT_NO_CHANGES' || job.runs >= maxJobRuns)) {
           // A correction that changes nothing (or keeps failing outside
           // Ralph) is handed to a human instead of being pushed or retried.
-          handToHuman(job, 'correction', `CI corrective cycle could not be delivered: ${errorMessage(error)}`
-            + `\nCI diagnostics:\n${job.correction.diagnostics}`, store.now);
+          const activeCorrection = job.reviewCorrection && job.reviewCorrection.status !== 'delivered'
+            ? job.reviewCorrection : job.correction;
+          const diagnostics = activeCorrection && activeCorrection.findings
+            ? `Reviewer: ${activeCorrection.reviewer}\nFindings:\n${activeCorrection.findings}`
+            : `CI diagnostics:\n${activeCorrection && activeCorrection.diagnostics}`;
+          handToHuman(job, 'correction', `Corrective cycle could not be delivered: ${errorMessage(error)}\n${diagnostics}`, store.now);
         } else {
           job.status = 'failed';
           // Bound automatic retries of a job that keeps failing outside Ralph.

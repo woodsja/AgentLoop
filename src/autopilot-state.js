@@ -120,8 +120,10 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     ci: null,
     review: null,
     correction: null,
+    reviewCorrection: null,
     runs: 0,
     correctiveCycles: 0,
+    reviewCorrectiveCycles: 0,
     terminal: false,
     terminalState: null,
     failures: [],
@@ -167,6 +169,15 @@ function validateJob(job, filePath) {
       && typeof value.review.reviewer === 'string' && value.review.reviewer.length > 0
       && value.review.verdict === 'PASS'
       && typeof value.review.commit === 'string' && value.review.commit.length > 0);
+  const hasValidReviewCorrection = value => value.reviewCorrection === undefined || value.reviewCorrection === null
+    || (isPlainObject(value.reviewCorrection)
+      && value.reviewCorrection.cycle === 1
+      && CORRECTION_STATUSES.has(value.reviewCorrection.status)
+      && typeof value.reviewCorrection.reviewCommit === 'string' && value.reviewCorrection.reviewCommit.length > 0
+      && typeof value.reviewCorrection.reviewer === 'string' && value.reviewCorrection.reviewer.length > 0
+      && typeof value.reviewCorrection.findings === 'string' && value.reviewCorrection.findings.length > 0
+      && value.reviewCorrection.findings.length <= MAX_DIAGNOSTIC_LENGTH
+      && (value.reviewCorrection.commit === null || typeof value.reviewCorrection.commit === 'string'));
   const hasValidRalph = value => isPlainObject(value.ralph)
     && (value.ralph.status === null || typeof value.ralph.status === 'string')
     && Number.isSafeInteger(value.ralph.attempts) && value.ralph.attempts >= 0
@@ -198,6 +209,7 @@ function validateJob(job, filePath) {
             : !hasValidPullRequest(job) ? 'invalid pull request state'
               : !hasValidCi(job) ? 'invalid CI state'
                 : !hasValidReview(job) ? 'invalid independent review state'
+                : !hasValidReviewCorrection(job) ? 'invalid reviewer corrective cycle state'
                 : !hasValidCorrection(job) ? 'invalid corrective cycle state'
           : typeof job.terminal !== 'boolean' ? 'missing terminal flag'
             : !(job.terminalState === null || typeof job.terminalState === 'string') ? 'invalid terminal state'
@@ -205,6 +217,8 @@ function validateJob(job, filePath) {
               || !job.failures.every(hasValidFailure) ? 'invalid failure diagnostics'
               : !Number.isSafeInteger(job.runs) || job.runs < 0
                 || !Number.isSafeInteger(job.correctiveCycles) || ![0, 1].includes(job.correctiveCycles) ? 'invalid counters'
+                : job.reviewCorrectiveCycles !== undefined && (!Number.isSafeInteger(job.reviewCorrectiveCycles) || ![0, 1].includes(job.reviewCorrectiveCycles)) ? 'invalid review corrective counters'
+                : job.reviewCorrection && job.reviewCorrectiveCycles !== 1 ? 'review corrective cycle counter does not match state'
                 : typeof job.createdAt !== 'string' || !job.createdAt
                   || typeof job.updatedAt !== 'string' || !job.updatedAt ? 'missing timestamps'
                   : null;
@@ -241,6 +255,9 @@ function recordDelivery(job, { branch = job.branch, commit, pushed = true }) {
   if (branch !== job.branch) {
     throw new Error(`Delivery branch ${String(branch)} does not match job branch ${job.branch}`);
   }
+  // An approval is only meaningful for the exact delivered SHA.  A correction
+  // must therefore invalidate an earlier PASS before its new CI is observed.
+  if (job.delivery && job.delivery.commit && job.delivery.commit !== commit) job.review = null;
   job.delivery = { branch, commit, pushed };
   return job;
 }
@@ -285,6 +302,24 @@ function recordReview(job, { reviewer, verdict, commit }) {
     throw new TypeError('Independent review requires reviewer, PASS verdict, and commit');
   }
   job.review = { reviewer, verdict, commit };
+  return job;
+}
+
+// Reviewer feedback has its own one-cycle budget.  It deliberately does not
+// share the CI counter: a green build can still need one code-review repair.
+function recordReviewCorrectiveCycle(job, { reviewCommit, reviewer, findings } = {}) {
+  if ((job.reviewCorrectiveCycles ?? 0) !== 0) {
+    throw new Error('Autopilot permits only one reviewer corrective cycle per issue');
+  }
+  if (typeof reviewCommit !== 'string' || !reviewCommit || typeof reviewer !== 'string' || !reviewer.trim()
+    || typeof findings !== 'string' || !findings.trim()) {
+    throw new TypeError('A reviewer corrective cycle requires the reviewed commit, reviewer identity, and findings');
+  }
+  job.reviewCorrectiveCycles = 1;
+  job.reviewCorrection = {
+    cycle: 1, status: 'eligible', reviewCommit, reviewer: reviewer.trim(),
+    findings: truncate(findings), commit: null,
+  };
   return job;
 }
 
@@ -473,6 +508,7 @@ module.exports = {
   recordFailure,
   recordPullRequest,
   recordReview,
+  recordReviewCorrectiveCycle,
   resolveStateDir,
   selectIssueForJobs,
   summarizeRalphAttempt,
