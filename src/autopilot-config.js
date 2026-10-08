@@ -35,6 +35,14 @@ function validateProject(projectName, project) {
     throw new TypeError(`prepareVenv for project ${projectName} must be a boolean`);
   }
 
+  // Review is deliberately opt-in.  An omitted policy preserves the existing
+  // green-CI hand-off. Until deterministic risk classification exists, every
+  // opted-in policy other than `none` requires independent review before the
+  // PR is presented for merge.
+  if (Object.hasOwn(project, 'reviewPolicy') && !['none', 'risk', 'always'].includes(project.reviewPolicy)) {
+    throw new TypeError(`reviewPolicy for project ${projectName} must be none, risk, or always`);
+  }
+
   if (Object.hasOwn(project, 'stateDir') && !isNonEmptyString(project.stateDir)) {
     throw new TypeError(`stateDir for project ${projectName} must be a non-empty string`);
   }

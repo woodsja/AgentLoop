@@ -118,6 +118,7 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     delivery: { branch: null, commit: null, pushed: false },
     pr: null,
     ci: null,
+    review: null,
     correction: null,
     runs: 0,
     correctiveCycles: 0,
@@ -161,6 +162,11 @@ function validateJob(job, filePath) {
       && typeof value.correction.diagnostics === 'string' && value.correction.diagnostics.length > 0
       && value.correction.diagnostics.length <= MAX_CI_DIAGNOSTIC_LENGTH
       && (value.correction.commit === null || typeof value.correction.commit === 'string'));
+  const hasValidReview = value => value.review === undefined || value.review === null
+    || (isPlainObject(value.review)
+      && typeof value.review.reviewer === 'string' && value.review.reviewer.length > 0
+      && value.review.verdict === 'PASS'
+      && typeof value.review.commit === 'string' && value.review.commit.length > 0);
   const hasValidRalph = value => isPlainObject(value.ralph)
     && (value.ralph.status === null || typeof value.ralph.status === 'string')
     && Number.isSafeInteger(value.ralph.attempts) && value.ralph.attempts >= 0
@@ -191,6 +197,7 @@ function validateJob(job, filePath) {
             : !hasValidDelivery(job) ? 'invalid delivery state'
             : !hasValidPullRequest(job) ? 'invalid pull request state'
               : !hasValidCi(job) ? 'invalid CI state'
+                : !hasValidReview(job) ? 'invalid independent review state'
                 : !hasValidCorrection(job) ? 'invalid corrective cycle state'
           : typeof job.terminal !== 'boolean' ? 'missing terminal flag'
             : !(job.terminalState === null || typeof job.terminalState === 'string') ? 'invalid terminal state'
@@ -266,6 +273,18 @@ function recordCiState(job, observation, details = null) {
     ...(source.runs === undefined ? {} : { runs: source.runs }),
     ...(source.diagnostics === undefined ? {} : { diagnostics: truncate(source.diagnostics, MAX_CI_DIAGNOSTIC_LENGTH) }),
   };
+  return job;
+}
+
+// Only a normalized independent PASS is a durable merge-readiness checkpoint.
+// The caller verifies the reviewed commit against the delivered PR head before
+// recording it, so state never represents an approval for a different change.
+function recordReview(job, { reviewer, verdict, commit }) {
+  if (typeof reviewer !== 'string' || !reviewer.trim() || verdict !== 'PASS'
+    || typeof commit !== 'string' || !commit.trim()) {
+    throw new TypeError('Independent review requires reviewer, PASS verdict, and commit');
+  }
+  job.review = { reviewer, verdict, commit };
   return job;
 }
 
@@ -453,6 +472,7 @@ module.exports = {
   recordDelivery,
   recordFailure,
   recordPullRequest,
+  recordReview,
   resolveStateDir,
   selectIssueForJobs,
   summarizeRalphAttempt,

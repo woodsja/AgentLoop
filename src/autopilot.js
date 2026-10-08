@@ -30,6 +30,7 @@ const {
   recordFailure,
   recordDelivery,
   recordPullRequest,
+  recordReview,
   resolveStateDir,
   selectIssueForJobs,
   summarizeRalphAttempt,
@@ -74,6 +75,16 @@ function handToHuman(job, phase, message, now) {
   markTerminal(job, READY_FOR_HUMAN);
   if (job.correction && job.correction.status !== 'delivered') job.correction.status = 'failed';
   return job;
+}
+
+// The review adapter is intentionally a dependency of the public one-shot
+// runner.  This keeps the scheduler independent from a particular reviewer
+// implementation and lets a project explicitly opt into the gate.
+function matchingPass(review, commit) {
+  if (!review || typeof review !== 'object' || Array.isArray(review)
+    || typeof review.reviewer !== 'string' || !review.reviewer.trim()
+    || review.verdict !== 'PASS' || review.commit !== commit) return null;
+  return { reviewer: review.reviewer, verdict: 'PASS', commit };
 }
 
 // The recorded path is provisional until preparation reports the real one, so
@@ -223,8 +234,38 @@ async function run(argv, dependencies = {}) {
       }
       recordCiState(job, observation);
       if (observation.state === 'green') {
-        job.status = 'ready_for_human_merge';
-        markTerminal(job, 'ready_for_human_merge');
+        if (Object.hasOwn(project, 'reviewPolicy') && project.reviewPolicy !== 'none') {
+          const reviewPullRequest = dependencies.reviewPullRequest
+            || dependencies.independentReview || dependencies.independentReviewer;
+          let review;
+          try {
+            review = typeof reviewPullRequest === 'function'
+              ? await reviewPullRequest({
+                project,
+                issue: candidate,
+                pullRequest: { ...job.pr, headCommit: job.delivery.commit },
+                headCommit: job.delivery.commit,
+                verification: job.ci,
+              })
+              : null;
+          } catch (error) {
+            handToHuman(job, 'review', `Independent review could not be completed: ${errorMessage(error)}`, store.now);
+          }
+          const pass = matchingPass(review, job.delivery.commit);
+          if (!job.terminal && pass) {
+            // This write is intentionally separate from the terminal state:
+            // an on-disk PASS must exist before the PR becomes merge-ready.
+            recordReview(job, pass);
+            store.save(job);
+            job.status = 'ready_for_human_merge';
+            markTerminal(job, 'ready_for_human_merge');
+          } else if (!job.terminal) {
+            handToHuman(job, 'review', 'Independent review did not return a valid PASS for the delivered head commit.', store.now);
+          }
+        } else {
+          job.status = 'ready_for_human_merge';
+          markTerminal(job, 'ready_for_human_merge');
+        }
       } else if (observation.state === 'red') {
         // Never launch a worker from the observation pass.  The failed run's
         // jobs and logs are captured and persisted first; a red result is

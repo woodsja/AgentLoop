@@ -287,6 +287,97 @@ test('a green persisted PR CI observation becomes ready for human merge without 
   assert.deepEqual(saved.ci.runs.map(run => run.databaseId), [501]);
 });
 
+test('an always-review project persists a matching independent PASS before becoming merge-ready', async () => {
+  const store = temporaryStore();
+  const issue = { number: 230, title: 'Review this change', body: 'The issue context the reviewer needs.' };
+  const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject,
+    discoverReadyIssues: async () => [issue],
+    createRalphTaskService: passingRalph,
+  }));
+
+  let prepared = false;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject,
+    discoverReadyIssues: async () => [issue],
+    prepareIssueWorkspace: async () => { prepared = true; },
+    observePullRequestCi: async () => ({
+      state: 'green', details: 'CI (#501): completed/success', prNumber: 99, headCommit: 'abc123', runs: [],
+    }),
+    reviewPullRequest: async context => {
+      assert.equal(context.project, reviewedProject);
+      assert.deepEqual(context.issue, issue);
+      assert.deepEqual(context.pullRequest, { number: 99, url: 'https://github.com/example/repo/pull/99', headCommit: 'abc123' });
+      assert.equal(context.headCommit, 'abc123');
+      assert.deepEqual(context.verification, {
+        state: 'green', details: 'CI (#501): completed/success', prNumber: 99, headCommit: 'abc123', runs: [],
+      });
+      // The terminal transition must follow a durable review checkpoint.
+      const duringReview = createJobStore(store.directory).load(230);
+      assert.equal(duringReview.terminal, false);
+      assert.equal(duringReview.review, null);
+      return { reviewer: 'independent-reviewer', verdict: 'PASS', commit: 'abc123' };
+    },
+  }));
+
+  assert.equal(prepared, false);
+  assert.equal(result.outcome.status, 'green');
+  const saved = createJobStore(store.directory).load(230);
+  assert.deepEqual(saved.review, { reviewer: 'independent-reviewer', verdict: 'PASS', commit: 'abc123' });
+  assert.equal(saved.status, 'ready_for_human_merge');
+  assert.equal(saved.terminalState, 'ready_for_human_merge');
+});
+
+test('an always-review project fails closed for absent, invalid, or mismatched review results', async () => {
+  for (const review of [undefined, { reviewer: 'reviewer', verdict: 'PASS', commit: 'other-sha' }, { reviewer: 'reviewer', verdict: 'APPROVE', commit: 'abc123' }]) {
+    const store = temporaryStore();
+    const issue = { number: 231, title: 'Fail closed review', body: '' };
+    const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };
+    await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+      loadProjectConfig: () => reviewedProject,
+      discoverReadyIssues: async () => [issue],
+      createRalphTaskService: passingRalph,
+    }));
+    await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+      loadProjectConfig: () => reviewedProject,
+      discoverReadyIssues: async () => [issue],
+      observePullRequestCi: async () => ({ state: 'green', details: 'green', prNumber: 99, headCommit: 'abc123', runs: [] }),
+      reviewPullRequest: async () => review,
+    }));
+    const saved = createJobStore(store.directory).load(231);
+    assert.equal(saved.status, 'ready_for_human');
+    assert.equal(saved.terminal, true);
+    assert.equal(saved.terminalState, 'ready_for_human');
+    assert.equal(saved.review, null);
+  }
+});
+
+test('a risk-review project fails closed for missing or invalid review results', async () => {
+  for (const review of [undefined, { reviewer: 'reviewer', verdict: 'PASS', commit: 'other-sha' }, { reviewer: 'reviewer', verdict: 'APPROVE', commit: 'abc123' }]) {
+    const store = temporaryStore();
+    const issue = { number: 232, title: 'Fail closed risk review', body: '' };
+    const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'risk' };
+    await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+      loadProjectConfig: () => reviewedProject,
+      discoverReadyIssues: async () => [issue],
+      createRalphTaskService: passingRalph,
+    }));
+    await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+      loadProjectConfig: () => reviewedProject,
+      discoverReadyIssues: async () => [issue],
+      observePullRequestCi: async () => ({ state: 'green', details: 'green', prNumber: 99, headCommit: 'abc123', runs: [] }),
+      reviewPullRequest: async () => review,
+    }));
+    const saved = createJobStore(store.directory).load(232);
+    assert.notEqual(saved.status, 'ready_for_human_merge');
+    assert.equal(saved.status, 'ready_for_human');
+    assert.equal(saved.terminal, true);
+    assert.equal(saved.terminalState, 'ready_for_human');
+    assert.equal(saved.review, null);
+  }
+});
+
 test('a red persisted PR CI observation is recorded without starting corrective work', async () => {
   const store = temporaryStore();
   const issue = { number: 24, title: 'Red CI', body: '' };
