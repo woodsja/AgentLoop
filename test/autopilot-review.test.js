@@ -3,7 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { createClaudeReviewAdapter, buildReviewPrompt, reviewerEnvironment } = require('../src/autopilot-review');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFile, execFileSync } = require('node:child_process');
+const { createClaudeReviewAdapter, buildReviewPrompt, repositoryStandards, reviewerEnvironment } = require('../src/autopilot-review');
 
 const sha = '0123456789abcdef';
 const project = { repo: 'example/repo', checkout: '/safe/checkout' };
@@ -24,7 +28,7 @@ function commands({ head = sha, heads, diff = 'diff --git a/a.js b/a.js\n+safe p
     if (file === 'gh' && args[0] === 'pr' && args[1] === 'view') callback(null, JSON.stringify({ number: 42, headRefOid: heads ? heads[headLookups++] : head }));
     else if (file === 'gh' && args[0] === 'issue') callback(null, JSON.stringify({ number: 7, title: issue.title, body: issue.body }));
     else if (file === 'gh' && args[0] === 'pr' && args[1] === 'diff') callback(null, diff);
-    else if (file === 'git' && args.includes('ls-tree')) callback(null, 'AGENTS.md\nsrc/AGENTS.md\nREADME.md\n');
+    else if (file === 'git' && args.includes('ls-tree')) callback(null, 'AGENTS.md\0src/AGENTS.md\0README.md\0');
     else if (file === 'git' && args.includes('show')) callback(null, `standards for ${args.at(-1)}`);
     else throw new Error(`unexpected command: ${file} ${args.join(' ')}`);
   } };
@@ -50,7 +54,7 @@ test('Claude reviewer gathers current PR diff, immutable standards, CI evidence,
     ['gh', ['issue', 'view', '7', '--repo', 'example/repo', '--json', 'number,title,body']],
     ['gh', ['pr', 'diff', '42', '--repo', 'example/repo']],
     ['gh', ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,headRefOid']],
-    ['git', ['-C', '/safe/checkout', 'ls-tree', '-r', '--name-only', sha, '--', 'AGENTS.md', ':(glob)**/AGENTS.md']],
+    ['git', ['-C', '/safe/checkout', 'ls-tree', '-r', '-z', '--name-only', sha]],
     ['git', ['-C', '/safe/checkout', 'show', `${sha}:AGENTS.md`]],
     ['git', ['-C', '/safe/checkout', 'show', `${sha}:src/AGENTS.md`]],
     ['gh', ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,headRefOid']],
@@ -69,24 +73,36 @@ test('Claude reviewer fails closed and terminates when stdin reports EPIPE', asy
   assert.equal(claude.calls[0][3].signal, 'SIGTERM');
 });
 
-test('Claude reviewer limits standards lookup to AGENTS.md pathspecs in a large repository', async () => {
-  const command = commands();
-  const execute = command.execFile;
-  const largeUnrelatedTree = `${'src/generated-file.js\n'.repeat(50 * 1024)}AGENTS.md\n`;
-  command.execFile = (file, args, options, callback) => {
-    if (file === 'git' && args.includes('ls-tree')) {
-      const pathspecs = args.slice(-3);
-      // Simulate a repository whose complete tree exceeds the review context
-      // limit. Git itself filters the enormous unrelated tree when given the
-      // only two paths that can affect repository guidance.
-      return callback(null, JSON.stringify(pathspecs) === JSON.stringify(['--', 'AGENTS.md', ':(glob)**/AGENTS.md'])
-        ? 'AGENTS.md\nsrc/AGENTS.md\n'
-        : largeUnrelatedTree);
+test('repository standards uses real Git to load root and nested files beyond the old tree listing limit', async t => {
+  const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-review-'));
+  t.after(() => fs.rmSync(checkout, { recursive: true, force: true }));
+  const git = args => {
+    try { return execFileSync('git', args, { cwd: checkout, encoding: 'utf8' }); } catch (error) {
+      // Some sandboxed Node runners report EPERM after a successful sync
+      // child has exited. Preserve real command failures.
+      if (error && error.status === 0) return error.stdout;
+      throw error;
     }
-    execute(file, args, options, callback);
   };
-  const result = await adapter(command, reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) }))({ project, issue, pullRequest, headCommit: sha });
-  assert.equal(result.verdict, 'PASS');
+  git(['init']);
+  git(['config', 'user.email', 'reviewer@example.test']);
+  git(['config', 'user.name', 'Reviewer']);
+  fs.mkdirSync(path.join(checkout, 'docs'), { recursive: true });
+  fs.mkdirSync(path.join(checkout, 'unrelated'), { recursive: true });
+  fs.writeFileSync(path.join(checkout, 'AGENTS.md'), '');
+  fs.writeFileSync(path.join(checkout, 'docs', 'AGENTS.md'), 'Nested standards.\n');
+  for (let index = 0; index < 2500; index += 1) fs.writeFileSync(path.join(checkout, 'unrelated', `generated-${String(index).padStart(4, '0')}-long-unrelated-name.txt`), 'x');
+  git(['add', '.']);
+  git(['commit', '-m', 'standards']);
+  const head = git(['rev-parse', 'HEAD']).trim();
+  const completeTree = git(['ls-tree', '-r', '--name-only', head]);
+  assert.ok(Buffer.byteLength(completeTree, 'utf8') > 48 * 1024, 'fixture must exceed the former tree-listing limit');
+
+  const standards = await repositoryStandards({ checkout }, head, execFile);
+  assert.deepEqual(standards, [
+    { path: 'AGENTS.md', content: '' },
+    { path: 'docs/AGENTS.md', content: 'Nested standards.\n' },
+  ]);
 });
 
 test('Claude reviewer fails closed for malformed output, is_error, wrong SHA, and missing diff', async () => {
@@ -141,7 +157,7 @@ test('Claude reviewer bounds aggregate repository guidance', async () => {
   const command = commands();
   const execute = command.execFile;
   command.execFile = (file, args, options, callback) => {
-    if (file === 'git' && args.includes('ls-tree')) return callback(null, Array.from({ length: 65 }, (_, index) => `dir-${index}/AGENTS.md`).join('\n'));
+    if (file === 'git' && args.includes('ls-tree')) return callback(null, Array.from({ length: 65 }, (_, index) => `dir-${index}/AGENTS.md`).join('\0'));
     execute(file, args, options, callback);
   };
   await assert.rejects(adapter(command, reviewer())({ project, issue, pullRequest, headCommit: sha }), /too many files/);

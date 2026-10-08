@@ -9,6 +9,10 @@ const MAX_DIFF_BYTES = 240 * 1024;
 const MAX_CONTEXT_BYTES = 48 * 1024;
 const MAX_OUTPUT_BYTES = 32 * 1024;
 const MAX_STANDARDS_FILES = 64;
+// A repository tree can be much larger than the review context.  Keep the
+// enumeration independently bounded, then apply the tighter limits below to
+// the guidance that will actually enter the prompt.
+const MAX_STANDARDS_TREE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
 const DEFAULT_TERMINATION_GRACE_MS = 1000;
 const REVIEW_MODELS = new Set(['sonnet', 'opus']);
@@ -43,7 +47,7 @@ function reviewerEnvironment(base = process.env) {
 function runCommand(file, args, executeFile, operation, options = {}) {
   return new Promise((resolve, reject) => {
     try {
-      executeFile(file, args, unattendedOptions({ encoding: 'utf8', maxBuffer: MAX_DIFF_BYTES + 1, shell: false }), (error, stdout) => {
+      executeFile(file, args, unattendedOptions({ encoding: 'utf8', maxBuffer: options.maxBuffer || MAX_DIFF_BYTES + 1, shell: false }), (error, stdout) => {
         if (error) return reject(new Error(`Claude review failed closed: ${operation} is unavailable`));
         try { resolve(bounded(stdout, options.limit || MAX_DIFF_BYTES, operation)); } catch (failure) { reject(failure); }
       });
@@ -81,8 +85,12 @@ async function assertPrHeadUnchanged(project, pullRequest, headCommit, executeFi
 async function repositoryStandards(project, headCommit, executeFile) {
   if (!project || typeof project.checkout !== 'string' || !project.checkout.trim()) throw new Error('Claude review failed closed: repository checkout is required for standards guidance');
   const sha = deliveredSha(headCommit);
-  const names = await runCommand('git', ['-C', project.checkout, 'ls-tree', '-r', '--name-only', sha, '--', 'AGENTS.md', ':(glob)**/AGENTS.md'], executeFile, 'repository standards lookup', { limit: MAX_CONTEXT_BYTES });
-  const paths = [...new Set(names.split('\n').filter(path => /(^|\/)AGENTS\.md$/.test(path) && /^[^\0\r\n]+$/.test(path)))];
+  // Do not use pathspec magic here: older Git versions reject the glob form
+  // used previously. NUL separation preserves filename boundaries, including
+  // filenames containing newlines, which are rejected before becoming prompt
+  // labels or git object arguments.
+  const names = await runCommand('git', ['-C', project.checkout, 'ls-tree', '-r', '-z', '--name-only', sha], executeFile, 'repository standards lookup', { limit: MAX_STANDARDS_TREE_BYTES, maxBuffer: MAX_STANDARDS_TREE_BYTES });
+  const paths = [...new Set(names.split('\0').filter(path => (path === 'AGENTS.md' || path.endsWith('/AGENTS.md')) && !/[\r\n]/.test(path)))];
   if (paths.length > MAX_STANDARDS_FILES) throw new Error('Claude review failed closed: repository standards guidance has too many files');
   const standards = [];
   let totalBytes = 0;
