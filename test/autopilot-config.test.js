@@ -7,7 +7,7 @@ const path = require('node:path');
 const { loadProjectConfig } = require('../src/autopilot-config');
 
 const expectedFinanceDashboard = {
-  enabled: false,
+  enabled: true,
   repo: 'woodsja/finance-dashboard',
   checkout: '/home/woodsja/finance-dashboard',
   worktreeRoot: '/home/woodsja/worktrees/finance-dashboard',

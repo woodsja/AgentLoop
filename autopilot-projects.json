@@ -1,6 +1,6 @@
 {
   "finance-dashboard": {
-    "enabled": false,
+    "enabled": true,
     "repo": "woodsja/finance-dashboard",
     "checkout": "/home/woodsja/finance-dashboard",
     "worktreeRoot": "/home/woodsja/worktrees/finance-dashboard",
