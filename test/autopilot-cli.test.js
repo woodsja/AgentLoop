@@ -25,7 +25,7 @@ function temporaryStore(options) {
 
 // Every CLI test gets its own job store so nothing touches real state.
 function run(argv, dependencies) {
-  return runAutopilot(argv, { jobStore: temporaryStore(), ...dependencies });
+  return runAutopilot(argv, { jobStore: temporaryStore(), findOpenIssuePullRequests: async () => [], ...dependencies });
 }
 
 test('dry run inspects disabled projects and reports its selected candidate', async () => {
@@ -787,10 +787,56 @@ function enabledDependencies(store, overrides = {}) {
     cleanupIssueWorkspace: async () => {},
     deliverPassedWork: async ({ workspace }) => ({ branch: workspace.branch, commit: 'abc123', pr: { number: 99, url: 'https://github.com/example/repo/pull/99' } }),
     collectCiFailureDiagnostics: async (value, observation) => `diagnostics for ${observation.headCommit}`,
+    findOpenIssuePullRequests: async () => [],
     write: () => {},
     ...overrides,
   };
 }
+
+test('hands issue 68 with an existing open PR to a human before creating a workspace or worker', async () => {
+  const store = temporaryStore();
+  const issue = { number: 68, title: 'Reconcile an existing PR', body: '' };
+  let prepared = false;
+  let workerStarted = false;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [issue],
+    findOpenIssuePullRequests: async (value, candidate) => {
+      assert.equal(candidate.number, 68);
+      return [{ number: 70, url: 'https://github.com/example/repo/pull/70' }];
+    },
+    prepareIssueWorkspace: async () => { prepared = true; },
+    createRalphTaskService: () => ({ run: async () => { workerStarted = true; } }),
+  }));
+  assert.equal(prepared, false);
+  assert.equal(workerStarted, false);
+  assert.equal(result.outcome.status, 'ready_for_human');
+  const job = createJobStore(store.directory).load(68);
+  assert.equal(job.branch, 'ralph/issue-68-reconcile-an-existing-pr');
+  assert.equal(job.status, 'ready_for_human');
+  assert.equal(job.terminal, true);
+  assert.equal(job.pr, null);
+  assert.match(job.failures.at(-1).message, /PR #70 explicitly closes issue #68/);
+});
+
+test('hands ambiguous open PR associations to a human without creating a workspace or worker', async () => {
+  const store = temporaryStore();
+  const issue = { number: 68, title: 'Ambiguous PR', body: '' };
+  let prepared = false;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [issue],
+    findOpenIssuePullRequests: async () => [
+      { number: 70, url: 'https://github.com/example/repo/pull/70' },
+      { number: 71, url: 'https://github.com/example/repo/pull/71' },
+    ],
+    prepareIssueWorkspace: async () => { prepared = true; },
+  }));
+  assert.equal(prepared, false);
+  assert.equal(result.outcome.status, 'ready_for_human');
+  const job = createJobStore(store.directory).load(68);
+  assert.equal(job.terminal, true);
+  assert.equal(job.status, 'ready_for_human');
+  assert.match(job.failures[0].message, /PRs #70, #71 explicitly close issue #68/);
+});
 
 test('persists a needs_planning job and does not start duplicate work on the next run', async () => {
   const store = temporaryStore();

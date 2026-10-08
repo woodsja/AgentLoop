@@ -7,7 +7,7 @@ const {
   observePullRequestCi,
   collectCiFailureDiagnostics,
 } = require('./autopilot-github');
-const { deliverPassedWork } = require('./autopilot-delivery');
+const { deliverPassedWork, findOpenIssuePullRequests } = require('./autopilot-delivery');
 const {
   deriveBranchName,
   deriveWorktreePath,
@@ -175,6 +175,36 @@ async function run(argv, dependencies = {}) {
       job = undefined;
       throw new Error(`Autopilot job for issue #${candidate.number} is already ${existing.terminalState || existing.status}`);
     }
+    // Before a new job allocates anything, leave an explicitly-closing PR
+    // entirely to its existing owner. Recovered Ralph jobs deliberately skip
+    // this guard so their established recovery path remains unchanged.
+    if (!job) {
+      job = createJob({
+        projectName,
+        repo: project.repo,
+        issue: candidate,
+        branch: deriveBranchName(candidate),
+        worktreePath: plannedWorktreePath(project, candidate),
+        now: store.now,
+      });
+      const findExistingPullRequests = dependencies.findOpenIssuePullRequests || findOpenIssuePullRequests;
+      let existingPullRequests;
+      try {
+        existingPullRequests = await findExistingPullRequests(project, candidate, project.checkout, dependencies.execFile);
+      } catch (error) {
+        handToHuman(job, 'existing-pr-lookup', `Could not safely check for open PRs that close issue #${candidate.number}: ${errorMessage(error)}`, store.now);
+        store.save(job);
+        write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${job.terminalState}; autonomous execution stopped.`);
+        return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true, deliverable: false }, job };
+      }
+      if (existingPullRequests.length > 0) {
+        const numbers = existingPullRequests.map(pr => `#${pr.number}`).join(', ');
+        handToHuman(job, 'existing-pr', `Open PR${existingPullRequests.length === 1 ? '' : 's'} ${numbers} explicitly close${existingPullRequests.length === 1 ? 's' : ''} issue #${candidate.number}; leaving ${existingPullRequests.length === 1 ? 'it' : 'them'} unchanged for a human.`, store.now);
+        store.save(job);
+        write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${job.terminalState}; autonomous execution stopped.`);
+        return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true, deliverable: false }, job };
+      }
+    }
     // A successfully delivered PR is observed before any worktree, dependency,
     // or Ralph work is started. This makes polling safe to invoke repeatedly.
     if (job && (job.status === 'awaiting_ci' || (job.status === 'passed' && job.pr && job.delivery && job.delivery.commit))) {
@@ -255,17 +285,6 @@ async function run(argv, dependencies = {}) {
     const correction = job && job.correction && ['eligible', 'passed'].includes(job.correction.status)
       ? job.correction
       : null;
-    if (!job) {
-      job = createJob({
-        projectName,
-        repo: project.repo,
-        issue: candidate,
-        branch: deriveBranchName(candidate),
-        worktreePath: plannedWorktreePath(project, candidate),
-        now: store.now,
-      });
-    }
-
     phase = 'preparing';
     job.issue.title = candidate.title;
     job.runs += 1;

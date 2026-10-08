@@ -61,6 +61,40 @@ async function findOpenPullRequest(project, branch, base, cwd, executeFile) {
   return matches[0] || null;
 }
 
+function closesIssue(body, issueNumber) {
+  if (typeof body !== 'string') return false;
+  // Match GitHub's closing-keyword form, not a bare issue mention.  A bare
+  // "#12" in a PR description is often incidental and must not suppress
+  // work for issue 12.
+  const reference = `(?:#${issueNumber}\\b|[^/\\s]+/[^#\\s]+#${issueNumber}\\b|https://github\\.com/[^/\\s]+/[^/\\s]+/issues/${issueNumber}\\b)`;
+  return new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?[\\t ]+${reference}`, 'i').test(body);
+}
+
+/**
+ * Finds an already-open PR that conclusively belongs to an issue before any
+ * workspace is made. Unlike delivery reconciliation it intentionally does
+ * not filter by branch: an existing owner may have used any branch.
+ */
+async function findOpenIssuePullRequests(project, issue, cwd, executeFile = execFile) {
+  const operation = 'finding an existing issue pull request';
+  const response = parseJson(await run('gh', [
+    'pr', 'list',
+    '--repo', project.repo,
+    '--state', 'open',
+    '--json', 'number,url,body',
+    '--limit', '1000',
+  ], cwd, executeFile, operation), operation);
+  if (!Array.isArray(response)) {
+    throw new Error(`Autopilot delivery failed while ${operation}: gh returned an unexpected response shape`);
+  }
+  // This is intentionally independent of branch and base: the sole question
+  // is whether an open PR explicitly closes this issue.
+  return response
+    .filter(pr => pr && closesIssue(pr.body, issue.number))
+    .map(pr => normalizePullRequest(pr, operation))
+    .sort((left, right) => left.number - right.number);
+}
+
 /**
  * Reuses the open pull request for the issue branch, or creates one against
  * the base branch whose body closes the issue.  Looking up by branch first
@@ -138,4 +172,4 @@ async function deliverPassedWork({ project, issue, workspace, ralphStatus, previ
   return delivery;
 }
 
-module.exports = { deliverPassedWork, reconcilePullRequest };
+module.exports = { deliverPassedWork, reconcilePullRequest, findOpenIssuePullRequests };
