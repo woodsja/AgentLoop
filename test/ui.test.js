@@ -36,6 +36,11 @@ test('Dashboard sources compile and stay aligned', () => {
   assert.match(publicHtml, /<aside id="rail"/);
   assert.match(publicHtml, /class="duo duo-main"/);
   assert.match(publicHtml, /<form id="taskForm"/);
+  assert.match(publicHtml, /<select id="lProject" required disabled>/);
+  assert.match(publicHtml, /<select id="tProject" required disabled>/);
+  assert.match(publicHtml, /fetch\('\/api\/projects', \{cache: 'no-store'\}\)/);
+  assert.match(publicHtml, /body\.project = project/);
+  assert.doesNotMatch(publicHtml, /body\.cwd = project/);
   assert.match(publicHtml, /<link rel="icon" type="image\/png"/);
   assert.match(publicHtml, /<span class="bw">/);
 

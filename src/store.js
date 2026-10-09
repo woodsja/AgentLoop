@@ -50,6 +50,16 @@ const defaults = {
   mcpBridge: { port: 5758 },
 };
 
+function configuredProjects(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(Object.entries(value)
+    .filter(([name, rootPath]) => typeof name === 'string' && name.trim() && typeof rootPath === 'string' && rootPath.trim())
+    .map(([name, rootPath]) => [name, path.resolve(path.dirname(paths.config), rootPath)]));
+}
+
 function loadConfig() {
   let loaded = {};
 
@@ -69,6 +79,9 @@ function loadConfig() {
     },
     models: loaded.models ?? {},
     enginePaths: loaded.enginePaths ?? {},
+    // This is deliberately configuration only.  Requests can select a name,
+    // never add a project or provide the path where a worker will run.
+    allowedProjects: configuredProjects(loaded.allowedProjects),
   };
 
   if (loaded.model) {

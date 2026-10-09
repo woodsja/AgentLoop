@@ -2007,6 +2007,44 @@ function taskSource(body) {
   return body && body.source === 'mcp' ? 'mcp' : 'api';
 }
 
+// Project roots are an administrator-owned capability.  A request may name a
+// configured project, but cannot choose a filesystem location or an operation
+// for the daemon to perform there.
+function authorizedProject(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { error: 'Request body must be an object.' };
+  }
+
+  if (Object.hasOwn(body, 'cwd') || Object.hasOwn(body, 'projectPath')) {
+    return { error: 'cwd and projectPath are derived from the registered project.' };
+  }
+
+  if (Object.hasOwn(body, 'operation') || Object.hasOwn(body, 'type')) {
+    return { error: 'Only standard task submission is supported.' };
+  }
+
+  const name = typeof body.project === 'string' ? body.project.trim() : '';
+  const configuredRoot = name && store.config.allowedProjects && Object.hasOwn(store.config.allowedProjects, name)
+    ? store.config.allowedProjects[name]
+    : null;
+
+  if (!name || typeof configuredRoot !== 'string') {
+    return { error: 'Unknown project.' };
+  }
+
+  try {
+    const projectPath = fs.realpathSync(configuredRoot);
+
+    if (!isDirectory(projectPath)) {
+      return { error: 'Registered project folder does not exist.' };
+    }
+
+    return { name, projectPath };
+  } catch {
+    return { error: 'Registered project folder does not exist.' };
+  }
+}
+
 async function dispatch(req, res) {
   let body;
 
@@ -2022,6 +2060,13 @@ async function dispatch(req, res) {
     return;
   }
 
+  const project = authorizedProject(body);
+
+  if (project.error) {
+    sendJson(res, 400, { error: project.error });
+    return;
+  }
+
   const engine = body.engine || store.config.defaultEngine;
 
   if (!knownEngines.has(engine)) {
@@ -2031,9 +2076,12 @@ async function dispatch(req, res) {
 
   const task = store.enqueueTask({
     prompt: body.prompt,
+    project: project.name,
+    // Never accept a request path here: worker cwd comes only from the
+    // canonical, realpath-resolved configured project root.
+    cwd: project.projectPath,
     engine,
     model: body.model,
-    cwd: body.cwd,
     title: body.title,
     priority: body.priority,
     source: taskSource(body),
@@ -2089,12 +2137,6 @@ function isFile(filePath) {
   } catch {
     return false;
   }
-}
-
-function loopProjectPath(project) {
-  return path.isAbsolute(project)
-    ? path.resolve(project)
-    : path.resolve(store.paths.root, project);
 }
 
 function hasActiveLoop(projectPath) {
@@ -2305,37 +2347,15 @@ async function createLoop(req, res) {
     return;
   }
 
-  const project = body && typeof body.project === 'string' ? body.project.trim() : '';
+  const authorized = authorizedProject(body);
 
-  if (!project) {
-    sendJson(res, 400, { error: 'project is required.' });
+  if (authorized.error) {
+    sendJson(res, 400, { error: authorized.error });
     return;
   }
 
-  const requestedProjectPath = loopProjectPath(project);
-
-  if (!isDirectory(requestedProjectPath)) {
-    sendJson(res, 400, { error: 'Project folder does not exist.' });
-    return;
-  }
-
-  let rootPath;
-  let projectPath;
-
-  try {
-    rootPath = fs.realpathSync(store.paths.root);
-    projectPath = fs.realpathSync(requestedProjectPath);
-  } catch {
-    sendJson(res, 400, { error: 'Project folder does not exist.' });
-    return;
-  }
-
-  const relative = path.relative(rootPath, projectPath);
-
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    sendJson(res, 400, { error: 'Project folder must be inside the AgentLoop root.' });
-    return;
-  }
+  const project = authorized.name;
+  const projectPath = authorized.projectPath;
 
   if (!isFile(path.join(projectPath, 'PLAN.md'))) {
     sendJson(res, 400, { error: 'Project folder must contain PLAN.md.' });
@@ -2432,6 +2452,29 @@ function serveLog(res, requestPath, requestUrl) {
   sendJson(res, 200, { lines: store.readLogLines(id, logLineCount(requestUrl.searchParams.get('lines'))) });
 }
 
+function readJob(id) {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    return null;
+  }
+
+  for (const stage of ['pending', 'running', 'done']) {
+    try {
+      const task = store.readTask(id, stage);
+      const result = resultForTask(task);
+      return {
+        id: task.id,
+        status: task.status || stage,
+        ...(typeof task.project === 'string' ? { project: task.project } : {}),
+        ...(result ? { result } : {}),
+      };
+    } catch {
+      // A task may move stages between the lookup and read; continue searching.
+    }
+  }
+
+  return null;
+}
+
 async function cancelTask(req, res) {
   let body;
 
@@ -2523,6 +2566,13 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // Project paths are intentionally not part of the dashboard contract.  The
+  // browser can select only administrator-configured project names.
+  if (req.method === 'GET' && requestPath === '/api/projects') {
+    sendJson(res, 200, { projects: Object.keys(store.config.allowedProjects || {}).sort() });
+    return;
+  }
+
   if (req.method === 'GET' && requestPath === '/api/bridge') {
     sendJson(res, 200, await bridgeDetails());
     return;
@@ -2530,6 +2580,22 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && requestPath.startsWith('/api/log/')) {
     serveLog(res, requestPath, requestUrl);
+    return;
+  }
+
+  if (req.method === 'GET' && requestPath.startsWith('/api/jobs/')) {
+    let id = '';
+    try {
+      id = decodeURIComponent(requestPath.slice('/api/jobs/'.length));
+    } catch {
+    }
+    const job = readJob(id);
+    sendJson(res, job ? 200 : 404, job || { error: 'Job not found.' });
+    return;
+  }
+
+  if (req.method === 'POST' && requestPath === '/api/jobs') {
+    await dispatch(req, res);
     return;
   }
 
@@ -2839,11 +2905,7 @@ function start() {
   recoverBridgeHeartbeat();
   recoverRunningTasks();
 
-  server = http.createServer((req, res) => {
-    handleRequest(req, res).catch((error) => {
-      sendJson(res, 500, { error: error.message });
-    });
-  });
+  server = createHttpServer();
   server.on('error', (error) => {
     console.error(`HTTP server failed: ${error.message}`);
     process.exitCode = 1;
@@ -2871,12 +2933,21 @@ function start() {
   });
 }
 
+function createHttpServer() {
+  return http.createServer((req, res) => {
+    handleRequest(req, res).catch((error) => {
+      sendJson(res, 500, { error: error.message });
+    });
+  });
+}
+
 if (require.main === module) {
   start();
 }
 
 module.exports = {
   start,
+  createHttpServer,
   stop,
   fillSlots,
   blockedEntry,

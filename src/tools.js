@@ -1,5 +1,6 @@
 // MCP tool definitions and dispatch, shared by both transports (bridge.js http, mcp-server.js stdio).
 const http = require('node:http');
+const fs = require('node:fs');
 
 const store = require('./store');
 const { createRalphTaskService } = require('./ralph-task-service');
@@ -14,6 +15,34 @@ function ralphTaskService() {
     });
   }
   return defaultRalphTaskService;
+}
+
+// Ralph tasks run synchronously, so this boundary must independently enforce
+// the same administrator-owned project registry used by daemon submissions.
+// A caller can select a registered name, never a filesystem location.
+function resolveRegisteredProject(project, config = store.config) {
+  const name = typeof project === 'string' ? project.trim() : '';
+  if (!name || name === '.' || name === '..' || /[\\/]/.test(name) || /^[A-Za-z]:/.test(name)) {
+    throw new Error('Unknown project.');
+  }
+
+  const allowedProjects = config && config.allowedProjects;
+  const configuredRoot = allowedProjects && Object.hasOwn(allowedProjects, name)
+    ? allowedProjects[name]
+    : null;
+  if (typeof configuredRoot !== 'string' || !configuredRoot.trim()) {
+    throw new Error('Unknown project.');
+  }
+
+  try {
+    const projectPath = fs.realpathSync(configuredRoot);
+    if (!fs.statSync(projectPath).isDirectory()) {
+      throw new Error('not a directory');
+    }
+    return projectPath;
+  } catch {
+    throw new Error('Registered project folder does not exist.');
+  }
 }
 
 function boundedOutput(value) {
@@ -153,14 +182,53 @@ const tools = [
     inputSchema: {
       type: 'object',
       properties: {
+        project: { type: 'string', description: 'Registered project name.' },
         title: { type: 'string' },
         prompt: { type: 'string' },
         engine: { type: 'string', enum: ['claude', 'codex'] },
       },
-      required: ['title', 'prompt'],
+      required: ['project', 'title', 'prompt'],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false },
+  },
+  {
+    name: 'submit_job',
+    description: 'Queue a job for a registered AgentLoop project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Registered project name.' },
+        title: { type: 'string' },
+        prompt: { type: 'string' },
+        engine: { type: 'string', enum: ['claude', 'codex'] },
+      },
+      required: ['project', 'title', 'prompt'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false },
+  },
+  {
+    name: 'get_job_status',
+    description: 'Read compact status for a queued AgentLoop job.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'get_job_result',
+    description: 'Read compact completion metadata for an AgentLoop job.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
   },
   {
     name: 'start_loop',
@@ -200,7 +268,7 @@ const tools = [
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string' },
+        project: { type: 'string', description: 'Registered project name.' },
         id: { type: 'string' },
         goal: { type: 'string' },
         acceptance: { type: 'array', items: { type: 'string' }, minItems: 1 },
@@ -210,7 +278,7 @@ const tools = [
         reviewPolicy: { type: 'string', enum: ['none', 'risk', 'always'] },
         model: { type: 'string' },
       },
-      required: ['projectPath', 'id', 'goal', 'acceptance', 'verification', 'worker'],
+      required: ['project', 'id', 'goal', 'acceptance', 'verification', 'worker'],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false },
@@ -221,6 +289,41 @@ function daemonError(response) {
   return response.value && typeof response.value.error === 'string'
     ? response.value.error
     : `Daemon request failed (${response.statusCode}).`;
+}
+
+// Job records can contain worker output. Keep the MCP read surface to stable,
+// non-sensitive metadata rather than reflecting the daemon's stored payload.
+function compactJobStatus(job) {
+  return {
+    id: typeof job?.id === 'string' ? job.id : null,
+    status: typeof job?.status === 'string' ? job.status : null,
+    ...(typeof job?.project === 'string' ? { project: job.project } : {}),
+  };
+}
+
+function compactJobResult(job) {
+  const status = compactJobStatus(job);
+  const result = job && typeof job.result === 'object' && !Array.isArray(job.result) ? job.result : null;
+
+  return {
+    ...status,
+    ...(result ? {
+      result: {
+        status: typeof result.status === 'string' ? result.status : status.status,
+        ...(typeof result.durationMs === 'number' ? { durationMs: result.durationMs } : {}),
+        ...(typeof result.finishedAt === 'string' ? { finishedAt: result.finishedAt } : {}),
+        ...(typeof result.costUsd === 'number' ? { costUsd: result.costUsd } : {}),
+      },
+    } : {}),
+  };
+}
+
+async function requestDaemon(options, requestPath, body) {
+  try {
+    return await (options.daemonRequest ?? daemonRequest)(requestPath, body);
+  } catch {
+    return null;
+  }
 }
 
 async function callTool(params, options = {}) {
@@ -239,20 +342,45 @@ async function callTool(params, options = {}) {
   }
 
   if (name === 'dispatch_task') {
-    const response = await daemonRequest('/api/dispatch', {
+    const response = await requestDaemon(options, '/api/dispatch', {
+      project: args.project,
       title: args.title,
       prompt: args.prompt,
       engine: args.engine,
       source: 'mcp',
     });
 
-    return response.statusCode >= 200 && response.statusCode < 300
+    return response && response.statusCode >= 200 && response.statusCode < 300
       ? toolResult({ id: response.value?.id })
-      : toolFailure(daemonError(response));
+      : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
+  }
+
+  if (name === 'submit_job') {
+    const response = await requestDaemon(options, '/api/jobs', {
+      project: args.project,
+      title: args.title,
+      prompt: args.prompt,
+      engine: args.engine,
+      source: 'mcp',
+    });
+
+    return response && response.statusCode >= 200 && response.statusCode < 300
+      ? toolResult({ id: response.value?.id })
+      : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
+  }
+
+  if (name === 'get_job_status' || name === 'get_job_result') {
+    const response = await requestDaemon(options, `/api/jobs/${encodeURIComponent(args.id || '')}`);
+
+    if (!response) return toolFailure('Daemon unavailable.');
+    if (response.statusCode < 200 || response.statusCode >= 300) return toolFailure(daemonError(response));
+    return toolResult(name === 'get_job_status'
+      ? compactJobStatus(response.value)
+      : compactJobResult(response.value));
   }
 
   if (name === 'start_loop') {
-    const response = await daemonRequest('/api/loop', {
+    const response = await requestDaemon(options, '/api/loop', {
       project: args.project,
       maxCycles: args.maxCycles,
       taskRetries: args.taskRetries,
@@ -262,23 +390,26 @@ async function callTool(params, options = {}) {
       source: 'mcp',
     });
 
-    return response.statusCode >= 200 && response.statusCode < 300
+    return response && response.statusCode >= 200 && response.statusCode < 300
       ? toolResult({ id: response.value?.id })
-      : toolFailure(daemonError(response));
+      : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
   }
 
   if (name === 'send_message') {
-    const response = await daemonRequest('/api/message', {
+    const response = await requestDaemon(options, '/api/message', {
       text: args.text,
       kind: args.kind,
     });
 
-    return response.statusCode >= 200 && response.statusCode < 300
+    return response && response.statusCode >= 200 && response.statusCode < 300
       ? toolResult(structuredValue(response.value))
-      : toolFailure(daemonError(response));
+      : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
   }
 
   if (name === 'ralph_run_task') {
+    if (Object.hasOwn(args, 'cwd') || Object.hasOwn(args, 'projectPath')) {
+      return toolFailure('cwd and projectPath are derived from the registered project.');
+    }
     const task = {
       id: args.id,
       goal: args.goal,
@@ -291,8 +422,9 @@ async function callTool(params, options = {}) {
     }
 
     try {
+      const projectPath = (options.resolveProject ?? resolveRegisteredProject)(args.project);
       const service = options.ralphTaskService ?? ralphTaskService();
-      return toolResult(compactRalphResult(await service.run(args.projectPath, task)));
+      return toolResult(compactRalphResult(await service.run(projectPath, task)));
     } catch (error) {
       return toolFailure(error.message);
     }
@@ -301,4 +433,11 @@ async function callTool(params, options = {}) {
   return toolFailure(`Unknown tool: ${name}.`);
 }
 
-module.exports = { tools, callTool, structuredValue };
+module.exports = {
+  tools,
+  callTool,
+  structuredValue,
+  compactJobStatus,
+  compactJobResult,
+  resolveRegisteredProject,
+};

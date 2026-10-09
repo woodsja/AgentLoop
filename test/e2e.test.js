@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { startDaemon, stopDaemon, runScenario, cleanWorkspace } = require('./runner');
+const fs = require('node:fs');
+const { callTool } = require('../src/tools');
+const {
+  startDaemon, stopDaemon, runScenario, prepareMockScenario, request, waitForJob, cleanWorkspace,
+} = require('./runner');
 
 let daemon;
 
@@ -92,3 +96,53 @@ test('scenario: no-change worker is graded by critic and passes', async () => {
   }
 });
 
+test('HTTP job survives the submit connection and is retrieved later by ID', async () => {
+  // Reuse a named, registered fixture project and the fake CLI. The worker is
+  // intentionally delayed, so completion cannot be an artifact of the POST.
+  prepareMockScenario('async-job', 'clean-pass');
+  const submittedAt = Date.now();
+  const submitted = await request('POST', '/api/jobs', {
+    project: 'clean-pass',
+    title: 'async acceptance job',
+    prompt: 'Confirm the daemon runs this queued mock job asynchronously.',
+    engine: 'codex',
+  }, daemon.port);
+  const submitElapsedMs = Date.now() - submittedAt;
+
+  assert.equal(submitted.statusCode, 201);
+  assert.match(submitted.body.id, /^t-/);
+  assert.ok(submitElapsedMs < 1200, `submission waited ${submitElapsedMs}ms for worker completion`);
+  assert.ok(fs.existsSync(daemon.stateDir), 'isolated daemon state survives after submit response closes');
+
+  const id = submitted.body.id;
+  const inFlight = await request('GET', `/api/jobs/${id}`, undefined, daemon.port);
+  assert.equal(inFlight.statusCode, 200);
+  assert.equal(inFlight.body.id, id);
+  assert.ok(['pending', 'running'].includes(inFlight.body.status), `expected queued/running, got ${inFlight.body.status}`);
+  assert.ok(fs.existsSync(daemon.stateDir), 'same isolated state is available to a later HTTP request');
+  assert.doesNotThrow(() => process.kill(daemon.pid, 0), 'daemon child survives between HTTP requests');
+
+  const waited = await waitForJob(id, 15000, daemon.port);
+  assert.equal(waited.done, true, `job did not finish: ${JSON.stringify(waited.job)}`);
+
+  const completed = await request('GET', `/api/jobs/${id}`, undefined, daemon.port);
+  assert.equal(completed.statusCode, 200);
+  assert.equal(completed.body.id, id);
+  assert.equal(completed.body.status, 'done');
+  assert.equal(completed.body.result.status, 'done');
+  assert.equal(completed.body.result.summary, 'async mock job completed independently');
+  assert.equal(typeof completed.body.result.finishedAt, 'string');
+
+  // Exercise the public MCP facade against the same daemon, rather than only
+  // its raw HTTP representation.
+  const mcpResult = await callTool({ name: 'get_job_result', arguments: { id } }, {
+    daemonRequest: async (requestPath, body) => {
+      const response = await request(body === undefined ? 'GET' : 'POST', requestPath, body, daemon.port);
+      return { statusCode: response.statusCode, value: response.body };
+    },
+  });
+  assert.equal(mcpResult.isError, undefined);
+  assert.equal(mcpResult.structuredContent.id, id);
+  assert.equal(mcpResult.structuredContent.status, 'done');
+  assert.equal(mcpResult.structuredContent.result.status, 'done');
+});

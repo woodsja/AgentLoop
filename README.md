@@ -139,7 +139,7 @@ Claude Code can connect to the local bridge directly, no tunnel needed:
 claude mcp add --transport http agentloop "http://127.0.0.1:5758/mcp?key=<token-from-Connector>"
 ```
 
-The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `dispatch_task`, `start_loop`, and `send_message`. `dispatch_task` and `start_loop` both take an optional `engine`.
+The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `submit_job`, `get_job_status`, `get_job_result`, `dispatch_task`, `start_loop`, and `send_message`. Job and dispatch submission require a registered project name; `dispatch_task` and `start_loop` both take an optional `engine`.
 
 ## Try the demo loop
 
@@ -167,8 +167,19 @@ Watch the cycle timeline in **Active run** and critic verdicts in the **Event lo
 | `mcpBridge.port` | `5758` | Local MCP bridge port. |
 | `models` | `{ "claude": "opus", "codex": "gpt-5.6-terra" }` | Default model per engine. |
 | `enginePaths` | none | Optional absolute path per engine, for a CLI that is not on `PATH`. |
+| `allowedProjects` | none | Admin-owned map of project name to root used by `/api/jobs`, `/api/dispatch`, and `/api/loop`. Missing or invalid entries deny submission. |
 
 The shipped `config.json` includes every key above except the optional `enginePaths` key.
+
+To enable HTTP submission, explicitly register each project (relative roots are resolved relative to `config.json`):
+
+```json
+"allowedProjects": {
+  "starter": "examples/starter"
+}
+```
+
+Requests send the project name, never a working directory. The daemon resolves the configured root to its canonical path and rejects unknown projects, supplied `cwd` values, and requested operations.
 
 A model named on the task or loop itself wins over `models`.
 
@@ -183,6 +194,34 @@ node src/autopilot-systemd.js --root /home/woodsja/tools/ralph-autopilot --run-o
 It reloads the user manager, runs `systemctl --user enable --now` on the timer, and with `--run-once` starts the service once and fails if that pass fails. It then checks `loginctl show-user <user> --property=Linger`. If lingering is off, it tries `loginctl enable-linger <user>`. If that is refused, it prints the exact error as the permission boundary and leaves the rest of the install in place. Add `--dry-run` to print the units without installing them.
 
 A disabled project, like `finance-dashboard` with `"enabled": false`, makes each scheduled pass exit 0 right away. It does not do issue discovery, cleanup, or workspace preparation.
+
+## AgentLoop daemon (systemd user service)
+
+The AgentLoop daemon has a separate `agentloop.service`; it is not a timer and does not replace or modify the finance autopilot timer. Before starting it, an owner must explicitly authorize every project that may receive work in `config.json`:
+
+```json
+"allowedProjects": {
+  "starter": "examples/starter"
+}
+```
+
+With no valid `allowedProjects` entries, job and loop submission remains denied. The service installer never registers projects and never supplies a paid-engine fallback; install and authenticate the Codex or Claude CLI you intend to use first.
+
+Preview the exact user unit (the safe default):
+
+```bash
+node src/daemon-systemd.js --root "$(pwd)" --dry-run
+```
+
+Install and enable it explicitly, then start it when you are ready. Installation reloads the user manager but does not start or restart the daemon.
+
+```bash
+node src/daemon-systemd.js --root "$(pwd)" --install
+systemctl --user start agentloop.service
+systemctl --user status agentloop.service
+```
+
+The unit uses this Node executable path, the repository as `WorkingDirectory`, `Restart=on-failure`, and the invoking shell's `PATH` so subscription-authenticated `codex` or `claude` CLIs remain discoverable.
 
 ## Supported platforms
 
