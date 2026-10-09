@@ -1,6 +1,6 @@
 {
   "dashboardPort": 5757,
-  "maxConcurrent": 2,
+  "maxConcurrent": 1,
   "taskTimeoutMin": 45,
   "defaultEngine": "codex",
   "mcpBridge": {
@@ -9,5 +9,8 @@
   "models": {
     "claude": "opus",
     "codex": "gpt-5.6-terra"
+  },
+  "allowedProjects": {
+    "ralph": "."
   }
 }
