@@ -31,6 +31,21 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isVerificationEvidence(value) {
+  return isPlainObject(value)
+    && typeof value.command === 'string' && value.command.trim().length > 0
+    && (value.commit === null || (typeof value.commit === 'string' && value.commit.length > 0))
+    && typeof value.passed === 'boolean' && typeof value.timedOut === 'boolean'
+    && (value.exitCode === null || Number.isSafeInteger(value.exitCode))
+    && typeof value.stdout === 'string' && value.stdout.length <= MAX_DIAGNOSTIC_LENGTH
+    && typeof value.stderr === 'string' && value.stderr.length <= MAX_DIAGNOSTIC_LENGTH;
+}
+
+function hasPassingVerification(value, commit) {
+  return isVerificationEvidence(value) && typeof commit === 'string' && commit.length > 0
+    && value.commit === commit && value.passed === true && value.exitCode === 0 && value.timedOut === false;
+}
+
 function validateIssueNumber(issueNumber) {
   if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
     throw new TypeError('Autopilot job state requires a positive integer issue number');
@@ -121,6 +136,7 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     delivery: { branch: null, commit: null, pushed: false },
     pr: null,
     ci: null,
+    verification: null,
     review: null,
     reviewSkip: null,
     reviewAttempts: 0,
@@ -239,6 +255,7 @@ function validateJob(job, filePath) {
             : !hasValidDelivery(job) ? 'invalid delivery state'
             : !hasValidPullRequest(job) ? 'invalid pull request state'
               : !hasValidCi(job) ? 'invalid CI state'
+                : job.verification != null && !isVerificationEvidence(job.verification) ? 'invalid deterministic verification state'
                 : !hasValidReview(job) ? 'invalid independent review state'
                 : !hasValidReviewSkip(job) ? 'invalid review skip state'
                 : !hasValidReviewCorrection(job) ? 'invalid reviewer corrective cycle state'
@@ -295,6 +312,22 @@ function recordDelivery(job, { branch = job.branch, commit, pushed = true }) {
     job.reviewSkip = null;
   }
   job.delivery = { branch, commit, pushed };
+  // Bind the freshly checkpointed verifier result once. A later delivery
+  // cannot relabel evidence from a different commit as verification of itself.
+  if (job.verification && job.verification.commit === null) job.verification.commit = commit;
+  else if (job.verification && job.verification.commit !== commit) job.verification = null;
+  return job;
+}
+
+function recordVerification(job, command, verification) {
+  const evidence = {
+    command, commit: null, passed: verification.passed, exitCode: verification.exitCode,
+    timedOut: verification.timedOut,
+    stdout: typeof verification.stdout === 'string' ? truncate(verification.stdout) : undefined,
+    stderr: typeof verification.stderr === 'string' ? truncate(verification.stderr) : undefined,
+  };
+  if (!isVerificationEvidence(evidence)) throw new TypeError('Deterministic verification requires the actual command, exit code, timeout status, and test output');
+  job.verification = evidence;
   return job;
 }
 
@@ -603,6 +636,8 @@ module.exports = {
   beginReviewAttempt,
   normalizeReviewFindings,
   recordReview,
+  recordVerification,
+  hasPassingVerification,
   recordReviewSkip,
   recordReviewCorrectiveCycle,
   resolveStateDir,

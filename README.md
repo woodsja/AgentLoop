@@ -190,6 +190,8 @@ Skipping review with `"reviewPolicy": "none"` (also the default when omitted) re
 
 The job's `review` record holds the latest completed review of the delivered head: reviewer, verdict (`PASS` or `NEEDS_CHANGES`), exact commit SHA, the `reviewPolicy` that requested it, structured `findings` (`summary`, `file`, `line`, `severity`; empty for `PASS`), and `attempt` metadata (`number`, `startedAt`, `completedAt`). `reviewAttempts` counts every reviewer invocation, including failed ones. Automatic review is limited to two invocations per job, including interrupted ones; a persisted PASS for the exact delivered SHA is reused on restart. A new delivered commit clears the record but preserves the attempt count. Older PASS-only records still load.
 
+The job's `verification` record retains the actual Ralph verification command, pass flag, exit code, timeout status, and the last 4000 characters of each test-output stream. It is checkpointed before delivery and bound to the delivered commit, so it survives restarts. The independent reviewer receives this deterministic evidence alongside CI results. Missing, failed, timed-out, or different-SHA verification blocks both a fresh review and reuse of a persisted PASS. A corrected commit requires fresh verification evidence.
+
 ## Supported platforms
 
 Windows is the primary path:

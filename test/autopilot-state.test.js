@@ -17,6 +17,8 @@ const {
   recordFailure,
   recordPullRequest,
   recordReview,
+  recordVerification,
+  hasPassingVerification,
   recordReviewSkip,
   resolveStateDir,
   selectIssueForJobs,
@@ -106,6 +108,47 @@ test('invalid skip reasons and malformed persisted skip evidence fail closed', (
     { ...job.reviewSkip, recordedAt: '' },
   ]) {
     assert.throws(() => store.save({ ...job, reviewSkip: corrupt }), /invalid review skip state/);
+  }
+});
+
+test('verification evidence is checkpointed before delivery, bound once, and preserved across delivery restart', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store, 16);
+  const verification = { passed: true, exitCode: 0, timedOut: false, stdout: 'tests passed\n', stderr: 'lint clean\n' };
+  recordVerification(job, 'npm test && npm run lint', verification);
+  store.save(job);
+  const reloaded = createJobStore(store.directory).load(16);
+  assert.deepEqual(reloaded.verification, { command: 'npm test && npm run lint', commit: null, ...verification });
+  assert.equal(hasPassingVerification(reloaded.verification, 'abc123'), false);
+  recordDelivery(reloaded, { commit: 'abc123', pushed: false });
+  store.save(reloaded);
+  const afterCommit = createJobStore(store.directory).load(16);
+  assert.equal(hasPassingVerification(afterCommit.verification, 'abc123'), true);
+  recordDelivery(afterCommit, { commit: 'abc123', pushed: true });
+  assert.deepEqual(afterCommit.verification, reloaded.verification);
+  recordDelivery(afterCommit, { commit: 'def456', pushed: true });
+  assert.equal(afterCommit.verification, null, 'another SHA cannot reuse or rebind old evidence');
+  recordVerification(afterCommit, 'npm test', { ...verification, stdout: 'corrected tests passed\n' });
+  recordDelivery(afterCommit, { commit: 'def456' });
+  store.save(afterCommit);
+  assert.equal(hasPassingVerification(createJobStore(store.directory).load(16).verification, 'def456'), true);
+});
+
+test('verification evidence bounds test output and rejects malformed persisted records', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store, 17);
+  const verification = { passed: true, exitCode: 0, timedOut: false, stdout: 'x'.repeat(10000) + 'test summary', stderr: '' };
+  recordVerification(job, 'npm test', verification);
+  assert.equal(job.verification.stdout.length, 4000);
+  assert.ok(job.verification.stdout.endsWith('test summary'));
+  for (const corrupt of [
+    { ...job.verification, command: '' },
+    { ...job.verification, stdout: undefined },
+    { ...job.verification, stderr: 'x'.repeat(4001) },
+    { ...job.verification, exitCode: '0' },
+    { ...job.verification, passed: 'true' },
+  ]) {
+    assert.throws(() => store.save({ ...job, verification: corrupt }), /invalid deterministic verification state/);
   }
 });
 

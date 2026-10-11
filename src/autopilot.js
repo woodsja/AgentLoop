@@ -34,6 +34,8 @@ const {
   beginReviewAttempt,
   normalizeReviewFindings,
   recordReview,
+  recordVerification,
+  hasPassingVerification,
   recordReviewSkip,
   recordReviewCorrectiveCycle,
   resolveStateDir,
@@ -277,7 +279,9 @@ async function run(argv, dependencies = {}) {
         if (project.reviewPolicy === 'always' || project.reviewPolicy === 'risk') {
           // Recover the durable PASS checkpoint before spending any budget.
           // A review of another delivered SHA can never approve this head.
-          if (matchingPass(job.review, job.delivery.commit)) {
+          if (!hasPassingVerification(job.verification, job.delivery.commit)) {
+            handToHuman(job, 'review', 'Independent review requires passing deterministic verification evidence for the exact delivered commit.', store.now);
+          } else if (matchingPass(job.review, job.delivery.commit)) {
             job.status = 'ready_for_human_merge';
             markTerminal(job, 'ready_for_human_merge');
           } else if ((job.reviewAttempts ?? 0) >= MAX_REVIEW_ATTEMPTS) {
@@ -299,7 +303,8 @@ async function run(argv, dependencies = {}) {
                   issue: candidate,
                   pullRequest: { ...job.pr, headCommit: job.delivery.commit },
                   headCommit: job.delivery.commit,
-                  verification: job.ci,
+                  verification: job.verification,
+                  ci: job.ci,
                 })
                 : null;
             } catch (error) {
@@ -447,12 +452,17 @@ async function run(argv, dependencies = {}) {
       phase = 'running';
       job.status = 'running';
       job.ralph = { status: 'running', attempts: 0, taskId: task && task.id ? task.id : null };
+      job.verification = null;
       if (correction) correction.status = 'running';
       store.save(job);
       result = await service.run(workspace.worktreePath, task);
       const attempts = result && Array.isArray(result.attempts) ? result.attempts : [];
       job.ralph = { ...job.ralph, status: result ? result.status ?? null : null, attempts: attempts.length };
       outcome = classifyRalphResult(result);
+      const lastAttempt = attempts[attempts.length - 1];
+      if (outcome.deliverable && lastAttempt && lastAttempt.status === 'passed' && lastAttempt.verification) {
+        recordVerification(job, result.task ? result.task.verification : task.verification, lastAttempt.verification);
+      }
       // `passed` is terminal to the scheduler.  Persisting it before the
       // delivery side effects would create a crash window in which a verified
       // change is never pushed. Keep the job resumable through commit/push.

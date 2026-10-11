@@ -206,7 +206,9 @@ test('cleans a prepared workspace when repository setup fails before Ralph runs'
   assert.equal(cleaned, true);
 });
 
-const passingRalph = () => ({ run: async () => ({ status: 'passed', attempts: [{ number: 1 }] }) });
+const verifierResult = { passed: true, exitCode: 0, timedOut: false, stdout: 'tests passed\n', stderr: '' };
+const verifiedEvidence = commit => ({ command: 'check', commit, ...verifierResult });
+const passingRalph = () => ({ run: async () => ({ status: 'passed', attempts: [{ number: 1, status: 'passed', verification: verifierResult }] }) });
 
 test('persists a delivered PR awaiting CI and does not start duplicate worker work', async () => {
   const store = temporaryStore();
@@ -381,6 +383,69 @@ test('restart cannot use a skip reason persisted for a different delivered SHA',
   assert.match(saved.failures.at(-1).message, /skip reason/i);
 });
 
+test('review receives actual deterministic verification evidence after delivery and restart', async () => {
+  const store = temporaryStore();
+  const issue = { number: 245, title: 'Review deterministic test evidence', body: '' };
+  const command = `node -e "console.log('3 tests passed'); console.error('lint clean')"`;
+  const verifiedProject = { ...project, enabled: true, worker: 'codex', maxAttempts: 2, verification: command, reviewPolicy: 'always' };
+  const worktreePath = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-verification-'));
+  temporaryDirectories.add(worktreePath);
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => verifiedProject,
+    discoverReadyIssues: async () => [issue],
+    prepareIssueWorkspace: async (value, candidate, options) => ({ worktreePath, branch: options.branch, baseRef: 'origin/main' }),
+    ralphOptions: { createCliWorkerImpl: () => async () => ({ status: 'done' }) },
+  }));
+  let context;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+    // A config change must not replace the command that actually ran.
+    loadProjectConfig: () => ({ ...verifiedProject, verification: 'different-check' }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+    reviewPullRequest: async value => {
+      context = value;
+      return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: value.headCommit };
+    },
+  }));
+  assert.deepEqual(context.verification, {
+    command, commit: 'abc123', passed: true, exitCode: 0, timedOut: false,
+    stdout: '3 tests passed\n', stderr: 'lint clean\n',
+  });
+  assert.equal(context.ci.state, 'green');
+  const saved = createJobStore(store.directory).load(issue.number);
+  assert.deepEqual(saved.verification, context.verification);
+  assert.equal(saved.terminalState, 'ready_for_human_merge');
+});
+
+test('missing, failed, timed-out, or stale verification cannot authorize a review or cached PASS', async () => {
+  const valid = { command: 'check', commit: 'abc123', passed: true, exitCode: 0, timedOut: false, stdout: 'tests passed', stderr: '' };
+  for (const verification of [undefined, null, { ...valid, passed: false }, { ...valid, exitCode: 1 }, { ...valid, timedOut: true }, { ...valid, commit: 'other-sha' }]) {
+    for (const cachedPass of [null, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123' }]) {
+      const store = temporaryStore();
+      const issue = { number: 246, title: 'Fail closed without deterministic evidence', body: '' };
+      const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-246', worktreePath: null, now: store.now });
+      job.status = 'awaiting_ci';
+      job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+      job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+      job.verification = verification;
+      job.review = cachedPass;
+      store.save(job);
+      let calls = 0;
+      await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+        loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'always' }),
+        discoverReadyIssues: async () => [issue],
+        observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+        reviewPullRequest: async () => { calls += 1; return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123' }; },
+      }));
+      const saved = createJobStore(store.directory).load(issue.number);
+      assert.equal(calls, 0);
+      assert.equal(saved.terminalState, 'ready_for_human');
+      assert.equal(saved.reviewAttempts, 0);
+      assert.match(saved.failures.at(-1).message, /verification/i);
+    }
+  }
+});
+
 test('an always-review project persists a matching independent PASS before becoming merge-ready', async () => {
   const store = temporaryStore();
   const issue = { number: 230, title: 'Review this change', body: 'The issue context the reviewer needs.' };
@@ -404,7 +469,8 @@ test('an always-review project persists a matching independent PASS before becom
       assert.deepEqual(context.issue, issue);
       assert.deepEqual(context.pullRequest, { number: 99, url: 'https://github.com/example/repo/pull/99', headCommit: 'abc123' });
       assert.equal(context.headCommit, 'abc123');
-      assert.deepEqual(context.verification, {
+      assert.deepEqual(context.verification, verifiedEvidence('abc123'));
+      assert.deepEqual(context.ci, {
         state: 'green', details: 'CI (#501): completed/success', prNumber: 99, headCommit: 'abc123', runs: [],
       });
       // The terminal transition must follow a durable review checkpoint.
@@ -438,6 +504,7 @@ test('restart reuses a persisted exact-head PASS even when review attempts are e
     attempt: beginReviewAttempt(job, store.now),
   }, store.now);
   // Crash after the PASS checkpoint, before the terminal transition.
+  job.verification = verifiedEvidence('abc123');
   store.save(job);
   let reviewCalls = 0;
   await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
@@ -466,6 +533,7 @@ test('restart refuses further reviews once the persisted review-attempt limit is
     job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
     // Each interrupted invocation left its consumed attempt on disk.
     job.reviewAttempts = attempts;
+    job.verification = verifiedEvidence('abc123');
     store.save(job);
     let reviewCalls = 0;
     const dependencies = {
@@ -502,6 +570,7 @@ test('restart never reuses a persisted PASS for a different delivered SHA', asyn
     reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123', policy: 'always',
     attempt: beginReviewAttempt(job, store.now),
   }, store.now);
+  job.verification = verifiedEvidence('def456');
   store.save(job);
   let reviewCalls = 0;
   await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
@@ -562,9 +631,10 @@ test('a matching reviewer NEEDS_CHANGES is deferred, corrected once, then indepe
   }, 1);
 
   let task;
+  const correctionVerification = { ...verifierResult, stdout: 'corrected tests passed\n' };
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
     loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
-    createRalphTaskService: () => ({ run: async (cwd, value) => { task = value; return { status: 'passed', attempts: [{ number: 1 }] }; } }),
+    createRalphTaskService: () => ({ run: async (cwd, value) => { task = value; return { status: 'passed', attempts: [{ number: 1, status: 'passed', verification: correctionVerification }] }; } }),
     deliverPassedWork: async ({ workspace }) => ({ branch: workspace.branch, commit: 'def456', pr: { number: 99, url: 'https://github.com/example/repo/pull/99' } }),
   }));
   assert.equal(task.id, 'autopilot:example/repo#234:review-correction-1');
@@ -578,7 +648,10 @@ test('a matching reviewer NEEDS_CHANGES is deferred, corrected once, then indepe
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
     loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
     observePullRequestCi: async (value, identity) => { assert.equal(identity.commit, 'def456'); return { state: 'green', details: 'ok', prNumber: 99, headCommit: 'def456', runs: [] }; },
-    reviewPullRequest: async () => ({ reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'def456' }),
+    reviewPullRequest: async context => {
+      assert.deepEqual(context.verification, { command: 'check', commit: 'def456', ...correctionVerification });
+      return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'def456' };
+    },
   }));
   saved = createJobStore(store.directory).load(234);
   assert.equal(saved.status, 'ready_for_human_merge');
@@ -640,6 +713,7 @@ test('a second matching reviewer NEEDS_CHANGES after the reviewer budget is spen
   job.status = 'awaiting_ci';
   job.reviewCorrectiveCycles = 1;
   job.reviewCorrection = { cycle: 1, status: 'delivered', reviewCommit: 'abc123', reviewer: 'claude:sonnet', findings: 'first finding', commit: 'def456' };
+  job.verification = verifiedEvidence('def456');
   store.save(job);
   let workerStarted = false;
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
@@ -671,6 +745,7 @@ test('a second reviewer block and an interrupted reviewer worker are exhausted w
   exhausted.status = 'awaiting_ci';
   exhausted.reviewCorrectiveCycles = 1;
   exhausted.reviewCorrection = { cycle: 1, status: 'delivered', reviewCommit: 'abc123', reviewer: 'claude:sonnet', findings: 'lib.js:7: validate input', commit: 'def456' };
+  exhausted.verification = verifiedEvidence('def456');
   exhaustedStore.save(exhausted);
   let workerStarted = false;
   await runAutopilot(['--project', 'demo'], enabledDependencies(exhaustedStore, {
