@@ -66,6 +66,9 @@ function errorMessage(error) {
 
 // Terminal hand-off for a CI failure the single corrective cycle could not fix.
 const READY_FOR_HUMAN = 'ready_for_human';
+// One initial review and one review of the bounded correction, including
+// interrupted invocations. This budget is never reset for a new commit.
+const MAX_REVIEW_ATTEMPTS = 2;
 const realReviewAdapter = createClaudeReviewAdapter();
 
 // A verified-but-undelivered change and an already pushed branch are both work
@@ -271,54 +274,63 @@ async function run(argv, dependencies = {}) {
       recordCiState(job, observation);
       if (observation.state === 'green') {
         if (project.reviewPolicy === 'always' || project.reviewPolicy === 'risk') {
-          // Keep the original injection names working for embedders while the
-          // production default is the concrete, read-only Claude adapter.
-          const reviewPullRequest = dependencies.reviewPullRequest
-            || dependencies.independentReview || dependencies.independentReviewer
-            || realReviewAdapter;
-          const attempt = beginReviewAttempt(job, store.now);
-          // Consume the attempt number durably before the paid reviewer runs.
-          store.save(job);
-          let review;
-          try {
-            review = typeof reviewPullRequest === 'function'
-              ? await reviewPullRequest({
-                project,
-                issue: candidate,
-                pullRequest: { ...job.pr, headCommit: job.delivery.commit },
-                headCommit: job.delivery.commit,
-                verification: job.ci,
-              })
-              : null;
-          } catch (error) {
-            handToHuman(job, 'review', `Independent review could not be completed: ${errorMessage(error)}`, store.now);
-          }
-          const pass = matchingPass(review, job.delivery.commit);
-          const needsChanges = matchingNeedsChanges(review, job.delivery.commit);
-          if (!job.terminal && pass) {
-            // This write is intentionally separate from the terminal state:
-            // an on-disk PASS must exist before the PR becomes merge-ready.
-            recordReview(job, { ...pass, policy: project.reviewPolicy, attempt }, store.now);
-            store.save(job);
+          // Recover the durable PASS checkpoint before spending any budget.
+          // A review of another delivered SHA can never approve this head.
+          if (matchingPass(job.review, job.delivery.commit)) {
             job.status = 'ready_for_human_merge';
             markTerminal(job, 'ready_for_human_merge');
-          } else if (!job.terminal && needsChanges) {
-            // Feedback is checkpointed now, but the worker is deliberately
-            // deferred to the next timer pass so review observation remains
-            // side-effect free and restart-safe.
-            recordReview(job, { ...needsChanges, policy: project.reviewPolicy, attempt }, store.now);
-            const findings = findingsText(job.review.findings);
-            if ((job.reviewCorrectiveCycles ?? 0) === 0) {
-              recordReviewCorrectiveCycle(job, {
-                reviewCommit: needsChanges.commit, reviewer: needsChanges.reviewer, findings,
-              });
-              job.status = 'review_correction_eligible';
-              job.ralph = { status: null, attempts: 0, taskId: null };
-            } else {
-              handToHuman(job, 'review', `Independent review still blocks after ${job.reviewCorrectiveCycles} reviewer corrective cycle(s); no further automatic correction will run.\nReviewer: ${needsChanges.reviewer}\nFindings:\n${findings}`, store.now);
+          } else if ((job.reviewAttempts ?? 0) >= MAX_REVIEW_ATTEMPTS) {
+            handToHuman(job, 'review', `Independent review attempt limit (${MAX_REVIEW_ATTEMPTS}) reached; no further automatic review will run.`, store.now);
+          } else {
+            // Keep the original injection names working for embedders while the
+            // production default is the concrete, read-only Claude adapter.
+            const reviewPullRequest = dependencies.reviewPullRequest
+              || dependencies.independentReview || dependencies.independentReviewer
+              || realReviewAdapter;
+            const attempt = beginReviewAttempt(job, store.now);
+            // Consume the attempt number durably before the paid reviewer runs.
+            store.save(job);
+            let review;
+            try {
+              review = typeof reviewPullRequest === 'function'
+                ? await reviewPullRequest({
+                  project,
+                  issue: candidate,
+                  pullRequest: { ...job.pr, headCommit: job.delivery.commit },
+                  headCommit: job.delivery.commit,
+                  verification: job.ci,
+                })
+                : null;
+            } catch (error) {
+              handToHuman(job, 'review', `Independent review could not be completed: ${errorMessage(error)}`, store.now);
             }
-          } else if (!job.terminal) {
-            handToHuman(job, 'review', 'Independent review did not return a valid PASS for the delivered head commit.', store.now);
+            const pass = matchingPass(review, job.delivery.commit);
+            const needsChanges = matchingNeedsChanges(review, job.delivery.commit);
+            if (!job.terminal && pass) {
+              // This write is intentionally separate from the terminal state:
+              // an on-disk PASS must exist before the PR becomes merge-ready.
+              recordReview(job, { ...pass, policy: project.reviewPolicy, attempt }, store.now);
+              store.save(job);
+              job.status = 'ready_for_human_merge';
+              markTerminal(job, 'ready_for_human_merge');
+            } else if (!job.terminal && needsChanges) {
+              // Feedback is checkpointed now, but the worker is deliberately
+              // deferred to the next timer pass so review observation remains
+              // side-effect free and restart-safe.
+              recordReview(job, { ...needsChanges, policy: project.reviewPolicy, attempt }, store.now);
+              const findings = findingsText(job.review.findings);
+              if ((job.reviewCorrectiveCycles ?? 0) === 0) {
+                recordReviewCorrectiveCycle(job, {
+                  reviewCommit: needsChanges.commit, reviewer: needsChanges.reviewer, findings,
+                });
+                job.status = 'review_correction_eligible';
+                job.ralph = { status: null, attempts: 0, taskId: null };
+              } else {
+                handToHuman(job, 'review', `Independent review still blocks after ${job.reviewCorrectiveCycles} reviewer corrective cycle(s); no further automatic correction will run.\nReviewer: ${needsChanges.reviewer}\nFindings:\n${findings}`, store.now);
+              }
+            } else if (!job.terminal) {
+              handToHuman(job, 'review', 'Independent review did not return a valid PASS for the delivered head commit.', store.now);
+            }
           }
         } else {
           job.status = 'ready_for_human_merge';

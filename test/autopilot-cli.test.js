@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { parseArguments, classifyRalphResult, run: runAutopilot } = require('../src/autopilot');
-const { createJob, createJobStore, isResumable } = require('../src/autopilot-state');
+const { beginReviewAttempt, createJob, createJobStore, isResumable, recordReview } = require('../src/autopilot-state');
 const { deliverPassedWork } = require('../src/autopilot-delivery');
 
 const project = { enabled: false, repo: 'example/repo', readyLabel: 'ready', worker: 'codex' };
@@ -339,6 +339,102 @@ test('an always-review project persists a matching independent PASS before becom
   const saved = createJobStore(store.directory).load(230);
   assertPersistedReview(saved.review, { reviewer: 'independent-reviewer', verdict: 'PASS', commit: 'abc123', policy: 'always' }, 1);
   assert.equal(saved.status, 'ready_for_human_merge');
+  assert.equal(saved.terminalState, 'ready_for_human_merge');
+});
+
+test('restart reuses a persisted exact-head PASS even when review attempts are exhausted', async () => {
+  const store = temporaryStore();
+  const issue = { number: 239, title: 'Resume review checkpoint', body: '' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-239', worktreePath: null, now: store.now });
+  job.status = 'awaiting_ci';
+  job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  beginReviewAttempt(job, store.now);
+  recordReview(job, {
+    reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123', policy: 'always',
+    attempt: beginReviewAttempt(job, store.now),
+  }, store.now);
+  // Crash after the PASS checkpoint, before the terminal transition.
+  store.save(job);
+  let reviewCalls = 0;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+    reviewPullRequest: async () => {
+      reviewCalls += 1;
+      return { reviewer: 'duplicate-reviewer', verdict: 'PASS', commit: 'abc123' };
+    },
+  }));
+  const saved = createJobStore(store.directory).load(issue.number);
+  assert.equal(reviewCalls, 0);
+  assert.equal(saved.reviewAttempts, 2);
+  assert.deepEqual(saved.review, job.review);
+  assert.equal(saved.terminalState, 'ready_for_human_merge');
+});
+
+test('restart refuses further reviews once the persisted review-attempt limit is reached', async () => {
+  for (const attempts of [2, 100]) {
+    const store = temporaryStore();
+    const issue = { number: 240, title: 'Interrupted review attempts', body: '' };
+    const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-240', worktreePath: null, now: store.now });
+    job.status = 'awaiting_ci';
+    job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+    job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+    // Each interrupted invocation left its consumed attempt on disk.
+    job.reviewAttempts = attempts;
+    store.save(job);
+    let reviewCalls = 0;
+    const dependencies = {
+      loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'always' }),
+      discoverReadyIssues: async () => [issue],
+      observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+      reviewPullRequest: async () => {
+        reviewCalls += 1;
+        return { reviewer: 'over-budget-reviewer', verdict: 'PASS', commit: 'abc123' };
+      },
+    };
+    await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), dependencies));
+    const saved = createJobStore(store.directory).load(issue.number);
+    assert.equal(reviewCalls, 0);
+    assert.equal(saved.reviewAttempts, attempts);
+    assert.equal(saved.review, null);
+    assert.equal(saved.terminalState, 'ready_for_human');
+    assert.match(saved.failures.at(-1).message, /review.*attempt.*limit/i);
+    // Another supervisor invocation cannot reopen the exhausted job.
+    await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), dependencies));
+    assert.equal(reviewCalls, 0);
+    assert.equal(createJobStore(store.directory).load(issue.number).reviewAttempts, attempts);
+  }
+});
+
+test('restart never reuses a persisted PASS for a different delivered SHA', async () => {
+  const store = temporaryStore();
+  const issue = { number: 241, title: 'Stale review checkpoint', body: '' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-241', worktreePath: null, now: store.now });
+  job.status = 'awaiting_ci';
+  job.delivery = { branch: job.branch, commit: 'def456', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  recordReview(job, {
+    reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123', policy: 'always',
+    attempt: beginReviewAttempt(job, store.now),
+  }, store.now);
+  store.save(job);
+  let reviewCalls = 0;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'def456' }),
+    reviewPullRequest: async context => {
+      reviewCalls += 1;
+      assert.equal(context.headCommit, 'def456');
+      return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'def456' };
+    },
+  }));
+  const saved = createJobStore(store.directory).load(issue.number);
+  assert.equal(reviewCalls, 1);
+  assert.equal(saved.reviewAttempts, 2);
+  assert.equal(saved.review.commit, 'def456');
   assert.equal(saved.terminalState, 'ready_for_human_merge');
 });
 
