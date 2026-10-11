@@ -17,6 +17,7 @@ const {
   recordFailure,
   recordPullRequest,
   recordReview,
+  recordReviewSkip,
   resolveStateDir,
   selectIssueForJobs,
   summarizeRalphAttempt,
@@ -69,6 +70,43 @@ test('a newly delivered commit invalidates an approval for the prior head', () =
   recordDelivery(job, { branch: job.branch, commit: 'def456', pushed: true });
   store.save(job);
   assert.equal(createJobStore(store.directory).load(10).review, null);
+});
+
+test('review skip evidence survives reload and is invalidated by a new delivered SHA', () => {
+  const store = createJobStore(temporaryDirectory(), { now: () => '2026-10-11T00:00:00.000Z' });
+  const job = newJob(store, 14);
+  recordDelivery(job, { commit: 'abc123' });
+  recordReviewSkip(job, { commit: 'abc123', reason: '  Documentation-only change covered by documentation checks.  ' }, store.now);
+  store.save(job);
+  const reloaded = createJobStore(store.directory).load(14);
+  assert.deepEqual(reloaded.reviewSkip, {
+    policy: 'none', commit: 'abc123', reason: 'Documentation-only change covered by documentation checks.',
+    recordedAt: '2026-10-11T00:00:00.000Z',
+  });
+  recordDelivery(reloaded, { commit: 'def456' });
+  store.save(reloaded);
+  assert.equal(createJobStore(store.directory).load(14).reviewSkip, null);
+});
+
+test('invalid skip reasons and malformed persisted skip evidence fail closed', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store, 15);
+  recordDelivery(job, { commit: 'abc123' });
+  for (const reason of [undefined, null, '', ' \n\t ', 42, 'x'.repeat(4001)]) {
+    assert.throws(() => recordReviewSkip(job, { commit: 'abc123', reason }), /skip reason/i);
+    assert.equal(job.reviewSkip, null);
+  }
+  assert.throws(() => recordReviewSkip(job, { commit: 'def456', reason: 'Documentation-only change.' }), /exact delivered commit/);
+  recordReviewSkip(job, { commit: 'abc123', reason: 'Documentation-only change covered by documentation checks.' });
+  for (const corrupt of [
+    { ...job.reviewSkip, reason: '  ' },
+    { ...job.reviewSkip, reason: 'x'.repeat(4001) },
+    { ...job.reviewSkip, policy: 'always' },
+    { ...job.reviewSkip, commit: '' },
+    { ...job.reviewSkip, recordedAt: '' },
+  ]) {
+    assert.throws(() => store.save({ ...job, reviewSkip: corrupt }), /invalid review skip state/);
+  }
 });
 
 test('persists review policy, structured findings, and attempt metadata with the verdict and exact SHA', () => {

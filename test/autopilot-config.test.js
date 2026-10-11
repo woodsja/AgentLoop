@@ -77,6 +77,16 @@ test('unknown projects fail with a clear error', () => {
   assert.throws(() => loadProjectConfig('missing-project'), /Unknown autopilot project: missing-project/);
 });
 
+test('preserves an explicit review skip explanation and rejects invalid reason values', () => {
+  const config = { ...validProject(), reviewPolicy: 'none', reviewSkipReason: 'Documentation-only change covered by documentation checks.' };
+  assert.deepEqual(loadProjectConfig('demo', { configPath: writeConfig({ demo: config }) }), config);
+  for (const reviewSkipReason of [null, '', ' \n\t ', 42, 'x'.repeat(4001)]) {
+    assert.throws(() => loadProjectConfig('demo', {
+      configPath: writeConfig({ demo: { ...config, reviewSkipReason } }),
+    }), /reviewSkipReason/);
+  }
+});
+
 test('malformed JSON and missing configuration files fail closed', () => {
   const malformedPath = writeConfig('{ not json');
   const missingPath = path.join(os.tmpdir(), 'ralph-autopilot-does-not-exist.json');

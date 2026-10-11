@@ -298,6 +298,89 @@ function assertPersistedReview(review, expected, attemptNumber) {
   assert.ok(attempt.startedAt <= attempt.completedAt);
 }
 
+test('green CI cannot become merge-ready without a valid review skip reason, including after restart', async () => {
+  for (const policy of ['none', undefined]) {
+    for (const reason of [undefined, null, '', ' \n\t ', 42, 'x'.repeat(4001)]) {
+      const store = temporaryStore();
+      const issue = { number: 242, title: 'Explain skipped review', body: '' };
+      const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-242', worktreePath: null, now: store.now });
+      job.status = 'awaiting_ci';
+      job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+      job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+      store.save(job);
+      const dependencies = {
+        loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: policy, reviewSkipReason: reason }),
+        discoverReadyIssues: async () => [issue],
+        observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+        reviewPullRequest: async () => assert.fail('a no-review policy must not invoke the reviewer'),
+      };
+      await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), dependencies));
+      const saved = createJobStore(store.directory).load(issue.number);
+      assert.equal(saved.terminalState, 'ready_for_human');
+      assert.equal(saved.reviewSkip ?? null, null);
+      assert.match(saved.failures.at(-1).message, /skip reason/i);
+      await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), dependencies));
+      assert.equal(createJobStore(store.directory).load(issue.number).terminalState, 'ready_for_human');
+    }
+  }
+});
+
+test('a review skip reason is checkpointed for the exact SHA and survives a crash before merge-ready', async () => {
+  const store = temporaryStore();
+  const issue = { number: 243, title: 'Persist review exception', body: '' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-243', worktreePath: null, now: store.now });
+  job.status = 'awaiting_ci';
+  job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  store.save(job);
+  const dependencies = {
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'none', reviewSkipReason: '  Documentation-only change covered by the documentation checks.  ' }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+    reviewPullRequest: async () => assert.fail('must not review an explained skip'),
+  };
+  const interruptedStore = { ...store, save(value) {
+    if (value.terminal) throw new Error('crash before terminal checkpoint');
+    return store.save(value);
+  } };
+  await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(interruptedStore, dependencies)), /crash before terminal checkpoint/);
+  const checkpoint = createJobStore(store.directory).load(issue.number);
+  assert.equal(checkpoint.terminal, false);
+  assert.equal(checkpoint.reviewSkip.policy, 'none');
+  assert.equal(checkpoint.reviewSkip.commit, 'abc123');
+  assert.equal(checkpoint.reviewSkip.reason, 'Documentation-only change covered by the documentation checks.');
+  assert.equal(typeof checkpoint.reviewSkip.recordedAt, 'string');
+  // The durable exception is sufficient even if its config text changes.
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+    ...dependencies,
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'none' }),
+  }));
+  const saved = createJobStore(store.directory).load(issue.number);
+  assert.equal(saved.terminalState, 'ready_for_human_merge');
+  assert.deepEqual(saved.reviewSkip, checkpoint.reviewSkip);
+  assert.equal(saved.review, null);
+  assert.equal(saved.reviewAttempts, 0);
+});
+
+test('restart cannot use a skip reason persisted for a different delivered SHA', async () => {
+  const store = temporaryStore();
+  const issue = { number: 244, title: 'Require a current review exception', body: '' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-244', worktreePath: null, now: store.now });
+  job.status = 'awaiting_ci';
+  job.delivery = { branch: job.branch, commit: 'def456', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  job.reviewSkip = { policy: 'none', commit: 'abc123', reason: 'Documentation-only change covered by documentation checks.', recordedAt: store.now() };
+  store.save(job);
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'none' }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'def456' }),
+  }));
+  const saved = createJobStore(store.directory).load(issue.number);
+  assert.equal(saved.terminalState, 'ready_for_human');
+  assert.match(saved.failures.at(-1).message, /skip reason/i);
+});
+
 test('an always-review project persists a matching independent PASS before becoming merge-ready', async () => {
   const store = temporaryStore();
   const issue = { number: 230, title: 'Review this change', body: 'The issue context the reviewer needs.' };
@@ -1163,7 +1246,7 @@ test('reloads a failed job on the next run and resumes it with the persisted bra
 function enabledDependencies(store, overrides = {}) {
   return {
     jobStore: store,
-    loadProjectConfig: () => ({ ...project, enabled: true, verification: 'check', maxAttempts: 2, worktreeRoot: '/tmp/worktrees' }),
+    loadProjectConfig: () => ({ ...project, enabled: true, verification: 'check', maxAttempts: 2, worktreeRoot: '/tmp/worktrees', reviewPolicy: 'none', reviewSkipReason: 'Synthetic fixture changes are covered by deterministic tests.' }),
     prepareIssueWorkspace: async (value, issue, options) => ({
       worktreePath: `/tmp/worktrees/issue-${issue.number}`,
       branch: options.branch,

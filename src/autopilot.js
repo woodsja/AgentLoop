@@ -34,6 +34,7 @@ const {
   beginReviewAttempt,
   normalizeReviewFindings,
   recordReview,
+  recordReviewSkip,
   recordReviewCorrectiveCycle,
   resolveStateDir,
   selectIssueForJobs,
@@ -333,8 +334,19 @@ async function run(argv, dependencies = {}) {
             }
           }
         } else {
-          job.status = 'ready_for_human_merge';
-          markTerminal(job, 'ready_for_human_merge');
+          if (!job.reviewSkip || job.reviewSkip.commit !== job.delivery.commit) {
+            try {
+              recordReviewSkip(job, { commit: job.delivery.commit, reason: project.reviewSkipReason }, store.now);
+            } catch (error) {
+              handToHuman(job, 'review', errorMessage(error), store.now);
+            }
+          }
+          if (!job.terminal) {
+            // Persist the SHA-bound exception before the terminal transition.
+            store.save(job);
+            job.status = 'ready_for_human_merge';
+            markTerminal(job, 'ready_for_human_merge');
+          }
         }
       } else if (observation.state === 'red') {
         // Never launch a worker from the observation pass.  The failed run's

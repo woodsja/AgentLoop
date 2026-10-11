@@ -122,6 +122,7 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     pr: null,
     ci: null,
     review: null,
+    reviewSkip: null,
     reviewAttempts: 0,
     correction: null,
     reviewCorrection: null,
@@ -202,6 +203,12 @@ function validateJob(job, filePath) {
       && typeof value.reviewCorrection.findings === 'string' && value.reviewCorrection.findings.length > 0
       && value.reviewCorrection.findings.length <= MAX_DIAGNOSTIC_LENGTH
       && (value.reviewCorrection.commit === null || typeof value.reviewCorrection.commit === 'string'));
+  const hasValidReviewSkip = value => value.reviewSkip === undefined || value.reviewSkip === null
+    || (isPlainObject(value.reviewSkip) && value.reviewSkip.policy === 'none'
+      && typeof value.reviewSkip.commit === 'string' && value.reviewSkip.commit.trim().length > 0
+      && typeof value.reviewSkip.reason === 'string' && value.reviewSkip.reason.trim().length > 0
+      && value.reviewSkip.reason.length <= MAX_DIAGNOSTIC_LENGTH
+      && typeof value.reviewSkip.recordedAt === 'string' && value.reviewSkip.recordedAt.length > 0);
   const hasValidRalph = value => isPlainObject(value.ralph)
     && (value.ralph.status === null || typeof value.ralph.status === 'string')
     && Number.isSafeInteger(value.ralph.attempts) && value.ralph.attempts >= 0
@@ -233,6 +240,7 @@ function validateJob(job, filePath) {
             : !hasValidPullRequest(job) ? 'invalid pull request state'
               : !hasValidCi(job) ? 'invalid CI state'
                 : !hasValidReview(job) ? 'invalid independent review state'
+                : !hasValidReviewSkip(job) ? 'invalid review skip state'
                 : !hasValidReviewCorrection(job) ? 'invalid reviewer corrective cycle state'
                 : !hasValidCorrection(job) ? 'invalid corrective cycle state'
           : typeof job.terminal !== 'boolean' ? 'missing terminal flag'
@@ -282,7 +290,10 @@ function recordDelivery(job, { branch = job.branch, commit, pushed = true }) {
   }
   // An approval is only meaningful for the exact delivered SHA.  A correction
   // must therefore invalidate an earlier PASS before its new CI is observed.
-  if (job.delivery && job.delivery.commit && job.delivery.commit !== commit) job.review = null;
+  if (job.delivery && job.delivery.commit && job.delivery.commit !== commit) {
+    job.review = null;
+    job.reviewSkip = null;
+  }
   job.delivery = { branch, commit, pushed };
   return job;
 }
@@ -340,6 +351,18 @@ function normalizeReviewFindings(findings) {
       severity: item.severity || null,
     };
   });
+}
+
+// A skipped review is an explicit, durable exception for the delivered SHA.
+function recordReviewSkip(job, { commit, reason }, now = () => new Date().toISOString()) {
+  if (typeof reason !== 'string' || !reason.trim() || reason.trim().length > MAX_DIAGNOSTIC_LENGTH) {
+    throw new TypeError(`Review skip reason must be a non-empty explanation of at most ${MAX_DIAGNOSTIC_LENGTH} characters`);
+  }
+  if (typeof commit !== 'string' || !commit.trim() || commit !== job.delivery.commit) {
+    throw new TypeError('Review skip requires the exact delivered commit');
+  }
+  job.reviewSkip = { policy: 'none', commit, reason: reason.trim(), recordedAt: now() };
+  return job;
 }
 
 // Each reviewer invocation consumes an attempt number before it starts, so a
@@ -580,6 +603,7 @@ module.exports = {
   beginReviewAttempt,
   normalizeReviewFindings,
   recordReview,
+  recordReviewSkip,
   recordReviewCorrectiveCycle,
   resolveStateDir,
   selectIssueForJobs,

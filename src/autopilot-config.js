@@ -35,16 +35,20 @@ function validateProject(projectName, project) {
     throw new TypeError(`prepareVenv for project ${projectName} must be a boolean`);
   }
 
-  // Review is deliberately opt-in.  An omitted policy preserves the existing
-  // green-CI hand-off. Until deterministic risk classification exists, every
-  // opted-in policy other than `none` requires independent review before the
-  // PR is presented for merge.
+  // An omitted policy behaves as `none`, which requires a persisted skip
+  // explanation before the PR can be presented for merge. Until deterministic
+  // risk classification exists, both `risk` and `always` require review.
   if (Object.hasOwn(project, 'reviewPolicy') && !['none', 'risk', 'always'].includes(project.reviewPolicy)) {
     throw new TypeError(`reviewPolicy for project ${projectName} must be none, risk, or always`);
   }
 
   if (Object.hasOwn(project, 'reviewModel') && !['sonnet', 'opus'].includes(project.reviewModel)) {
     throw new TypeError(`reviewModel for project ${projectName} must be sonnet or opus`);
+  }
+
+  if (Object.hasOwn(project, 'reviewSkipReason')
+    && (!isNonEmptyString(project.reviewSkipReason) || project.reviewSkipReason.trim().length > 4000)) {
+    throw new TypeError(`reviewSkipReason for project ${projectName} must be a non-empty explanation of at most 4000 characters`);
   }
 
   if (Object.hasOwn(project, 'stateDir') && !isNonEmptyString(project.stateDir)) {
