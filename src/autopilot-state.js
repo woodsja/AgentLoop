@@ -18,6 +18,9 @@ const MAX_DIAGNOSTIC_LENGTH = 4000;
 // than a single failure message.
 const MAX_CI_DIAGNOSTIC_LENGTH = 16000;
 const CORRECTION_STATUSES = new Set(['eligible', 'running', 'passed', 'delivered', 'failed']);
+const REVIEW_VERDICTS = new Set(['PASS', 'NEEDS_CHANGES']);
+const REVIEW_POLICIES = new Set(['risk', 'always']);
+const MAX_REVIEW_FINDINGS = 50;
 const JOB_FILE = /^issue-([1-9][0-9]*)\.json$/;
 
 // `preparing` and `running` are only ever persisted while a process owns the
@@ -119,6 +122,7 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     pr: null,
     ci: null,
     review: null,
+    reviewAttempts: 0,
     correction: null,
     reviewCorrection: null,
     runs: 0,
@@ -164,11 +168,31 @@ function validateJob(job, filePath) {
       && typeof value.correction.diagnostics === 'string' && value.correction.diagnostics.length > 0
       && value.correction.diagnostics.length <= MAX_CI_DIAGNOSTIC_LENGTH
       && (value.correction.commit === null || typeof value.correction.commit === 'string'));
+  const nullableString = text => text === null || typeof text === 'string';
+  const hasValidFinding = finding => isPlainObject(finding)
+    && typeof finding.summary === 'string' && finding.summary.length > 0
+    && finding.summary.length <= MAX_DIAGNOSTIC_LENGTH
+    && nullableString(finding.file) && nullableString(finding.severity)
+    && (finding.line === null || (Number.isSafeInteger(finding.line) && finding.line > 0));
+  const hasValidReviewAttempt = attempt => isPlainObject(attempt)
+    && Number.isSafeInteger(attempt.number) && attempt.number > 0
+    && typeof attempt.startedAt === 'string' && attempt.startedAt.length > 0
+    && typeof attempt.completedAt === 'string' && attempt.completedAt.length > 0;
+  // Records written before policy, findings, and attempt metadata were
+  // persisted hold only a PASS; they remain readable as such.
+  const isLegacyReview = review => review.policy === undefined && review.findings === undefined
+    && review.attempt === undefined && review.verdict === 'PASS';
   const hasValidReview = value => value.review === undefined || value.review === null
     || (isPlainObject(value.review)
       && typeof value.review.reviewer === 'string' && value.review.reviewer.length > 0
-      && value.review.verdict === 'PASS'
-      && typeof value.review.commit === 'string' && value.review.commit.length > 0);
+      && REVIEW_VERDICTS.has(value.review.verdict)
+      && typeof value.review.commit === 'string' && value.review.commit.length > 0
+      && (isLegacyReview(value.review) || (REVIEW_POLICIES.has(value.review.policy)
+        && Array.isArray(value.review.findings) && value.review.findings.length <= MAX_REVIEW_FINDINGS
+        && value.review.findings.every(hasValidFinding)
+        && (value.review.verdict === 'PASS') === (value.review.findings.length === 0)
+        && hasValidReviewAttempt(value.review.attempt)
+        && value.review.attempt.number <= (value.reviewAttempts ?? 0))));
   const hasValidReviewCorrection = value => value.reviewCorrection === undefined || value.reviewCorrection === null
     || (isPlainObject(value.reviewCorrection)
       && value.reviewCorrection.cycle === 1
@@ -218,6 +242,7 @@ function validateJob(job, filePath) {
               : !Number.isSafeInteger(job.runs) || job.runs < 0
                 || !Number.isSafeInteger(job.correctiveCycles) || ![0, 1].includes(job.correctiveCycles) ? 'invalid counters'
                 : job.reviewCorrectiveCycles !== undefined && (!Number.isSafeInteger(job.reviewCorrectiveCycles) || ![0, 1].includes(job.reviewCorrectiveCycles)) ? 'invalid review corrective counters'
+                : job.reviewAttempts !== undefined && (!Number.isSafeInteger(job.reviewAttempts) || job.reviewAttempts < 0) ? 'invalid review attempt counter'
                 : job.reviewCorrection && job.reviewCorrectiveCycles !== 1 ? 'review corrective cycle counter does not match state'
                 : typeof job.createdAt !== 'string' || !job.createdAt
                   || typeof job.updatedAt !== 'string' || !job.updatedAt ? 'missing timestamps'
@@ -293,15 +318,60 @@ function recordCiState(job, observation, details = null) {
   return job;
 }
 
-// Only a normalized independent PASS is a durable merge-readiness checkpoint.
-// The caller verifies the reviewed commit against the delivered PR head before
-// recording it, so state never represents an approval for a different change.
-function recordReview(job, { reviewer, verdict, commit }) {
-  if (typeof reviewer !== 'string' || !reviewer.trim() || verdict !== 'PASS'
-    || typeof commit !== 'string' || !commit.trim()) {
-    throw new TypeError('Independent review requires reviewer, PASS verdict, and commit');
+// Reviewers may report findings as free text or as structured items.  Both
+// are persisted in one bounded shape so later passes and humans can rely on it.
+function normalizeReviewFindings(findings) {
+  if (findings === undefined || findings === null || findings === '') return [];
+  const items = typeof findings === 'string' ? [{ summary: findings }] : findings;
+  if (!Array.isArray(items) || items.length > MAX_REVIEW_FINDINGS) {
+    throw new TypeError(`Review findings must be text or at most ${MAX_REVIEW_FINDINGS} structured findings`);
   }
-  job.review = { reviewer, verdict, commit };
+  return items.map(item => {
+    if (!isPlainObject(item) || typeof item.summary !== 'string' || !item.summary.trim()
+      || (item.file != null && typeof item.file !== 'string')
+      || (item.severity != null && typeof item.severity !== 'string')
+      || (item.line != null && (!Number.isSafeInteger(item.line) || item.line < 1))) {
+      throw new TypeError('Each review finding requires a summary and optional file, positive line, and severity');
+    }
+    return {
+      summary: truncate(item.summary.trim()),
+      file: item.file || null,
+      line: item.line ?? null,
+      severity: item.severity || null,
+    };
+  });
+}
+
+// Each reviewer invocation consumes an attempt number before it starts, so a
+// crashed or failed review is still counted and never reused for a new record.
+function beginReviewAttempt(job, now = () => new Date().toISOString()) {
+  job.reviewAttempts = (job.reviewAttempts ?? 0) + 1;
+  return { number: job.reviewAttempts, startedAt: now() };
+}
+
+// The latest completed review of the delivered head.  Only a PASS for that
+// exact commit is a merge-readiness checkpoint; a NEEDS_CHANGES record keeps
+// the findings that blocked it.  The caller verifies the reviewed commit
+// against the delivered PR head before recording it, so state never
+// represents a review of a different change.
+function recordReview(job, { reviewer, verdict, commit, policy, findings, attempt }, now = () => new Date().toISOString()) {
+  if (typeof reviewer !== 'string' || !reviewer.trim() || !REVIEW_VERDICTS.has(verdict)
+    || typeof commit !== 'string' || !commit.trim()) {
+    throw new TypeError('Independent review requires reviewer, PASS or NEEDS_CHANGES verdict, and commit');
+  }
+  if (!REVIEW_POLICIES.has(policy)) throw new TypeError('Independent review requires the risk or always policy that requested it');
+  if (!isPlainObject(attempt) || !Number.isSafeInteger(attempt.number) || attempt.number < 1
+    || attempt.number > (job.reviewAttempts ?? 0) || typeof attempt.startedAt !== 'string' || !attempt.startedAt) {
+    throw new TypeError('Independent review requires attempt metadata from beginReviewAttempt');
+  }
+  const normalized = normalizeReviewFindings(findings);
+  if ((verdict === 'PASS') !== (normalized.length === 0)) {
+    throw new TypeError('A PASS review must have no findings and NEEDS_CHANGES must have findings');
+  }
+  job.review = {
+    reviewer, verdict, commit, policy, findings: normalized,
+    attempt: { number: attempt.number, startedAt: attempt.startedAt, completedAt: attempt.completedAt || now() },
+  };
   return job;
 }
 
@@ -507,6 +577,8 @@ module.exports = {
   recordDelivery,
   recordFailure,
   recordPullRequest,
+  beginReviewAttempt,
+  normalizeReviewFindings,
   recordReview,
   recordReviewCorrectiveCycle,
   resolveStateDir,

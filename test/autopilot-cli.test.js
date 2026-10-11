@@ -287,6 +287,17 @@ test('a green persisted PR CI observation becomes ready for human merge without 
   assert.deepEqual(saved.ci.runs.map(run => run.databaseId), [501]);
 });
 
+// Persisted reviews carry policy, structured findings, and attempt metadata
+// in addition to the reviewer, verdict, and exact reviewed SHA.
+function assertPersistedReview(review, expected, attemptNumber) {
+  const { attempt, ...rest } = review;
+  assert.deepEqual(rest, { findings: [], ...expected });
+  assert.equal(attempt.number, attemptNumber);
+  assert.equal(typeof attempt.startedAt, 'string');
+  assert.equal(typeof attempt.completedAt, 'string');
+  assert.ok(attempt.startedAt <= attempt.completedAt);
+}
+
 test('an always-review project persists a matching independent PASS before becoming merge-ready', async () => {
   const store = temporaryStore();
   const issue = { number: 230, title: 'Review this change', body: 'The issue context the reviewer needs.' };
@@ -317,6 +328,8 @@ test('an always-review project persists a matching independent PASS before becom
       const duringReview = createJobStore(store.directory).load(230);
       assert.equal(duringReview.terminal, false);
       assert.equal(duringReview.review, null);
+      // The attempt is consumed durably before the reviewer runs.
+      assert.equal(duringReview.reviewAttempts, 1);
       return { reviewer: 'independent-reviewer', verdict: 'PASS', commit: 'abc123' };
     },
   }));
@@ -324,7 +337,7 @@ test('an always-review project persists a matching independent PASS before becom
   assert.equal(prepared, false);
   assert.equal(result.outcome.status, 'green');
   const saved = createJobStore(store.directory).load(230);
-  assert.deepEqual(saved.review, { reviewer: 'independent-reviewer', verdict: 'PASS', commit: 'abc123' });
+  assertPersistedReview(saved.review, { reviewer: 'independent-reviewer', verdict: 'PASS', commit: 'abc123', policy: 'always' }, 1);
   assert.equal(saved.status, 'ready_for_human_merge');
   assert.equal(saved.terminalState, 'ready_for_human_merge');
 });
@@ -341,7 +354,7 @@ test('the legacy independentReviewer injection remains a supported review interf
     observePullRequestCi: async () => ({ state: 'green', details: 'green', prNumber: 99, headCommit: 'abc123', runs: [] }),
     independentReviewer: async () => ({ reviewer: 'legacy-reviewer', verdict: 'PASS', commit: 'abc123' }),
   }));
-  assert.deepEqual(createJobStore(store.directory).load(233).review, { reviewer: 'legacy-reviewer', verdict: 'PASS', commit: 'abc123' });
+  assertPersistedReview(createJobStore(store.directory).load(233).review, { reviewer: 'legacy-reviewer', verdict: 'PASS', commit: 'abc123', policy: 'always' }, 1);
 });
 
 test('a matching reviewer NEEDS_CHANGES is deferred, corrected once, then independently re-reviewed', async () => {
@@ -364,6 +377,10 @@ test('a matching reviewer NEEDS_CHANGES is deferred, corrected once, then indepe
   assert.equal(saved.reviewCorrectiveCycles, 1);
   assert.equal(saved.correctiveCycles, 0);
   assert.equal(saved.reviewCorrection.findings, 'lib.js:7: validate input');
+  assertPersistedReview(saved.review, {
+    reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: 'abc123', policy: 'always',
+    findings: [{ summary: 'lib.js:7: validate input', file: null, line: null, severity: null }],
+  }, 1);
 
   let task;
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
@@ -386,7 +403,53 @@ test('a matching reviewer NEEDS_CHANGES is deferred, corrected once, then indepe
   }));
   saved = createJobStore(store.directory).load(234);
   assert.equal(saved.status, 'ready_for_human_merge');
-  assert.deepEqual(saved.review, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'def456' });
+  assertPersistedReview(saved.review, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'def456', policy: 'always' }, 2);
+  assert.equal(saved.reviewAttempts, 2);
+});
+
+test('structured reviewer findings are persisted with the risk policy and passed to the corrective worker', async () => {
+  const store = temporaryStore();
+  const issue = { number: 237, title: 'Structured findings', body: '' };
+  const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'risk' };
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue], createRalphTaskService: passingRalph,
+  }));
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', details: 'ok', prNumber: 99, headCommit: 'abc123', runs: [] }),
+    reviewPullRequest: async () => ({
+      reviewer: 'claude:opus', verdict: 'NEEDS_CHANGES', commit: 'abc123',
+      findings: [{ summary: 'Reject negative totals', file: 'lib.js', line: 9, severity: 'high' }, { summary: 'Cover refunds' }],
+    }),
+  }));
+  const saved = createJobStore(store.directory).load(237);
+  assert.equal(saved.status, 'review_correction_eligible');
+  assertPersistedReview(saved.review, {
+    reviewer: 'claude:opus', verdict: 'NEEDS_CHANGES', commit: 'abc123', policy: 'risk',
+    findings: [
+      { summary: 'Reject negative totals', file: 'lib.js', line: 9, severity: 'high' },
+      { summary: 'Cover refunds', file: null, line: null, severity: null },
+    ],
+  }, 1);
+  assert.equal(saved.reviewCorrection.findings, '- [high] Reject negative totals (lib.js:9)\n- Cover refunds');
+});
+
+test('a reviewer failure still consumes a durable review attempt without recording a review', async () => {
+  const store = temporaryStore();
+  const issue = { number: 238, title: 'Reviewer crash', body: '' };
+  const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue], createRalphTaskService: passingRalph,
+  }));
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject, discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', details: 'ok', prNumber: 99, headCommit: 'abc123', runs: [] }),
+    reviewPullRequest: async () => { throw new Error('reviewer timed out'); },
+  }));
+  const saved = createJobStore(store.directory).load(238);
+  assert.equal(saved.status, 'ready_for_human');
+  assert.equal(saved.reviewAttempts, 1);
+  assert.equal(saved.review, null);
 });
 
 test('a second matching reviewer NEEDS_CHANGES after the reviewer budget is spent is handed to a human', async () => {

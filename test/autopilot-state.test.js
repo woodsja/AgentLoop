@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+  beginReviewAttempt,
   createJob,
   createJobStore,
   markTerminal,
@@ -64,10 +65,78 @@ test('a newly delivered commit invalidates an approval for the prior head', () =
   const store = createJobStore(temporaryDirectory());
   const job = newJob(store, 10);
   recordDelivery(job, { branch: job.branch, commit: 'abc123', pushed: true });
-  recordReview(job, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123' });
+  recordReview(job, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123', policy: 'always', attempt: beginReviewAttempt(job) });
   recordDelivery(job, { branch: job.branch, commit: 'def456', pushed: true });
   store.save(job);
   assert.equal(createJobStore(store.directory).load(10).review, null);
+});
+
+test('persists review policy, structured findings, and attempt metadata with the verdict and exact SHA', () => {
+  const store = createJobStore(temporaryDirectory(), { now: () => '2026-10-11T00:00:00.000Z' });
+  const job = newJob(store, 11);
+  const sha = '0123456789abcdef0123456789abcdef01234567';
+  recordDelivery(job, { branch: job.branch, commit: sha, pushed: true });
+  const first = beginReviewAttempt(job, () => '2026-10-11T00:00:01.000Z');
+  recordReview(job, {
+    reviewer: 'claude:opus', verdict: 'NEEDS_CHANGES', commit: sha, policy: 'risk', attempt: first,
+    findings: [{ summary: '  Totals ignore refunds ', file: 'src/totals.js', line: 42, severity: 'high' }, { summary: 'Add a regression test' }],
+  }, () => '2026-10-11T00:00:02.000Z');
+  store.save(job);
+  const reloaded = createJobStore(store.directory).load(11);
+  assert.equal(reloaded.reviewAttempts, 1);
+  assert.deepEqual(reloaded.review, {
+    reviewer: 'claude:opus', verdict: 'NEEDS_CHANGES', commit: sha, policy: 'risk',
+    findings: [
+      { summary: 'Totals ignore refunds', file: 'src/totals.js', line: 42, severity: 'high' },
+      { summary: 'Add a regression test', file: null, line: null, severity: null },
+    ],
+    attempt: { number: 1, startedAt: '2026-10-11T00:00:01.000Z', completedAt: '2026-10-11T00:00:02.000Z' },
+  });
+
+  const second = beginReviewAttempt(job, () => '2026-10-11T00:01:00.000Z');
+  recordReview(job, { reviewer: 'claude:opus', verdict: 'PASS', commit: sha, policy: 'risk', findings: [], attempt: second }, () => '2026-10-11T00:01:30.000Z');
+  store.save(job);
+  assert.deepEqual(createJobStore(store.directory).load(11).review, {
+    reviewer: 'claude:opus', verdict: 'PASS', commit: sha, policy: 'risk', findings: [],
+    attempt: { number: 2, startedAt: '2026-10-11T00:01:00.000Z', completedAt: '2026-10-11T00:01:30.000Z' },
+  });
+});
+
+test('rejects review records that omit policy or attempt metadata or mismatch findings and verdict', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store, 12);
+  const attempt = beginReviewAttempt(job);
+  const base = { reviewer: 'claude:sonnet', commit: 'abc123', policy: 'always', attempt };
+  assert.throws(() => recordReview(job, { ...base, verdict: 'PASS', policy: 'none' }), /risk or always policy/);
+  assert.throws(() => recordReview(job, { ...base, verdict: 'PASS', attempt: undefined }), /attempt metadata/);
+  assert.throws(() => recordReview(job, { ...base, verdict: 'PASS', attempt: { number: 2, startedAt: 'x' } }), /attempt metadata/);
+  assert.throws(() => recordReview(job, { ...base, verdict: 'PASS', findings: 'still broken' }), /PASS review must have no findings/);
+  assert.throws(() => recordReview(job, { ...base, verdict: 'NEEDS_CHANGES', findings: [] }), /PASS review must have no findings/);
+  assert.throws(() => recordReview(job, { ...base, verdict: 'NEEDS_CHANGES', findings: [{ summary: 'x', line: 0 }] }), /positive line/);
+  assert.equal(job.review, null);
+
+  // Damaged persisted review records fail closed on load.
+  recordReview(job, { ...base, verdict: 'NEEDS_CHANGES', findings: 'Fix it' });
+  assert.deepEqual(job.review.findings, [{ summary: 'Fix it', file: null, line: null, severity: null }]);
+  for (const corrupt of [
+    { ...job.review, policy: 'none' },
+    { ...job.review, findings: [] },
+    { ...job.review, attempt: { ...job.review.attempt, number: 5 } },
+    { ...job.review, findings: [{ summary: '' }] },
+  ]) {
+    assert.throws(() => store.save({ ...job, review: corrupt }), /invalid independent review state/);
+  }
+});
+
+test('legacy PASS-only review records written before review metadata remain readable', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store, 13);
+  delete job.reviewAttempts;
+  job.review = { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123' };
+  store.save(job);
+  assert.deepEqual(createJobStore(store.directory).load(13).review, job.review);
+  job.review = { reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: 'abc123' };
+  assert.throws(() => store.save(job), /invalid independent review state/);
 });
 
 test('persists every job field and reloads it through a fresh store', () => {

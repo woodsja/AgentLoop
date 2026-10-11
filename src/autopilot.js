@@ -31,6 +31,8 @@ const {
   recordFailure,
   recordDelivery,
   recordPullRequest,
+  beginReviewAttempt,
+  normalizeReviewFindings,
   recordReview,
   recordReviewCorrectiveCycle,
   resolveStateDir,
@@ -88,22 +90,37 @@ function handToHuman(job, phase, message, now) {
 // The review adapter is intentionally a dependency of the public one-shot
 // runner.  This keeps the scheduler independent from a particular reviewer
 // implementation and lets a project explicitly opt into the gate.
+function hasNoFindings(findings) {
+  return findings === undefined || findings === '' || (Array.isArray(findings) && findings.length === 0);
+}
+
 function matchingPass(review, commit) {
   if (!review || typeof review !== 'object' || Array.isArray(review)
     || typeof review.reviewer !== 'string' || !review.reviewer.trim()
     || review.verdict !== 'PASS' || review.commit !== commit
     // Injected adapters are untrusted too: a PASS cannot smuggle unresolved
     // findings past the one-shot merge-readiness gate.
-    || (review.findings !== undefined && review.findings !== '')) return null;
-  return { reviewer: review.reviewer, verdict: 'PASS', commit };
+    || !hasNoFindings(review.findings)) return null;
+  return { reviewer: review.reviewer, verdict: 'PASS', commit, findings: [] };
 }
 
 function matchingNeedsChanges(review, commit) {
   if (!review || typeof review !== 'object' || Array.isArray(review)
     || typeof review.reviewer !== 'string' || !review.reviewer.trim()
-    || review.verdict !== 'NEEDS_CHANGES' || review.commit !== commit
-    || typeof review.findings !== 'string' || !review.findings.trim()) return null;
-  return { reviewer: review.reviewer.trim(), verdict: 'NEEDS_CHANGES', commit, findings: review.findings.trim() };
+    || review.verdict !== 'NEEDS_CHANGES' || review.commit !== commit) return null;
+  let findings;
+  try { findings = normalizeReviewFindings(typeof review.findings === 'string' ? review.findings.trim() : review.findings); } catch { return null; }
+  if (findings.length === 0) return null;
+  return { reviewer: review.reviewer.trim(), verdict: 'NEEDS_CHANGES', commit, findings };
+}
+
+// The corrective worker and the human hand-off read findings as prose.
+function findingsText(findings) {
+  if (findings.length === 1 && !findings[0].file && !findings[0].severity) return findings[0].summary;
+  return findings.map(finding => {
+    const location = finding.file ? ` (${finding.file}${finding.line ? `:${finding.line}` : ''})` : '';
+    return `- ${finding.severity ? `[${finding.severity}] ` : ''}${finding.summary}${location}`;
+  }).join('\n');
 }
 
 // The recorded path is provisional until preparation reports the real one, so
@@ -259,6 +276,9 @@ async function run(argv, dependencies = {}) {
           const reviewPullRequest = dependencies.reviewPullRequest
             || dependencies.independentReview || dependencies.independentReviewer
             || realReviewAdapter;
+          const attempt = beginReviewAttempt(job, store.now);
+          // Consume the attempt number durably before the paid reviewer runs.
+          store.save(job);
           let review;
           try {
             review = typeof reviewPullRequest === 'function'
@@ -278,7 +298,7 @@ async function run(argv, dependencies = {}) {
           if (!job.terminal && pass) {
             // This write is intentionally separate from the terminal state:
             // an on-disk PASS must exist before the PR becomes merge-ready.
-            recordReview(job, pass);
+            recordReview(job, { ...pass, policy: project.reviewPolicy, attempt }, store.now);
             store.save(job);
             job.status = 'ready_for_human_merge';
             markTerminal(job, 'ready_for_human_merge');
@@ -286,14 +306,16 @@ async function run(argv, dependencies = {}) {
             // Feedback is checkpointed now, but the worker is deliberately
             // deferred to the next timer pass so review observation remains
             // side-effect free and restart-safe.
+            recordReview(job, { ...needsChanges, policy: project.reviewPolicy, attempt }, store.now);
+            const findings = findingsText(job.review.findings);
             if ((job.reviewCorrectiveCycles ?? 0) === 0) {
               recordReviewCorrectiveCycle(job, {
-                reviewCommit: needsChanges.commit, reviewer: needsChanges.reviewer, findings: needsChanges.findings,
+                reviewCommit: needsChanges.commit, reviewer: needsChanges.reviewer, findings,
               });
               job.status = 'review_correction_eligible';
               job.ralph = { status: null, attempts: 0, taskId: null };
             } else {
-              handToHuman(job, 'review', `Independent review still blocks after ${job.reviewCorrectiveCycles} reviewer corrective cycle(s); no further automatic correction will run.\nReviewer: ${needsChanges.reviewer}\nFindings:\n${needsChanges.findings}`, store.now);
+              handToHuman(job, 'review', `Independent review still blocks after ${job.reviewCorrectiveCycles} reviewer corrective cycle(s); no further automatic correction will run.\nReviewer: ${needsChanges.reviewer}\nFindings:\n${findings}`, store.now);
             }
           } else if (!job.terminal) {
             handToHuman(job, 'review', 'Independent review did not return a valid PASS for the delivered head commit.', store.now);

@@ -186,6 +186,8 @@ A disabled project, like `finance-dashboard` with `"enabled": false`, makes each
 
 Projects may opt into a post-green-CI review gate with `"reviewPolicy": "always"` (or `"risk"`). The default reviewer is a separate, read-only Claude Sonnet process; set `"reviewModel": "opus"` to choose Opus. It fetches the PR patch and issue context through `gh`, reads repository `AGENTS.md` guidance from the delivered commit, has its Claude tools explicitly disabled, and accepts only a strict JSON verdict bound to the delivered SHA.
 
+The job's `review` record holds the latest completed review of the delivered head: reviewer, verdict (`PASS` or `NEEDS_CHANGES`), exact commit SHA, the `reviewPolicy` that requested it, structured `findings` (`summary`, `file`, `line`, `severity`; empty for `PASS`), and `attempt` metadata (`number`, `startedAt`, `completedAt`). `reviewAttempts` counts every reviewer invocation, including failed ones. A new delivered commit clears the record. Older PASS-only records still load.
+
 ## Supported platforms
 
 Windows is the primary path:
