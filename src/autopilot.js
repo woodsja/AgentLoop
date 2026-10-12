@@ -205,7 +205,8 @@ async function run(argv, dependencies = {}) {
   const selection = selectIssueForJobs(await discover(project), store.list(), choose);
 
   if (!selection) {
-    write(`Dry run: no ready-for-agent issue found for project ${projectName} in ${project.repo}.`);
+    const prefix = dryRun ? 'Dry run' : 'Autopilot';
+    write(`${prefix}: no ${project.readyLabel} issue found for project ${projectName} in ${project.repo}.`);
     return null;
   }
   const candidate = selection.issue;

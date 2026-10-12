@@ -39,15 +39,29 @@ test('dry run inspects disabled projects and reports its selected candidate', as
   assert.equal(lines[0], 'Dry run: project demo; repository example/repo; issue #8: Selected; worker codex; action is dry-run only.');
 });
 
-test('dry run succeeds with a clear no-candidate result', async () => {
+test('dry run reports no candidate using the configured ready label', async () => {
   const lines = [];
+  const customLabelProject = { ...project, readyLabel: 'agent-ready' };
   const result = await run(['--project', 'demo', '--dry-run'], {
-    loadProjectConfig: () => project,
+    loadProjectConfig: () => customLabelProject,
     discoverReadyIssues: async () => [],
     write: line => lines.push(line),
   });
   assert.equal(result, null);
-  assert.equal(lines[0], 'Dry run: no ready-for-agent issue found for project demo in example/repo.');
+  assert.equal(lines[0], 'Dry run: no agent-ready issue found for project demo in example/repo.');
+});
+
+test('real pass reports no candidate using the configured ready label', async () => {
+  const lines = [];
+  const customLabelProject = { ...project, enabled: true, readyLabel: 'agent-ready' };
+  const result = await run(['--project', 'demo'], {
+    loadProjectConfig: () => customLabelProject,
+    discoverReadyIssues: async () => [],
+    write: line => lines.push(line),
+  });
+  assert.equal(result, null);
+  assert.equal(lines[0], 'Autopilot: no agent-ready issue found for project demo in example/repo.');
+  assert.doesNotMatch(lines[0], /Dry run/);
 });
 
 test('rejects malformed and unknown arguments', () => {
@@ -1605,7 +1619,7 @@ test('persists a needs_planning job and does not start duplicate work on the nex
   assert.equal(second, null);
   assert.equal(ralphRuns, 1);
   assert.equal(deliveries, 0);
-  assert.match(lines[0], /no ready-for-agent issue/);
+  assert.match(lines[0], /no ready issue/);
 });
 
 test('resumes a failed delivery without rerunning Ralph and reuses its branch and PR', async () => {
