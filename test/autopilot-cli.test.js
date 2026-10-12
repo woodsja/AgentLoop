@@ -491,6 +491,49 @@ test('an always-review project persists a matching independent PASS before becom
   assert.equal(saved.terminalState, 'ready_for_human_merge');
 });
 
+test('scheduled polling reviews only after the required CI workflow succeeds for the exact head, once', async () => {
+  const store = temporaryStore();
+  const issue = { number: 231, title: 'Scheduled loop', body: 'Context.' };
+  const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };
+  let workers = 0;
+  const reviews = [];
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject,
+    discoverReadyIssues: async () => [issue],
+    createRalphTaskService: () => { workers += 1; return passingRalph(); },
+  }));
+  assert.equal(workers, 1);
+  const run = (id, workflowName, status, conclusion) => ({ databaseId: id, status, conclusion, name: workflowName, workflowName, url: null, startedAt: null, updatedAt: null });
+  const poll = runs => runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => reviewedProject,
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: undefined,
+    createRalphTaskService: () => { workers += 1; return passingRalph(); },
+    reviewPullRequest: async context => {
+      reviews.push(context.headCommit);
+      return { reviewer: 'independent-reviewer', verdict: 'PASS', commit: context.headCommit };
+    },
+    execFile: (file, args, options, callback) => {
+      assert.deepEqual([file, args[0], args[1], args[args.indexOf('--commit') + 1]], ['gh', 'run', 'list', 'abc123']);
+      callback(null, JSON.stringify(runs), '');
+    },
+  }));
+
+  // An unrelated successful workflow, an absent check, or a pending check never satisfies CI.
+  for (const runs of [[run(1, 'Claude PR Review', 'completed', 'success')], [], [run(2, 'CI', 'in_progress', null)]]) {
+    await poll(runs);
+    const saved = createJobStore(store.directory).load(231);
+    assert.deepEqual([saved.status, saved.ci.state, reviews.length], ['awaiting_ci', 'pending', 0]);
+  }
+  await poll([run(3, 'CI', 'completed', 'success'), run(4, 'Claude PR Review', 'completed', 'success')]);
+  let saved = createJobStore(store.directory).load(231);
+  assert.deepEqual([saved.status, saved.ci.state, saved.review.verdict, saved.review.commit], ['ready_for_human_merge', 'green', 'PASS', 'abc123']);
+  // Repeated polling of the same issue neither re-reviews nor launches another worker.
+  await poll([run(3, 'CI', 'completed', 'success')]).catch(error => assert.match(error.message, /already ready_for_human_merge/));
+  saved = createJobStore(store.directory).load(231);
+  assert.deepEqual([reviews, workers, saved.reviewAttempts], [['abc123'], 1, 1]);
+});
+
 test('restart reuses a persisted exact-head PASS even when review attempts are exhausted', async () => {
   const store = temporaryStore();
   const issue = { number: 239, title: 'Resume review checkpoint', body: '' };
