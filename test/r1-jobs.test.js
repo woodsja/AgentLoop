@@ -119,6 +119,10 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
     paths: { config: registryPath },
     config: { allowedProjects: configuredProjects({ demo: { root: checkout, worktreeRoot: managed } }, registryPath) },
     enqueueTask: task => { queued.push(task); return { id: 't-0000abcd', ...task }; },
+    // Logging is best effort: even a full log volume cannot reject an
+    // otherwise authorized R1 submission.
+    appendLogLine: () => { throw new Error('fixture log append failure'); },
+    writeTask: () => {},
   };
   const project = { enabled: true, repo: 'example/repo', checkout, worktreeRoot: managed, baseBranch: 'main', worker: 'codex', reviewPolicy: 'always', verification: 'true' };
   let current = project;

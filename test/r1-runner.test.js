@@ -33,7 +33,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     autoMerge: true, readyLabel: 'ready-for-agent', humanLabel: 'ready-for-human', ciWorkflow: 'CI', maxAttempts: 1, stateDir: path.join(root, 'r1-state'),
     verification: `node -e "if(require('fs').readFileSync('answer','utf8')!=='42')process.exit(1)"` };
   const fixture = path.join(root, 'fixture.json');
-  fs.writeFileSync(fixture, JSON.stringify({ root, project, rejected: 9, neverGreen: 10, gatedCi: 11, ciTimeoutMs: 6000 }));
+  const adversarial = `token=credential-do-not-log path=${root}/private/prompt reasoning: hidden chain of thought ${'x'.repeat(1600)}`;
+  fs.writeFileSync(fixture, JSON.stringify({ root, project, rejected: 9, neverGreen: 10, gatedCi: 11, ciTimeoutMs: 6000, adversarial }));
   const config = path.join(root, 'config.json');
   fs.writeFileSync(config, JSON.stringify({ dashboardPort: 0, allowedProjects: { demo: { root: checkout, worktreeRoot } } }));
   const spec = '## Acceptance criteria\n- Write the answer file containing 42 and keep tests green.';
@@ -68,12 +69,28 @@ test('the continuous runner admits ready issues itself and drives each to exactl
   try {
     ready([7]);
     await launch();
+    // The real daemon exposes useful R1 progress before completion, but this
+    // public transcript must not mirror a worker's private callback text.
+    const [inFlight] = await until(() => { const tasks = tasksFor(7); return tasks[0] && tasks[0].phase === 'implementation' && tasks; }, '#7 implementation');
+    const progress = await get(port, `/api/log/${inFlight.id}?lines=200`);
+    assert.deepEqual(Object.keys(progress), ['lines'], 'the established log endpoint response shape is preserved');
+    assert.ok(Array.isArray(progress.lines));
+    assert.ok(progress.lines.some(line => /implementation started/.test(line)), 'meaningful progress is visible before terminal completion');
+    assert.ok(progress.lines.every(line => line.length <= 512), 'rendered transcript lines are bounded');
+    for (const privateFragment of ['credential-do-not-log', root, 'hidden chain of thought', 'x'.repeat(1500)]) {
+      assert.ok(!progress.lines.join('\n').includes(privateFragment), `transcript excludes ${privateFragment.slice(0, 24)}`);
+    }
+    assert.ok((await get(port, `/api/log/${inFlight.id}?lines=1`)).lines.length <= 1, 'the endpoint response remains capped');
+    fs.writeFileSync(path.join(root, 'worker-release-7'), '');
     // MERGED: admitted by the runner, never submitted through the API.
     const merged = await outcome(7);
     assert.deepEqual([merged.job.status, merged.task.source, merged.job.phase], ['merged', 'runner', 'completed']);
     assert.equal(merged.job.evidence.review.verdict, 'PASS');
     assert.equal(merged.job.evidence.ci.state, 'green');
     assert.equal(merged.job.evidence.verification.passed, true);
+    const terminalLog = await get(port, `/api/log/${merged.task.id}?lines=200`);
+    assert.ok(terminalLog.lines.some(line => /terminal outcome: merged/.test(line)), 'terminal verdict is recorded');
+    assert.equal(terminalLog.lines.filter(line => /implementation started/.test(line)).length, 1, 'resuming a persisted phase does not flood the transcript');
     assert.deepEqual(lines(path.join(root, 'merges')), [{ number: 7, headCommit: merged.job.evidence.commit, issue: 7 }]);
     assert.deepEqual(lines(path.join(root, 'closures')), [7]);
     assert.ok(commands().some(c => c.join(' ') === 'gh api --method DELETE repos/example/repo/git/refs/heads/ralph/issue-7-issue-7'));

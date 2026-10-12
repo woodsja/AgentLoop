@@ -38,9 +38,14 @@ require('../../src/daemon').start({ r1: {
     prepareRepositoryEnvironment: async () => {},
     ralphOptions: { createCliWorkerImpl: () => async cwd => {
       record('workers', path.basename(cwd));
+      if (issueOf(git(cwd, 'branch', '--show-current')) === 7) {
+        while (!fs.existsSync(file('worker-release-7'))) await new Promise(resolve => setTimeout(resolve, 10));
+      }
       fs.writeFileSync(path.join(cwd, 'answer'), '42');
       fs.writeFileSync(path.join(cwd, 'revision'), String(process.hrtime.bigint()));
-      return { exitCode: 0, resultText: 'Implemented' };
+      // This is intentionally hostile fixture output.  R1 transcript logging
+      // must never copy it from a worker callback.
+      return { exitCode: 0, resultText: fixture.adversarial || 'Implemented' };
     } },
     deliverPassedWork: async ({ workspace, issue }, { onProgress }) => {
       git(workspace.worktreePath, 'add', 'answer', 'revision');

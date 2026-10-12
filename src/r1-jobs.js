@@ -23,6 +23,7 @@ const CI_TIMEOUT_MS = 60 * 60 * 1000;
 const ADMIT_INTERVAL_MS = 60 * 1000;
 const MIN_SPECIFICATION_LENGTH = 40;
 const TEMPORARY_BRANCH = /^ralph\/issue-\d+-[A-Za-z0-9._-]+$/;
+const MAX_TRANSCRIPT_LINE = 512;
 
 // Projects that opted into autonomous merging are driven to exactly one of
 // merged, needs_specification, or failed. Every other project keeps the
@@ -79,6 +80,37 @@ function createR1Jobs(store, options = {}) {
   let closing = false;
   const now = () => new Date().toISOString();
 
+  // R1's durable job state contains useful diagnostics, but it can also
+  // contain worker, reviewer, and CI text.  The dashboard transcript is a
+  // deliberately smaller boundary: only these fixed lifecycle summaries are
+  // eligible for it.  Keep the dedupe key on the queue task so a daemon
+  // restart or a CI poll cannot turn one persisted transition into a flood.
+  function logTransition(task, key, summary) {
+    const seen = Array.isArray(task.r1LogEvents) ? task.r1LogEvents : [];
+    if (seen.includes(key)) return;
+    task.r1LogEvents = [...seen, key].slice(-20);
+    const line = `[${now()}] R1: ${summary}`.replace(/[\r\n]+/g, ' ').slice(0, MAX_TRANSCRIPT_LINE);
+    try {
+      store.appendLogLine(task.id, line);
+    } catch (error) {
+      // Transcript availability must never affect implementation, verification,
+      // review, or merge eligibility.
+      console.error(`R1 job ${task.id}: transcript append failed.`);
+    }
+  }
+
+  function transcriptForJob(task, job) {
+    if (!job || typeof job !== 'object') return;
+    if (job.verification && typeof job.verification.passed === 'boolean') {
+      const verdict = job.verification.passed ? 'passed' : 'failed';
+      // Verification is recorded before delivery binds its exact SHA.  The
+      // run counter is already durable at that point, so it avoids emitting
+      // the same verdict again when delivery later fills in the commit.
+      logTransition(task, `verification:${job.runs}:${verdict}`,
+        `deterministic verification ${verdict}.`);
+    }
+  }
+
   function checkpoint(task, phase) {
     if (phase !== task.phase) {
       task.phases = [...(task.phases || []), { phase, at: now() }].slice(-50);
@@ -103,12 +135,17 @@ function createR1Jobs(store, options = {}) {
       .find(([name, candidate]) => candidate === planned && (body.worktree === undefined || name === body.worktree));
     const managed = !named && body.worktree === undefined && managesWorktree(entry, planned);
     if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before R1 submission.');
-    return store.enqueueTask({
+    const task = store.enqueueTask({
       workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
       ...(named ? { worktree: named[0] } : {}), title: body.title || `R1 issue #${body.issue}`,
       phase: 'queued', status: 'queued', phases: [{ phase: 'queued', at: now() }], source: body.source || 'api',
       ...(autonomous(project) ? { autonomous: true } : {}),
     });
+    logTransition(task, 'queued', 'queued for admission.');
+    // enqueueTask has already made the task durable. Persist the dedupe key
+    // separately; an unavailable log file remains strictly best effort.
+    store.writeTask(task, 'pending');
+    return task;
   }
 
   function trackedSpawn(...args) {
@@ -130,6 +167,8 @@ function createR1Jobs(store, options = {}) {
       task.status = approved ? 'passed' : 'blocked';
     }
     task.finishedAt = now();
+    const terminal = ['passed', 'merged', 'needs_specification', 'failed'].includes(task.status) ? task.status : 'failed';
+    logTransition(task, `terminal:${terminal}`, `terminal outcome: ${terminal}.`);
     checkpoint(task, ['passed', 'merged'].includes(task.status) ? 'completed' : task.status);
     store.writeResult({ id: task.id, status: task.status, project: task.project, finishedAt: task.finishedAt,
       ...(task.failure ? { failure: task.failure } : {}), ...(task.cleanup ? { cleanup: task.cleanup } : {}), evidence: evidence(job) });
@@ -242,6 +281,7 @@ function createR1Jobs(store, options = {}) {
       save(job) {
         original.save(job);
         task.r1 = structuredClone(job);
+        transcriptForJob(task, job);
         checkpoint(task, phaseOf(job));
         return job;
       },
@@ -256,6 +296,7 @@ function createR1Jobs(store, options = {}) {
         ralphOptions: { ...dependencies.ralphOptions, config: store.config, spawnImpl: trackedSpawn,
           onPhaseChange: phase => {
             if (closing) throw new Error('R1 executor is stopping.');
+            if (phase === 'implementation') logTransition(task, 'implementation', 'implementation started.');
             checkpoint(task, phase);
           },
         },
@@ -288,6 +329,7 @@ function createR1Jobs(store, options = {}) {
     if (active.has(task.id) || closing) return;
     if (task.phase === 'ci' && Date.now() < (nextAdvance.get(task.id) || 0)) return;
     task.status = 'running';
+    logTransition(task, 'admitted', 'admitted to the R1 runner.');
     const promise = execute(task).catch(error => {
       task.failure = safeText(error.message);
       try { finish(task, task.r1); } catch {
