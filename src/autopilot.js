@@ -32,6 +32,7 @@ const {
   recordDelivery,
   recordPullRequest,
   beginReviewAttempt,
+  failReviewAttempt,
   normalizeReviewFindings,
   recordReview,
   recordVerification,
@@ -228,6 +229,16 @@ async function run(argv, dependencies = {}) {
       job = undefined;
       throw new Error(`Autopilot job for issue #${candidate.number} is already ${existing.terminalState || existing.status}`);
     }
+    const previousReview = job && job.reviewHistory && job.reviewHistory.at(-1);
+    if (previousReview && previousReview.status !== 'completed') {
+      // The issue lock is ours now: a running attempt belonged to a dead
+      // supervisor. Preserve its original identity rather than replaying it.
+      if (previousReview.status === 'running') failReviewAttempt(job, previousReview.number, null, store.now, 'interrupted');
+      handToHuman(job, 'review', previousReview.diagnostics, store.now);
+      store.save(job);
+      write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${job.terminalState}; autonomous execution stopped.`);
+      return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true, deliverable: false }, job };
+    }
     // Before a new job allocates anything, leave an explicitly-closing PR
     // entirely to its existing owner. Recovered Ralph jobs deliberately skip
     // this guard so their established recovery path remains unchanged.
@@ -292,7 +303,10 @@ async function run(argv, dependencies = {}) {
             const reviewPullRequest = dependencies.reviewPullRequest
               || dependencies.independentReview || dependencies.independentReviewer
               || realReviewAdapter;
-            const attempt = beginReviewAttempt(job, store.now);
+            const model = reviewPullRequest.model || project.reviewModel || 'sonnet';
+            const reviewer = reviewPullRequest.reviewer === 'claude' || reviewPullRequest === realReviewAdapter
+              ? `claude:${model}` : reviewPullRequest.reviewer || 'independent-review-adapter';
+            const attempt = beginReviewAttempt(job, store.now, { reviewer, model, policy: project.reviewPolicy, commit: job.delivery.commit });
             // Consume the attempt number durably before the paid reviewer runs.
             store.save(job);
             let review;
@@ -308,7 +322,9 @@ async function run(argv, dependencies = {}) {
                 })
                 : null;
             } catch (error) {
-              handToHuman(job, 'review', `Independent review could not be completed: ${errorMessage(error)}`, store.now);
+              const failed = failReviewAttempt(job, attempt.number, error, store.now);
+              store.save(job);
+              handToHuman(job, 'review', failed.diagnostics, store.now);
             }
             const pass = matchingPass(review, job.delivery.commit);
             const needsChanges = matchingNeedsChanges(review, job.delivery.commit);
@@ -335,7 +351,9 @@ async function run(argv, dependencies = {}) {
                 handToHuman(job, 'review', `Independent review still blocks after ${job.reviewCorrectiveCycles} reviewer corrective cycle(s); no further automatic correction will run.\nReviewer: ${needsChanges.reviewer}\nFindings:\n${findings}`, store.now);
               }
             } else if (!job.terminal) {
-              handToHuman(job, 'review', 'Independent review did not return a valid PASS for the delivered head commit.', store.now);
+              const failed = failReviewAttempt(job, attempt.number, null, store.now, 'invalid_verdict');
+              store.save(job);
+              handToHuman(job, 'review', failed.diagnostics, store.now);
             }
           }
         } else {

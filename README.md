@@ -192,6 +192,8 @@ The job's `review` record holds the latest completed review of the delivered hea
 
 The job's `verification` record retains the actual Ralph verification command, pass flag, exit code, timeout status, and the last 4000 characters of each test-output stream. It is checkpointed before delivery and bound to the delivered commit, so it survives restarts. The independent reviewer receives this deterministic evidence alongside CI results. Missing, failed, timed-out, or different-SHA verification blocks both a fresh review and reuse of a persisted PASS. A corrected commit requires fresh verification evidence.
 
+The bounded `reviewHistory` preserves each invocation's attempt number, reviewer, model, policy, exact SHA, start/completion timestamps, status, verdict/findings, and sanitized failure diagnostics. Identity is saved before invocation; statuses are `running`, `completed`, `failed`, `timed_out`, `invalid_verdict`, or `interrupted`. Raw reviewer errors, output, stacks, and credentials are not saved as failure diagnostics. On restart, an unfinished review is recorded as interrupted and handed to a human without another invocation; a checkpointed failure is also reconciled without replay. History survives delivery of a corrected SHA, while only a valid exact-SHA PASS can authorize merge readiness. Injected adapters may declare their `reviewer` and `model` identity properties; otherwise their identity is recorded as `independent-review-adapter` with the configured model. Older jobs without history still load.
+
 ## Supported platforms
 
 Windows is the primary path:

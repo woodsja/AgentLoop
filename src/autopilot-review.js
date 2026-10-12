@@ -182,7 +182,7 @@ function createClaudeReviewAdapter(options = {}) {
   const executeFile = options.execFile || execFile; const executeSpawn = options.spawn || spawn; const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS; const terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError('Claude review timeoutMs must be a positive integer');
   if (!Number.isSafeInteger(terminationGraceMs) || terminationGraceMs < 1) throw new TypeError('Claude review terminationGraceMs must be a positive integer');
-  return async context => {
+  return Object.assign(async context => {
     const { project, issue, pullRequest, headCommit, verification, ci } = context || {}; const model = reviewerModel(project);
     if (!hasPassingVerification(verification, headCommit)) throw new Error('Claude review failed closed: passing deterministic verification for the exact delivered SHA is required');
     const material = await githubReviewMaterial(project, issue, pullRequest, headCommit, executeFile);
@@ -190,7 +190,7 @@ function createClaudeReviewAdapter(options = {}) {
     const output = await runClaude(executeSpawn, model, buildReviewPrompt({ repo: project.repo, pullRequest, headCommit, issue: material.issue, standards, verification, ci, diff: material.diff }), timeoutMs, terminationGraceMs);
     await assertPrHeadUnchanged(project, pullRequest, headCommit, executeFile);
     return parseVerdict(output, model, headCommit);
-  };
+  }, { reviewer: 'claude' });
 }
 
 module.exports = { MAX_DIFF_BYTES, MAX_OUTPUT_BYTES, createClaudeReviewAdapter, githubReviewMaterial, repositoryStandards, buildReviewPrompt, parseVerdict, reviewerEnvironment, assertPrHeadUnchanged };

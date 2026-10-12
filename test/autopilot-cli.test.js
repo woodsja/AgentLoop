@@ -704,6 +704,146 @@ test('a reviewer failure still consumes a durable review attempt without recordi
   assert.equal(saved.review, null);
 });
 
+for (const scenario of [
+  { name: 'reviewer errors', status: 'failed', result: async () => { throw new Error('transport failed token=secret-value Authorization: Bearer hidden-token'); } },
+  { name: 'reviewer timeouts', status: 'timed_out', result: async () => { throw new Error('Claude review failed closed: reviewer timed out token=secret-value'); } },
+  { name: 'malformed verdicts', status: 'invalid_verdict', result: async () => ({ reviewer: 'claude:opus', verdict: 'APPROVE', commit: 'abc123', findings: 'token=secret-value' }) },
+]) {
+  test(`${scenario.name} preserve sanitized review attempt evidence and never approve`, async () => {
+    const store = temporaryStore();
+    const issue = { number: 247, title: 'Persist failed independent review', body: '' };
+    const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-247', worktreePath: null, now: store.now });
+    job.status = 'awaiting_ci';
+    job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+    job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+    job.verification = verifiedEvidence('abc123');
+    store.save(job);
+    let running;
+    const reviewer = Object.assign(async () => {
+      running = createJobStore(store.directory).load(issue.number);
+      return scenario.result();
+    }, { reviewer: 'claude:opus', model: 'opus' });
+    const dependencies = {
+      loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'risk', reviewModel: 'opus' }),
+      discoverReadyIssues: async () => [issue],
+      observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+      reviewPullRequest: reviewer,
+    };
+    await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), dependencies));
+    assert.equal(running.reviewHistory.length, 1);
+    const started = running.reviewHistory[0];
+    assert.deepEqual({ ...started, startedAt: 'timestamp' }, {
+      number: 1, reviewer: 'claude:opus', model: 'opus', policy: 'risk', commit: 'abc123',
+      startedAt: 'timestamp', completedAt: null, status: 'running', verdict: null, findings: [], diagnostics: null,
+    });
+    const saved = createJobStore(store.directory).load(issue.number);
+    const failed = saved.reviewHistory[0];
+    assert.equal(failed.number, started.number);
+    assert.equal(failed.startedAt, started.startedAt);
+    assert.equal(failed.reviewer, 'claude:opus');
+    assert.equal(failed.model, 'opus');
+    assert.equal(failed.policy, 'risk');
+    assert.equal(failed.commit, 'abc123');
+    assert.equal(failed.status, scenario.status);
+    assert.equal(typeof failed.completedAt, 'string');
+    assert.ok(failed.startedAt <= failed.completedAt);
+    assert.equal(failed.verdict, null);
+    assert.ok(failed.diagnostics.length > 0 && failed.diagnostics.length <= 4000);
+    assert.doesNotMatch(JSON.stringify(saved), /secret-value|hidden-token|Authorization/);
+    assert.equal(saved.terminalState, 'ready_for_human');
+    assert.equal(saved.review, null);
+    assert.equal(saved.reviewAttempts, 1);
+    await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), dependencies));
+    assert.deepEqual(createJobStore(store.directory).load(issue.number).reviewHistory, saved.reviewHistory);
+  });
+}
+
+test('restart recovers an interrupted review with its original identity and no duplicate invocation', async () => {
+  const store = temporaryStore();
+  const issue = { number: 248, title: 'Recover interrupted reviewer', body: '' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-248', worktreePath: null, now: store.now });
+  job.status = 'awaiting_ci';
+  job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  job.verification = verifiedEvidence('abc123');
+  store.save(job);
+  const reviewer = Object.assign(async () => { throw new Error('reviewer process disappeared'); }, { reviewer: 'claude:opus', model: 'opus' });
+  // Only the pre-invocation checkpoint reaches disk; simulate process death
+  // before any completion or terminal record can be written.
+  const interruptedStore = { ...store, save(value) {
+    if (value.terminal || value.reviewHistory?.some(attempt => attempt.status !== 'running')) throw new Error('process died');
+    return store.save(value);
+  } };
+  const dependencies = {
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'always', reviewModel: 'opus' }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+    reviewPullRequest: reviewer,
+  };
+  await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(interruptedStore, dependencies)), /process died/);
+  const checkpoint = createJobStore(store.directory).load(issue.number);
+  assert.equal(checkpoint.reviewHistory[0].status, 'running');
+  assert.equal(checkpoint.reviewAttempts, 1);
+  let calls = 0;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+    ...dependencies,
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'risk', reviewModel: 'sonnet' }),
+    reviewPullRequest: async () => { calls += 1; return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123' }; },
+  }));
+  const recovered = createJobStore(store.directory).load(issue.number);
+  assert.equal(calls, 0);
+  assert.equal(recovered.reviewAttempts, 1);
+  assert.equal(recovered.reviewHistory.length, 1);
+  const attempt = recovered.reviewHistory[0];
+  assert.equal(attempt.status, 'interrupted');
+  assert.equal(attempt.reviewer, 'claude:opus');
+  assert.equal(attempt.model, 'opus');
+  assert.equal(attempt.policy, 'always');
+  assert.equal(attempt.commit, 'abc123');
+  assert.equal(attempt.startedAt, checkpoint.reviewHistory[0].startedAt);
+  assert.equal(typeof attempt.completedAt, 'string');
+  assert.match(attempt.diagnostics, /interrupted/i);
+  assert.equal(attempt.verdict, null);
+  assert.equal(recovered.terminalState, 'ready_for_human');
+  assert.equal(recovered.review, null);
+});
+
+test('restart preserves a checkpointed reviewer failure when the terminal save was interrupted', async () => {
+  const store = temporaryStore();
+  const issue = { number: 249, title: 'Recover failed review checkpoint', body: '' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-249', worktreePath: null, now: store.now });
+  job.status = 'awaiting_ci';
+  job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  job.verification = verifiedEvidence('abc123');
+  store.save(job);
+  const dependencies = {
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123' }),
+    reviewPullRequest: async () => { throw new Error('authentication failed token=secret-value'); },
+  };
+  const interruptedStore = { ...store, save(value) {
+    if (value.terminal) throw new Error('terminal save interrupted');
+    return store.save(value);
+  } };
+  await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(interruptedStore, dependencies)), /terminal save interrupted/);
+  const checkpoint = createJobStore(store.directory).load(issue.number);
+  assert.equal(checkpoint.reviewHistory[0].status, 'failed');
+  assert.equal(checkpoint.terminal, false);
+  let calls = 0;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+    ...dependencies,
+    reviewPullRequest: async () => { calls += 1; return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123' }; },
+  }));
+  const recovered = createJobStore(store.directory).load(issue.number);
+  assert.equal(calls, 0);
+  assert.equal(recovered.reviewAttempts, 1);
+  assert.deepEqual(recovered.reviewHistory, checkpoint.reviewHistory);
+  assert.equal(recovered.terminalState, 'ready_for_human');
+  assert.doesNotMatch(JSON.stringify(recovered), /secret-value/);
+});
+
 test('a second matching reviewer NEEDS_CHANGES after the reviewer budget is spent is handed to a human', async () => {
   const store = temporaryStore();
   const issue = { number: 235, title: 'Review exhausted', body: '' };

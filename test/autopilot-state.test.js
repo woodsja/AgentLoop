@@ -8,6 +8,7 @@ const path = require('node:path');
 
 const {
   beginReviewAttempt,
+  failReviewAttempt,
   createJob,
   createJobStore,
   markTerminal,
@@ -218,6 +219,52 @@ test('legacy PASS-only review records written before review metadata remain read
   assert.deepEqual(createJobStore(store.directory).load(13).review, job.review);
   job.review = { reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: 'abc123' };
   assert.throws(() => store.save(job), /invalid independent review state/);
+});
+
+test('review history retains verdicts across delivered SHAs and sanitized failures across reload', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store, 18);
+  recordDelivery(job, { commit: 'abc123' });
+  const first = beginReviewAttempt(job, store.now, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: 'abc123' });
+  recordReview(job, { reviewer: 'claude:opus', verdict: 'NEEDS_CHANGES', commit: 'abc123', policy: 'always', findings: 'Validate totals.', attempt: first }, store.now);
+  store.save(job);
+  const checkpoint = structuredClone(job.reviewHistory[0]);
+  recordDelivery(job, { commit: 'def456' });
+  assert.equal(job.review, null);
+  assert.deepEqual(job.reviewHistory[0], checkpoint);
+  const second = beginReviewAttempt(job, store.now, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: 'def456' });
+  const failed = failReviewAttempt(job, second.number, new Error('malformed verdict JSON token=secret-value'), store.now);
+  assert.equal(failed.status, 'invalid_verdict');
+  assert.doesNotMatch(failed.diagnostics, /secret-value/);
+  assert.throws(() => recordReview(job, { reviewer: 'claude:opus', verdict: 'PASS', commit: 'def456', policy: 'always', attempt: second }), /running attempt/);
+  assert.equal(job.review, null);
+  store.save(job);
+  assert.deepEqual(createJobStore(store.directory).load(18).reviewHistory, job.reviewHistory);
+  assert.equal(job.reviewHistory.length, 2);
+  assert.throws(() => beginReviewAttempt(job, store.now, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: 'def456' }), /history capacity/);
+  assert.equal(job.reviewAttempts, 2);
+});
+
+test('corrupt review attempt history fails closed while older jobs without history still load', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store, 19);
+  const attempt = beginReviewAttempt(job, store.now, { reviewer: 'claude:sonnet', model: 'sonnet', policy: 'risk', commit: 'abc123' });
+  failReviewAttempt(job, attempt.number, new Error('authentication failed: private-token'), store.now);
+  for (const corrupt of [
+    { ...job.reviewHistory[0], number: 3 },
+    { ...job.reviewHistory[0], reviewer: '' },
+    { ...job.reviewHistory[0], model: '' },
+    { ...job.reviewHistory[0], policy: 'none' },
+    { ...job.reviewHistory[0], commit: '' },
+    { ...job.reviewHistory[0], status: 'APPROVE' },
+    { ...job.reviewHistory[0], verdict: 'PASS' },
+    { ...job.reviewHistory[0], completedAt: null },
+    { ...job.reviewHistory[0], diagnostics: 'x'.repeat(4001) },
+  ]) assert.throws(() => store.save({ ...job, reviewHistory: [corrupt] }), /invalid review attempt history/);
+  assert.throws(() => store.save({ ...job, reviewHistory: [job.reviewHistory[0], job.reviewHistory[0]] }), /invalid review attempt history/);
+  delete job.reviewHistory;
+  store.save(job);
+  assert.equal(createJobStore(store.directory).load(19).reviewHistory, undefined);
 });
 
 test('persists every job field and reloads it through a fresh store', () => {

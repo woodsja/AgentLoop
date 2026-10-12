@@ -21,6 +21,8 @@ const CORRECTION_STATUSES = new Set(['eligible', 'running', 'passed', 'delivered
 const REVIEW_VERDICTS = new Set(['PASS', 'NEEDS_CHANGES']);
 const REVIEW_POLICIES = new Set(['risk', 'always']);
 const MAX_REVIEW_FINDINGS = 50;
+const MAX_REVIEW_HISTORY = 2;
+const REVIEW_ATTEMPT_STATUSES = new Set(['running', 'completed', 'failed', 'timed_out', 'invalid_verdict', 'interrupted']);
 const JOB_FILE = /^issue-([1-9][0-9]*)\.json$/;
 
 // `preparing` and `running` are only ever persisted while a process owns the
@@ -140,6 +142,7 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     review: null,
     reviewSkip: null,
     reviewAttempts: 0,
+    reviewHistory: [],
     correction: null,
     reviewCorrection: null,
     runs: 0,
@@ -199,6 +202,29 @@ function validateJob(job, filePath) {
   // persisted hold only a PASS; they remain readable as such.
   const isLegacyReview = review => review.policy === undefined && review.findings === undefined
     && review.attempt === undefined && review.verdict === 'PASS';
+  const hasValidReviewHistory = value => value.reviewHistory === undefined
+    || (Array.isArray(value.reviewHistory) && value.reviewHistory.length <= MAX_REVIEW_HISTORY
+      && value.reviewHistory.every((entry, index, entries) => isPlainObject(entry)
+        && Number.isSafeInteger(entry.number) && entry.number > 0 && entry.number <= (value.reviewAttempts ?? 0)
+        && (index === 0 || entries[index - 1].number < entry.number)
+        && typeof entry.reviewer === 'string' && entry.reviewer.trim().length > 0
+        && typeof entry.model === 'string' && entry.model.trim().length > 0
+        && REVIEW_POLICIES.has(entry.policy)
+        && typeof entry.commit === 'string' && entry.commit.trim().length > 0
+        && typeof entry.startedAt === 'string' && entry.startedAt.length > 0
+        && REVIEW_ATTEMPT_STATUSES.has(entry.status)
+        && Array.isArray(entry.findings) && entry.findings.length <= MAX_REVIEW_FINDINGS
+        && entry.findings.every(hasValidFinding)
+        && (entry.status === 'running'
+          ? index === entries.length - 1 && entry.completedAt === null && entry.verdict === null
+            && entry.findings.length === 0 && entry.diagnostics === null
+          : typeof entry.completedAt === 'string' && entry.completedAt.length > 0
+            && (entry.status === 'completed'
+              ? REVIEW_VERDICTS.has(entry.verdict) && (entry.verdict === 'PASS') === (entry.findings.length === 0)
+                && entry.diagnostics === null
+              : entry.verdict === null && entry.findings.length === 0
+                && typeof entry.diagnostics === 'string' && entry.diagnostics.length > 0
+                && entry.diagnostics.length <= MAX_DIAGNOSTIC_LENGTH))));
   const hasValidReview = value => value.review === undefined || value.review === null
     || (isPlainObject(value.review)
       && typeof value.review.reviewer === 'string' && value.review.reviewer.length > 0
@@ -257,6 +283,7 @@ function validateJob(job, filePath) {
               : !hasValidCi(job) ? 'invalid CI state'
                 : job.verification != null && !isVerificationEvidence(job.verification) ? 'invalid deterministic verification state'
                 : !hasValidReview(job) ? 'invalid independent review state'
+                : !hasValidReviewHistory(job) ? 'invalid review attempt history'
                 : !hasValidReviewSkip(job) ? 'invalid review skip state'
                 : !hasValidReviewCorrection(job) ? 'invalid reviewer corrective cycle state'
                 : !hasValidCorrection(job) ? 'invalid corrective cycle state'
@@ -400,9 +427,42 @@ function recordReviewSkip(job, { commit, reason }, now = () => new Date().toISOS
 
 // Each reviewer invocation consumes an attempt number before it starts, so a
 // crashed or failed review is still counted and never reused for a new record.
-function beginReviewAttempt(job, now = () => new Date().toISOString()) {
+function beginReviewAttempt(job, now = () => new Date().toISOString(), identity = null) {
+  if (identity && (typeof identity.reviewer !== 'string' || !identity.reviewer.trim()
+    || typeof identity.model !== 'string' || !identity.model.trim() || !REVIEW_POLICIES.has(identity.policy)
+    || typeof identity.commit !== 'string' || !identity.commit.trim()
+    || (job.reviewHistory ?? []).length >= MAX_REVIEW_HISTORY
+    || (job.reviewHistory ?? []).some(entry => entry.status === 'running'))) {
+    throw new TypeError('Independent review requires valid attempt identity and available history capacity');
+  }
   job.reviewAttempts = (job.reviewAttempts ?? 0) + 1;
-  return { number: job.reviewAttempts, startedAt: now() };
+  const attempt = { number: job.reviewAttempts, startedAt: now() };
+  if (identity) {
+    job.reviewHistory ??= [];
+    job.reviewHistory.push({
+      ...attempt, reviewer: identity.reviewer, model: identity.model, policy: identity.policy, commit: identity.commit,
+      completedAt: null, status: 'running', verdict: null, findings: [], diagnostics: null,
+    });
+  }
+  return attempt;
+}
+
+function failReviewAttempt(job, number, error, now = () => new Date().toISOString(), status = null) {
+  const entry = (job.reviewHistory ?? []).find(attempt => attempt.number === number);
+  if (!entry || entry.status !== 'running') throw new TypeError('Only a running independent review attempt may fail');
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  status ??= /timed out|timeout/i.test(message) ? 'timed_out'
+    : /malformed|invalid verdict|invalid CLI result|findings do not match/i.test(message) ? 'invalid_verdict' : 'failed';
+  if (!['failed', 'timed_out', 'invalid_verdict', 'interrupted'].includes(status)) throw new TypeError('Invalid review failure status');
+  // Never persist arbitrary reviewer errors, raw output, stacks, or tokens.
+  // Stable categories keep diagnostics useful without copying sensitive text.
+  const diagnostics = status === 'interrupted' ? 'Independent review was interrupted before a durable result was recorded.'
+    : status === 'timed_out' ? 'Independent reviewer timed out.'
+      : status === 'invalid_verdict' ? 'Independent reviewer returned a malformed or invalid verdict.'
+        : /auth|credential|unauthorized|forbidden/i.test(message) ? 'Independent reviewer authentication failed.'
+          : 'Independent review could not be completed.';
+  Object.assign(entry, { status, completedAt: now(), verdict: null, findings: [], diagnostics });
+  return entry;
 }
 
 // The latest completed review of the delivered head.  Only a PASS for that
@@ -424,10 +484,17 @@ function recordReview(job, { reviewer, verdict, commit, policy, findings, attemp
   if ((verdict === 'PASS') !== (normalized.length === 0)) {
     throw new TypeError('A PASS review must have no findings and NEEDS_CHANGES must have findings');
   }
+  const entry = (job.reviewHistory ?? []).find(value => value.number === attempt.number);
+  if (entry && (entry.status !== 'running' || entry.commit !== commit || entry.policy !== policy
+    || entry.startedAt !== attempt.startedAt)) throw new TypeError('Review verdict does not match its running attempt');
   job.review = {
     reviewer, verdict, commit, policy, findings: normalized,
     attempt: { number: attempt.number, startedAt: attempt.startedAt, completedAt: attempt.completedAt || now() },
   };
+  if (entry) Object.assign(entry, {
+    reviewer, status: 'completed', completedAt: job.review.attempt.completedAt,
+    verdict, findings: normalized, diagnostics: null,
+  });
   return job;
 }
 
@@ -634,6 +701,7 @@ module.exports = {
   recordFailure,
   recordPullRequest,
   beginReviewAttempt,
+  failReviewAttempt,
   normalizeReviewFindings,
   recordReview,
   recordVerification,
