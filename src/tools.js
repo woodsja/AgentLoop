@@ -143,6 +143,16 @@ function toolFailure(message) {
 
 const tools = [
   {
+    name: 'submit_job', description: 'Queue an authorized R1 issue for asynchronous implementation, verification and independent review. Returns a job ID immediately.',
+    inputSchema: { type: 'object', properties: { project: { type: 'string' }, issue: { type: 'integer', minimum: 1 }, worktree: { type: 'string' } }, required: ['project', 'issue'], additionalProperties: false },
+    annotations: { readOnlyHint: false },
+  },
+  ...['get_job_status', 'get_job_result'].map(name => ({
+    name, description: 'Retrieve persisted job phases and review evidence by job ID.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false },
+    annotations: { readOnlyHint: true },
+  })),
+  {
     name: 'agentloop_status',
     description: 'Read the current AgentLoop status.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
@@ -243,6 +253,14 @@ async function callTool(params, options = {}) {
     } catch {
       return toolResult(statusSnapshot(null));
     }
+  }
+
+  if (['submit_job', 'get_job_status', 'get_job_result'].includes(name)) {
+    const response = name === 'submit_job'
+      ? await daemonRequest('/api/jobs', { project: args.project, issue: args.issue, worktree: args.worktree, source: 'mcp' })
+      : await daemonRequest(`/api/jobs/${encodeURIComponent(args.id || '')}`);
+    return response.statusCode >= 200 && response.statusCode < 300
+      ? toolResult(response.value) : toolFailure(daemonError(response));
   }
 
   if (name === 'dispatch_task') {

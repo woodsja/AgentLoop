@@ -6,6 +6,8 @@ const { spawn, spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 
 const store = require('./store');
+const { createR1Jobs } = require('./r1-jobs');
+let r1Jobs = createR1Jobs(store);
 const engines = require('./engines');
 const { resolveProject, resolveWorkerScope } = require('./project-registry');
 const state = require('./state');
@@ -1690,7 +1692,10 @@ function startTask(task) {
 
 function fillSlots() {
   const maxConcurrent = Math.max(1, Number(store.config.maxConcurrent) || 2);
-  const runningCount = store.listTasks('running').length;
+  const running = store.listTasks('running');
+  const r1 = running.find(task => task.workflow === 'r1');
+  if (r1) { r1Jobs.advance(r1); return; }
+  const runningCount = running.length;
   const slots = Math.max(0, maxConcurrent - runningCount);
 
   if (!slots) {
@@ -1700,6 +1705,12 @@ function fillSlots() {
   const pending = sortPending(store.listTasks('pending'));
 
   for (const task of pending.slice(0, slots)) {
+    if (task.workflow === 'r1') {
+      if (store.listTasks('running').length) return;
+      store.moveTask(task.id, 'pending', 'running');
+      r1Jobs.advance(task);
+      return;
+    }
     if (task.type === 'loop') {
       startLoop(task);
     } else {
@@ -2563,6 +2574,21 @@ async function handleRequest(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && requestPath.startsWith('/api/jobs/')) {
+    const job = r1Jobs.read(requestPath.slice('/api/jobs/'.length));
+    sendJson(res, job ? 200 : 404, job || { error: 'Job not found.' });
+    return;
+  }
+
+  if (req.method === 'POST' && requestPath === '/api/jobs') {
+    try {
+      const body = await readJsonBody(req);
+      const job = r1Jobs.submit(body);
+      sendJson(res, 201, { id: job.id });
+    } catch (error) { sendJson(res, 400, { error: error.message }); }
+    return;
+  }
+
   if (req.method === 'POST' && requestPath === '/api/dispatch') {
     await dispatch(req, res);
     return;
@@ -2613,6 +2639,7 @@ function tick() {
 
 function recoverRunningTasks() {
   for (const task of store.listTasks('running')) {
+    if (task.workflow === 'r1') { r1Jobs.recover(task); continue; }
     if (terminalTaskStatuses.has(task.status)) {
       try {
         store.moveTask(task.id, 'running', 'done');
@@ -2705,6 +2732,7 @@ async function stop(exitFn = process.exit) {
 
   clearInterval(ticker);
   stopBridge();
+  const r1Stopped = r1Jobs.stop(terminateWorker);
 
   if (server) {
     try {
@@ -2721,6 +2749,7 @@ async function stop(exitFn = process.exit) {
   }
 
   for (const task of runningTasks) {
+    if (task.workflow === 'r1') continue;
     if (terminalTaskStatuses.has(task.status)) {
       try {
         store.moveTask(task.id, 'running', 'done');
@@ -2841,6 +2870,9 @@ async function stop(exitFn = process.exit) {
     }
   }
 
+  let r1Grace;
+  await Promise.race([r1Stopped, new Promise(resolve => { r1Grace = setTimeout(resolve, shutdownGracePeriodMs); })]);
+  clearTimeout(r1Grace);
   activeWorkers.clear();
 
   try {
@@ -2852,7 +2884,8 @@ async function stop(exitFn = process.exit) {
   invokeExit(0);
 }
 
-function start() {
+function start(options = {}) {
+  r1Jobs = createR1Jobs(store, options.r1);
   store.ensureDirs();
 
   daemonInfo = {
@@ -2886,6 +2919,7 @@ function start() {
       return;
     }
 
+    daemonInfo.port = server.address().port;
     console.log(`Dashboard: http://127.0.0.1:${daemonInfo.port}`);
     ticker = setInterval(tick, pollMs);
     tick();

@@ -233,3 +233,24 @@ On Windows, pressing Ctrl-C in the console gracefully finalizes running loops be
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Durable asynchronous R1 jobs
+
+With the existing daemon running, `submit_job({project, issue, worktree?})` (or
+`POST /api/jobs`) persists a job and immediately returns `{id}`. It selects the
+specified ready GitHub issue; implementation and deterministic verification run
+in the owner-authorized issue worktree, followed by CI observation and the existing
+independent Claude review. The owner must enable the project in
+`autopilot-projects.json`, use the Codex worker with `reviewPolicy: "always"` or
+`"risk"`, and register its checkout and exact `issue-N` worktree in the existing
+project registry before submission. Requests cannot register paths themselves.
+
+The existing dispatcher runs one R1 job at a time, retains the original per-issue
+lock, retry/correction limits and review history, and checkpoints phases in the
+existing durable queue. `get_job_status({id})`, `get_job_result({id})`, or
+`GET /api/jobs/:id` retrieve persisted phases and sanitized verification/review
+evidence, including after daemon recovery. `passed` requires verification and an
+independent PASS for the exact delivered SHA and means ready for human merge.
+Failures return `blocked`; interrupted independent reviews are preserved and handed
+to a human without replaying the reviewer. Saved exact-SHA approval is reused.
+No additional scheduler or service is installed or started by submission.

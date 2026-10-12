@@ -10,13 +10,19 @@ function createRalphTaskService(options = {}) {
     config: options.config,
     timeoutMs: options.workerTimeoutMs,
     ...(options.registryPath ? { registryPath: options.registryPath } : {}),
+    ...(options.spawnImpl ? { spawnImpl: options.spawnImpl } : {}),
   });
 
   return {
     run(projectPath, task) {
       const stateWriter = createTaskStateWriterImpl(projectPath);
       return runTaskImpl(projectPath, task, {
-        runWorker,
+        runWorker: options.onPhaseChange ? async (...args) => {
+          await options.onPhaseChange('implementation');
+          const result = await runWorker(...args);
+          await options.onPhaseChange('verification');
+          return result;
+        } : runWorker,
         onStateChange: stateWriter,
         verificationTimeoutMs: options.verificationTimeoutMs,
       });
