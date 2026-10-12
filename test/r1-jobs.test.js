@@ -75,6 +75,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     for (const phase of ['queued', 'preparing', 'implementation', 'verification', 'delivering', 'ci', 'review', 'completed']) assert.ok(completed.phases.some(p => p.phase === phase), phase);
     const transcript = (await request(port, `/api/log/${id}?lines=200`)).value.lines;
     assert.ok(transcript.some(line => /deterministic verification passed/.test(line)));
+    assert.ok(transcript.some(line => /delivering verified work for issue #1/.test(line)));
     assert.ok(transcript.some(line => /delivered head [a-f0-9]{12}/.test(line)));
     assert.ok(transcript.some(line => /independent Claude review PASS/.test(line)));
     assert.ok(transcript.some(line => /CI (pending|green)/.test(line)));
@@ -95,6 +96,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.ok(!JSON.stringify(failed).includes('private'));
     const failedTranscript = (await request(port, `/api/log/${third}?lines=200`)).value.lines;
     assert.ok(failedTranscript.some(line => /independent Claude review failed: Independent review could not be completed/.test(line)));
+    assert.ok(failedTranscript.every(line => !/github_pat_|\/tmp\/r1-private-output/.test(line)), 'failure output redacts tokens and absolute paths');
     await halt(); port = await launch();
     assert.deepEqual(await get(id), completed);
     const before = fs.readFileSync(path.join(root, 'reviews'), 'utf8');

@@ -11,7 +11,7 @@ async function gate(name) {
 const reviewPullRequest = Object.assign(async context => {
   fs.appendFileSync(path.join(fixture.root, 'reviews'), JSON.stringify(context) + '\n');
   await gate('review-release');
-  if (fs.existsSync(path.join(fixture.root, 'review-error'))) throw new Error('Fake reviewer failed: token=private');
+  if (fs.existsSync(path.join(fixture.root, 'review-error'))) throw new Error(`Fake reviewer failed: github_pat_abcdefghijklmnopqrstuvwxyz0123456789 /tmp/r1-private-output`);
   return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: context.headCommit, policy: 'always', findings: [] };
 }, { reviewer: 'claude:sonnet', model: 'sonnet' });
 require('../../src/daemon').start({ r1: { ciPollMs: 50, autopilotDependencies: {

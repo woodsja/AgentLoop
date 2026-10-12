@@ -117,6 +117,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     // Crash while waiting for CI: the restarted daemon resumes the same job once.
     ready([11]);
     const [waiting] = await until(() => { const tasks = tasksFor(11); return tasks[0] && tasks[0].phase === 'ci' && tasks; }, '#11 waiting for CI');
+    const transcriptBeforeRestart = (await get(port, `/api/log/${waiting.id}?lines=200`)).lines;
+    const pendingBeforeRestart = transcriptBeforeRestart.filter(line => /R1 CI pending/.test(line)).length;
     const died = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await died;
     fs.writeFileSync(path.join(root, 'ci-release'), '');
     await launch();
@@ -127,6 +129,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     const resumedTranscript = (await get(port, `/api/log/${recovered.task.id}?lines=200`)).lines;
     const progress = resumedTranscript.filter(line => /R1 CI (pending|green|red)/.test(line)).map(line => line.replace(/^\[[^\]]+\]\s*/, ''));
     assert.equal(new Set(progress).size, progress.length, 'CI polling and restart do not flood identical progress lines');
+    assert.equal(resumedTranscript.filter(line => /R1 CI pending/.test(line)).length, pendingBeforeRestart, 'restart does not re-emit the prior CI transition');
+    assert.equal(resumedTranscript.filter(line => /terminal state MERGED/.test(line)).length, 1, 'terminal state is logged once');
 
     // Repeated admission never duplicates a queued, running, or terminal issue.
     ready([7, 8, 9, 10, 11]);

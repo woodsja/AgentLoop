@@ -12,7 +12,7 @@ const { managesWorktree, resolveProject } = require('./project-registry');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
-    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+)\b/g, '[redacted]')
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16})\b/g, '[redacted]')
     .replace(/(?:[A-Za-z]:\\|\/)(?:[^\s"']+[\\/])*[^\s"']+/g, '[path]').slice(0, limit);
 }
 
@@ -50,7 +50,7 @@ function approvedMerge(job) {
 function evidence(job) {
   const review = value => value && ({
     reviewer: safeText(value.reviewer), verdict: value.verdict, commit: value.commit, policy: value.policy,
-    findings: (value.findings || []).map(finding => ({ ...finding, summary: safeText(finding.summary), file: safeText(finding.file) || null })),
+    findings: (Array.isArray(value.findings) ? value.findings : []).map(finding => ({ ...finding, summary: safeText(finding && finding.summary), file: safeText(finding && finding.file) || null })),
     ...(value.attempt ? { attempt: value.attempt } : {}),
   });
   return job && {
@@ -60,7 +60,7 @@ function evidence(job) {
     ci: job.ci && { state: job.ci.state, headCommit: job.ci.headCommit },
     review: review(job.review),
     reviewAttempts: job.reviewAttempts,
-    reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: safeText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && safeText(entry.diagnostics) })),
+    reviewHistory: (Array.isArray(job.reviewHistory) ? job.reviewHistory : []).filter(Boolean).map(entry => ({ ...entry, reviewer: safeText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && safeText(entry.diagnostics) })),
     diagnostics: (job.failures || []).map(failure => ({ phase: failure.phase, at: failure.at, message: safeText(failure.message) })),
   };
 }
@@ -80,7 +80,6 @@ function createR1Jobs(store, options = {}) {
   const children = new Set();
   let closing = false;
   const now = () => new Date().toISOString();
-  const transcriptLines = new Map();
 
   // The dashboard transcript is deliberately only a compact rendering of
   // durable R1 state.  It is not a worker-output capture: that could expose
@@ -89,41 +88,46 @@ function createR1Jobs(store, options = {}) {
     if (typeof store.appendLogLine !== 'function') return;
     const line = safeText(message, TRANSCRIPT_LIMIT).replace(/[\x00-\x1f\x7f]+/g, ' ').trim();
     if (!line) return;
-    let seen = transcriptLines.get(task.id);
-    if (!seen) {
-      let existing = [];
-      try { if (typeof store.readLogLines === 'function') existing = store.readLogLines(task.id, 200); }
-      catch (error) { console.error(`R1 transcript read failed for ${task.id} (${key}): ${safeText(error.message, 200)}`); }
-      seen = new Set(existing.map(value => String(value).replace(/^\[[^\]]+\]\s*/, '')));
-      transcriptLines.set(task.id, seen);
-    }
+    // Persist event identities with the task.  Looking at the last 200 rendered
+    // lines loses history after a busy job, and rendered text is not an event:
+    // e.g. CI may legitimately return to pending after red.
+    const seen = new Set(Array.isArray(task.r1TranscriptEvents) ? task.r1TranscriptEvents : []);
     const rendered = `R1 ${line}`;
-    if (seen.has(rendered)) return;
-    seen.add(rendered);
+    if (seen.has(key)) return;
+    seen.add(key);
+    task.r1TranscriptEvents = [...seen];
     try { store.appendLogLine(task.id, `[${now()}] ${rendered}`); }
     catch (error) { console.error(`R1 transcript append failed for ${task.id} (${key}): ${safeText(error.message, 200)}`); }
   }
 
   function phaseTranscript(task, phase) {
-    const issue = `issue #${task.issue}`;
-    const correction = task.r1 && (task.r1.reviewCorrection || task.r1.correction);
-    const correctionKind = task.r1 && task.r1.reviewCorrection ? 'review' : 'CI';
-    const messages = {
-      queued: `admitted and queued for ${issue}.`,
-      preparing: `preparing workspace for ${issue}.`,
-      implementation: correction ? `${correctionKind} correction started for ${issue}.` : `implementation started for ${issue}.`,
-      verification: `deterministic verification started for ${issue}.`,
-      delivery: `delivering verified work for ${issue}.`,
-      ci: `awaiting CI for ${issue}.`,
-      review: `independent Claude review started for ${issue}.`,
-      completed: `execution completed for ${issue}.`,
-      needs_specification: `execution stopped: NEEDS_SPECIFICATION for ${issue}.`,
-      failed: `execution stopped: FAILED for ${issue}.`,
-    };
-    if (messages[phase]) transcript(task, `phase:${phase}`, messages[phase]);
+    try {
+      const issue = `issue #${task.issue}`;
+      const correction = task.r1 && (task.r1.reviewCorrection || task.r1.correction);
+      const correctionKind = task.r1 && task.r1.reviewCorrection ? 'review' : 'CI';
+      const messages = {
+        queued: `admitted and queued for ${issue}.`,
+        preparing: `preparing workspace for ${issue}.`,
+        implementation: correction ? `${correctionKind} correction started for ${issue}.` : `implementation started for ${issue}.`,
+        verification: `deterministic verification started for ${issue}.`,
+        delivering: `delivering verified work for ${issue}.`,
+        ci: `awaiting CI for ${issue}.`,
+        review: `independent Claude review started for ${issue}.`,
+        completed: `execution completed for ${issue}.`,
+        needs_specification: `execution stopped: NEEDS_SPECIFICATION for ${issue}.`,
+        failed: `execution stopped: FAILED for ${issue}.`,
+      };
+      const occurrence = (task.phases || []).filter(entry => entry && entry.phase === phase).length;
+      if (messages[phase]) transcript(task, `phase:${phase}:${occurrence}`, messages[phase]);
+    } catch (error) {
+      console.error(`R1 phase transcript failed for ${task && task.id} (${phase}): ${safeText(error && error.message, 200)}`);
+    }
   }
 
   function jobTranscript(task, previous, job) {
+    try {
+      previous = previous && typeof previous === 'object' ? previous : {};
+      job = job && typeof job === 'object' ? job : {};
     const commit = job.delivery && job.delivery.commit;
     const short = value => typeof value === 'string' ? value.slice(0, 12) : 'unknown head';
     if (job.verification && (!previous.verification || previous.verification.passed !== job.verification.passed
@@ -140,7 +144,8 @@ function createR1Jobs(store, options = {}) {
     }
     if (job.ci && (!previous.ci || previous.ci.state !== job.ci.state || previous.ci.headCommit !== job.ci.headCommit)) {
       const detail = job.ci.state === 'red' ? `: ${safeText(job.ci.diagnostics || job.ci.details || 'no details', 300)}` : '';
-      transcript(task, `ci:${job.ci.headCommit || ''}:${job.ci.state}`, `CI ${job.ci.state} for ${short(job.ci.headCommit || commit)}${detail}`);
+      const occurrence = (task.phases || []).filter(entry => entry && entry.phase === 'ci').length;
+      transcript(task, `ci:${job.ci.headCommit || ''}:${job.ci.state}:${occurrence}`, `CI ${job.ci.state} for ${short(job.ci.headCommit || commit)}${detail}`);
     }
     const review = job.reviewHistory && job.reviewHistory.at(-1);
     const oldReview = previous.reviewHistory && previous.reviewHistory.at(-1);
@@ -148,7 +153,7 @@ function createR1Jobs(store, options = {}) {
       if (review.status === 'running') transcript(task, `review:${review.number}:running`, `independent Claude review attempt ${review.number} started for ${short(review.commit)}.`);
       else if (review.verdict === 'PASS') transcript(task, `review:${review.number}:PASS`, `independent Claude review PASS for ${short(review.commit)}.`);
       else if (review.verdict === 'NEEDS_CHANGES') {
-        const findings = (review.findings || []).map(finding => safeText(finding.summary, 180)).filter(Boolean).join('; ');
+        const findings = (Array.isArray(review.findings) ? review.findings : []).map(finding => safeText(finding && finding.summary, 180)).filter(Boolean).join('; ');
         transcript(task, `review:${review.number}:needs_changes`, `independent Claude review requested correction${findings ? `: ${findings}` : '.'}`);
       } else transcript(task, `review:${review.number}:${review.status}`, `independent Claude review ${review.status}: ${safeText(review.diagnostics || 'no verdict recorded', 240)}`);
     }
@@ -156,9 +161,12 @@ function createR1Jobs(store, options = {}) {
       transcript(task, `merge:${job.merge.commit}:${job.merge.issueClosed}`, `merged PR #${job.merge.prNumber} at ${short(job.merge.commit)}${job.merge.issueClosed ? '; issue closed' : ''}.`);
     }
     if (job.terminalState && previous.terminalState !== job.terminalState) {
-      const terminal = job.terminalState === 'merged' ? 'MERGED' : job.terminalState === 'needs_specification' ? 'NEEDS_SPECIFICATION' : job.terminalState.toUpperCase();
+      const terminal = job.terminalState === 'merged' ? 'MERGED' : job.terminalState === 'needs_specification' ? 'NEEDS_SPECIFICATION' : typeof job.terminalState === 'string' ? job.terminalState.toUpperCase() : 'UNKNOWN';
       const failure = terminal === 'FAILED' ? job.failures && job.failures.at(-1) : null;
-      transcript(task, `terminal:${job.terminalState}`, `terminal state ${terminal}${failure ? `: ${safeText(failure.message, 300)}` : '.'}`);
+      transcript(task, `terminal:${job.terminalState}`, `terminal state ${terminal}${failure ? `: ${safeText(failure && failure.message, 300)}` : '.'}`);
+    }
+    } catch (error) {
+      console.error(`R1 job transcript failed for ${task && task.id}: ${safeText(error && error.message, 200)}`);
     }
   }
 
@@ -221,9 +229,12 @@ function createR1Jobs(store, options = {}) {
     store.writeResult({ id: task.id, status: task.status, project: task.project, finishedAt: task.finishedAt,
       ...(task.failure ? { failure: task.failure } : {}), ...(task.cleanup ? { cleanup: task.cleanup } : {}), evidence: evidence(job) });
     store.moveTask(task.id, 'running', 'done');
-    if (task.status === 'merged') transcript(task, 'finish:merged', `terminal state MERGED for issue #${task.issue}.`);
-    else if (task.status === 'needs_specification') transcript(task, 'finish:needs_specification', `terminal state NEEDS_SPECIFICATION for issue #${task.issue}.`);
-    else if (task.autonomous) transcript(task, 'finish:failed', `terminal state FAILED for issue #${task.issue}${task.failure ? `: ${safeText(task.failure, 300)}` : '.'}`);
+    // Terminal jobs already rendered their durable terminal transition in
+    // jobTranscript().  Specification failures have no job checkpoint.
+    if (!job || !job.terminalState) {
+      if (task.status === 'needs_specification') transcript(task, 'finish:needs_specification', `terminal state NEEDS_SPECIFICATION for issue #${task.issue}.`);
+      else if (task.autonomous) transcript(task, 'finish:failed', `terminal state FAILED for issue #${task.issue}${task.failure ? `: ${safeText(task.failure, 300)}` : '.'}`);
+    }
   }
 
   function command(file, args, cwd) {
@@ -330,11 +341,14 @@ function createR1Jobs(store, options = {}) {
     const jobStore = { ...original,
       list: () => original.list().filter(job => job.issue.number === task.issue),
       save(job) {
-        const previous = task.r1 ? structuredClone(task.r1) : original.load(task.issue) || {};
+        let previous = {};
+        try { previous = task.r1 ? structuredClone(task.r1) : original.load(task.issue) || {}; }
+        catch (error) { console.error(`R1 transcript previous-state read failed for ${task.id}: ${safeText(error && error.message, 200)}`); }
         original.save(job);
         task.r1 = structuredClone(job);
         checkpoint(task, phaseOf(job));
-        jobTranscript(task, previous, job);
+        try { jobTranscript(task, previous, job); }
+        catch (error) { console.error(`R1 transcript derivation failed for ${task.id}: ${safeText(error && error.message, 200)}`); }
         return job;
       },
     };
