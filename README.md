@@ -172,6 +172,19 @@ The shipped `config.json` includes every key above except the optional `enginePa
 
 A model named on the task or loop itself wins over `models`.
 
+### R1 backlog admission (not activated by this repository)
+
+`node src/r1-scheduler.js --project ralph --dry-run` is a one-shot, read-only
+report. It uses only an owner-installed `r1Projects` configuration entry for
+`{ "id":"ralph", "repository":"woodsja/AgentLoop", "worktree":"/absolute/authorized/worktree" }`;
+the command cannot register a repository or select a worktree itself. Candidates
+are ordered by issue number, and the report records every skip reason.
+
+No timer is installed or enabled by this change. After owner review, a systemd
+oneshot service may invoke the command with the registered project and an R1
+submit adapter; first run the dry-run, then authorize the timer separately.
+R1 admission always requests review policy `always` and records `autoMerge:false`.
+
 ## Supported platforms
 
 Windows is the primary path:

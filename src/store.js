@@ -21,6 +21,8 @@ const paths = {
   state: path.join(root, 'state'),
   tasks: path.join(root, 'state', 'tasks'),
   taskRuns: path.join(root, 'state', 'task-runs'),
+  r1Jobs: path.join(root, 'state', 'r1-jobs'),
+  r1Claims: path.join(root, 'state', 'r1-claims'),
   pending: path.join(root, 'state', 'tasks', 'pending'),
   running: path.join(root, 'state', 'tasks', 'running'),
   done: path.join(root, 'state', 'tasks', 'done'),
@@ -63,6 +65,7 @@ function loadConfig() {
     },
     models: loaded.models ?? {},
     enginePaths: loaded.enginePaths ?? {},
+    r1Projects: Array.isArray(loaded.r1Projects) ? loaded.r1Projects : [],
   };
 
   if (loaded.model) {
@@ -75,8 +78,73 @@ function loadConfig() {
 const config = loadConfig();
 
 function ensureDirs() {
-  for (const directory of [paths.pending, paths.running, paths.done, paths.taskRuns, paths.results, paths.logs]) {
+  for (const directory of [paths.pending, paths.running, paths.done, paths.taskRuns, paths.r1Jobs, paths.r1Claims, paths.results, paths.logs]) {
     fs.mkdirSync(directory, { recursive: true });
+  }
+}
+
+function r1Key(project, issueNumber) {
+  if (typeof project !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(project) ||
+      !Number.isSafeInteger(issueNumber) || issueNumber < 1) {
+    throw new Error('A repository owner/name and positive issue number are required.');
+  }
+  return crypto.createHash('sha256').update(`${project.toLowerCase()}#${issueNumber}`).digest('hex');
+}
+
+function r1JobPath(project, issueNumber) {
+  return path.join(paths.r1Jobs, `${r1Key(project, issueNumber)}.json`);
+}
+
+function readR1Job(project, issueNumber) {
+  try {
+    return JSON.parse(fs.readFileSync(r1JobPath(project, issueNumber), 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function writeR1Job(job) {
+  if (!job || typeof job !== 'object') throw new Error('R1 job is required.');
+  writeJsonAtomic(r1JobPath(job.project, job.issueNumber), job);
+}
+
+function listR1Jobs() {
+  ensureDirs();
+  return fs.readdirSync(paths.r1Jobs, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .map((entry) => JSON.parse(fs.readFileSync(path.join(paths.r1Jobs, entry.name), 'utf8')));
+}
+
+function readR1JobById(id) {
+  if (typeof id !== 'string' || !id.trim()) return null;
+  return listR1Jobs().find((job) => job?.id === id) || null;
+}
+
+// O_EXCL gives the admission path a cross-process compare-and-set.  The claim is
+// intentionally retained for terminal jobs: a delivered issue must not be rediscovered.
+function claimR1Issue(project, issueNumber, claim) {
+  ensureDirs();
+  const claimPath = path.join(paths.r1Claims, `${r1Key(project, issueNumber)}.claim`);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(claimPath, 'wx');
+    fs.writeFileSync(descriptor, `${JSON.stringify(claim)}\n`, 'utf8');
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST') return false;
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function readR1Claim(project, issueNumber) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(paths.r1Claims, `${r1Key(project, issueNumber)}.claim`), 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
   }
 }
 
@@ -454,6 +522,13 @@ module.exports = {
   writeTask,
   writeTaskRunState,
   readTaskRunState,
+  r1Key,
+  readR1Job,
+  writeR1Job,
+  listR1Jobs,
+  readR1JobById,
+  claimR1Issue,
+  readR1Claim,
   listTasks,
   writeResult,
   appendLogLine,
