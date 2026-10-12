@@ -236,7 +236,10 @@ async function run(argv, dependencies = {}) {
     if (!job.pr || !job.delivery || !job.delivery.commit || !matchingPass(job.review, job.delivery.commit)
       || !Array.isArray(job.review.findings) || job.review.findings.length !== 0
       || !job.review.reviewer.startsWith('claude:')) {
-      throw new Error(`Autopilot merge for issue #${candidate.number} requires an exact independent PASS with no findings`);
+      // Fail closed with durable evidence; throwing here would leave the job
+      // awaiting CI and re-enter this gate on every later pass.
+      handToHuman(job, 'merge', `Autopilot merge for issue #${candidate.number} requires an exact independent Claude PASS with no findings.`, store.now);
+      return;
     }
     const observePr = dependencies.observePullRequest || observePullRequest;
     const remote = await observePr(project, job.pr.number, { execFile: dependencies.execFile });

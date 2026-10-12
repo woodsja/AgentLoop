@@ -21,6 +21,12 @@ function runGh(args, executeFile, operation = 'GitHub issue discovery', maxBuffe
           // retain it without scraping the human-oriented gh stderr text.
           if (Number.isInteger(error.statusCode)) failure.statusCode = error.statusCode;
           else if (Number.isInteger(error.status)) failure.statusCode = error.status;
+          else {
+            // Real `gh api` failures expose the HTTP status only in stderr,
+            // for example `gh: Head branch was modified. (HTTP 409)`.
+            const status = /\(HTTP (\d{3})\)/.exec(String(stderr || ''));
+            if (status) failure.statusCode = Number(status[1]);
+          }
           reject(failure);
           return;
         }
@@ -241,7 +247,9 @@ async function mergePullRequest(project, { number, headCommit }, { execFile: exe
     // runGh errors retain their retryability.  A malformed successful response
     // is not a transport retry: it is ambiguous and must be reconciled first.
     if (error && error.code === 'AUTOPILOT_GITHUB_TRANSPORT') {
-      if (error.statusCode >= 400 && error.statusCode < 500) {
+      // Rate limiting and request timeouts are transient; other client errors
+      // (405 not mergeable, 409 head changed, 422 invalid) are permanent.
+      if (error.statusCode >= 400 && error.statusCode < 500 && error.statusCode !== 408 && error.statusCode !== 429) {
         error.code = 'AUTOPILOT_MERGE_REJECTED';
         error.retryable = false;
       }

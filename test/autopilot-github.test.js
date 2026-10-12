@@ -144,6 +144,22 @@ test('observes exact PR identity, merges with GitHub expected-head protection, a
   ]);
 });
 
+test('classifies real gh merge failures by the HTTP status gh prints on stderr', async () => {
+  const merge = stderr => mergePullRequest({ repo: 'example/repo' }, { number: 42, headCommit: 'deadbeef' }, {
+    // A real gh failure carries only an exit code; the status is in stderr.
+    execFile: (file, args, options, callback) => callback(Object.assign(new Error('Command failed'), { code: 1 }), '', stderr),
+  });
+  for (const [stderr, code, statusCode, retryable] of [
+    ['gh: Head branch was modified. Review and try the merge again. (HTTP 409)\n', 'AUTOPILOT_MERGE_REJECTED', 409, false],
+    ['gh: Pull Request is not mergeable (HTTP 405)\n', 'AUTOPILOT_MERGE_REJECTED', 405, false],
+    ['gh: API rate limit exceeded (HTTP 429)\n', 'AUTOPILOT_GITHUB_TRANSPORT', 429, true],
+    ['gh: Server Error (HTTP 502)\n', 'AUTOPILOT_GITHUB_TRANSPORT', 502, true],
+    ['error connecting to api.github.com\n', 'AUTOPILOT_GITHUB_TRANSPORT', undefined, true],
+  ]) {
+    await assert.rejects(merge(stderr), error => error.code === code && error.statusCode === statusCode && error.retryable === retryable, stderr);
+  }
+});
+
 test('collects deterministic failed job and log diagnostics without re-running workflows', async () => {
   const calls = [];
   const run = { databaseId: 601, status: 'completed', conclusion: 'failure', name: 'test', workflowName: 'CI', url: 'https://example/run/601', startedAt: null, updatedAt: null };
