@@ -14,5 +14,21 @@
     "ciWorkflow": "Checks",
     "reviewPolicy": "always",
     "autoMerge": false
+  },
+  "ralph": {
+    "enabled": true,
+    "repo": "woodsja/AgentLoop",
+    "checkout": "/home/woodsja/tools/ralph",
+    "worktreeRoot": "/home/woodsja/worktrees/ralph",
+    "baseBranch": "ralph-dev",
+    "readyLabel": "ready-for-agent",
+    "humanLabel": "ready-for-human",
+    "worker": "codex",
+    "maxAttempts": 2,
+    "prepareVenv": false,
+    "verification": "npm test && git diff --check",
+    "ciWorkflow": "CI",
+    "reviewPolicy": "always",
+    "autoMerge": false
   }
 }
