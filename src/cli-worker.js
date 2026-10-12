@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const engines = require('./engines');
+const store = require('./store');
+const { resolveWorkerScope } = require('./project-registry');
 
 const DIAGNOSTIC_LIMIT = 2000;
 const TRUNCATION_MARKER = '[truncated]';
@@ -66,9 +68,12 @@ function createCliWorker(options = {}) {
     timeoutMs = 45 * 60 * 1000,
     spawnImpl = spawn,
     tempDir = os.tmpdir(),
+    registryPath = store.paths.config,
   } = options;
 
   return async function runWorker(projectPath, task, context) {
+    const scope = resolveWorkerScope(config, projectPath, registryPath);
+    if (scope.isolatedWorktree && task.worker !== 'codex') throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
     const engine = engines.get(task.worker);
     if (!engine) throw new Error(`Unknown worker engine: ${task.worker}`);
 
@@ -79,7 +84,7 @@ function createCliWorker(options = {}) {
     const outputPath = engine.usesOutputFile
       ? path.join(tempDir, `ralph-worker-${randomUUID()}.txt`)
       : null;
-    const args = engine.args({ model, outputPath });
+    const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
     const prompt = buildWorkerPrompt(task, context);
 
     try {
@@ -87,7 +92,7 @@ function createCliWorker(options = {}) {
         let child;
         try {
           child = spawnImpl(executable, args, {
-            cwd: projectPath,
+            cwd: scope.cwd,
             stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: true,
             env: engine.env ? engine.env(process.env) : process.env,

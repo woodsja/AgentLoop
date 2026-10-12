@@ -19,6 +19,7 @@ const { prepareRepositoryEnvironment } = require('./autopilot-environment');
 const { createClaudeReviewAdapter } = require('./autopilot-review');
 const { buildAutopilotTask, buildCorrectiveTask } = require('./autopilot-task');
 const { createRalphTaskService } = require('./ralph-task-service');
+const storeConfig = require('./store').config;
 const {
   ACTIVE_STATUSES,
   DEFAULT_MAX_JOB_RUNS,
@@ -466,7 +467,7 @@ async function run(argv, dependencies = {}) {
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(project, candidate, instructions);
-      const service = createService(dependencies.ralphOptions || {});
+      const service = createService({ config: storeConfig, ...dependencies.ralphOptions });
       phase = 'running';
       job.status = 'running';
       job.ralph = { status: 'running', attempts: 0, taskId: task && task.id ? task.id : null };

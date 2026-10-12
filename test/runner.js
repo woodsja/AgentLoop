@@ -241,6 +241,8 @@ async function startDaemon(overridePort) {
     mcpBridge: { port: bridgePort },
     models: { codex: 'gpt-5.6-terra' },
     enginePaths: { codex: MOCK_EXECUTABLE },
+    allowedProjects: Object.fromEntries(fs.readdirSync(SCENARIOS_DIR).filter(name => name.endsWith('.json'))
+      .map(name => [name.slice(0, -5), path.join(WORKSPACE, name.slice(0, -5))])),
   };
 
   fs.writeFileSync(tempConfigPath, `${JSON.stringify(testConfig, null, 2)}\n`, 'utf8');

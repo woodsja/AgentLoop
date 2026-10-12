@@ -184,6 +184,16 @@ It reloads the user manager, runs `systemctl --user enable --now` on the timer, 
 
 A disabled project, like `finance-dashboard` with `"enabled": false`, makes each scheduled pass exit 0 right away. It does not do issue discovery, cleanup, or workspace preparation.
 
+Worker directories must be explicitly registered in the owner configuration (`AGENTLOOP_CONFIG_PATH` or `--config`). Existing `allowedProjects` entries can still map a project name to its directory. To authorize isolated feature worktrees, a project entry may instead contain `root` and a named `worktrees` map:
+
+```json
+{"allowedProjects":{"ralph":{"root":"/path/to/checkout","worktrees":{"review":"/path/to/feature-worktree"}}}}
+```
+
+Keep that authoritative configuration outside every writable worker directory. Requests select `project: "ralph"` and `worktree: "review"`; they cannot register a project or override its path. The resolver checks the canonical directory, Git worktree registration, and repository ownership again before execution. Existing structured task clients may pass `projectPath` only when it exactly matches an authorized workspace. Unknown projects, redirected worktrees, and unrelated paths fail closed.
+
+Isolated worktree implementation uses Codex's filesystem sandbox with only the selected worktree writable; system temporary directories, Git metadata, and `.codex` remain read-only. These workers cannot request sandbox escalation, and ignore user/project configuration that could widen their permissions. Engines without this filesystem boundary are refused for isolated worktrees. Ralph performs verification and Git delivery separately from the implementation worker. This configuration support does not register new live projects or change services.
+
 Projects may opt into a post-green-CI review gate with `"reviewPolicy": "always"` (or `"risk"`). The default reviewer is a separate, read-only Claude Sonnet process; set `"reviewModel": "opus"` to choose Opus. It fetches the PR patch and issue context through `gh`, reads repository `AGENTS.md` guidance from the delivered commit, has its Claude tools explicitly disabled, and accepts only a strict JSON verdict bound to the delivered SHA.
 
 Skipping review with `"reviewPolicy": "none"` (also the default when omitted) requires a `"reviewSkipReason"` explaining the exception, such as `"Documentation-only change covered by documentation checks."` The reason must contain non-whitespace text and be at most 4000 characters after trimming. Without a valid reason, green CI is handed to a human rather than marked merge-ready. The job's `reviewSkip` record persists the `none` policy, exact delivered commit, trimmed reason, and `recordedAt` timestamp before merge readiness. The record survives restarts and is cleared when a new commit is delivered.

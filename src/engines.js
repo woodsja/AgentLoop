@@ -64,14 +64,19 @@ const codex = {
   // Codex writes its final message to a file rather than emitting it as an event.
   usesOutputFile: true,
 
-  args({ model, outputPath }) {
+  args({ model, outputPath, workspaceRoot = null }) {
     return [
       'exec',
       '--json',
-      '--sandbox', 'workspace-write',
-      '--config', 'approval_policy="on-request"',
-      '--config', 'approvals_reviewer="auto_review"',
-      '--config', 'sandbox_workspace_write.network_access=false',
+      ...(workspaceRoot ? [
+        '--ignore-user-config',
+        '--cd', workspaceRoot,
+        '--config', 'default_permissions="ralph_worktree"',
+        '--config', 'permissions.ralph_worktree={extends=":workspace",filesystem={":slash_tmp"="read",":tmpdir"="read"},network={enabled=false}}',
+        '--config', `projects.${JSON.stringify(workspaceRoot)}.trust_level="untrusted"`,
+      ] : ['--sandbox', 'workspace-write', '--config', 'sandbox_workspace_write.network_access=false']),
+      '--config', workspaceRoot ? 'approval_policy="never"' : 'approval_policy="on-request"',
+      ...(workspaceRoot ? [] : ['--config', 'approvals_reviewer="auto_review"']),
       '--skip-git-repo-check',
       '--output-last-message', outputPath,
       '--model', model,

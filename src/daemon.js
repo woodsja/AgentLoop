@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 
 const store = require('./store');
 const engines = require('./engines');
+const { resolveProject, resolveWorkerScope } = require('./project-registry');
 const state = require('./state');
 const {
   taskPrompt,
@@ -777,14 +778,16 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`,
     )
     : null;
-  const args = engine.args({ model, outputPath });
   let child;
 
   appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
 
   try {
+    const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
+    if (scope.isolatedWorktree && engine.id !== 'codex') throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
+    const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
     child = spawnEngine(engine, args, {
-      cwd,
+      cwd: scope.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -1566,13 +1569,14 @@ function spawnWorker(task) {
   const outputPath = engine.usesOutputFile
     ? path.join(store.paths.results, `.${task.id}.${Date.now()}.last-message.tmp`)
     : null;
-  const args = engine.args({ model, outputPath });
   let child;
 
   try {
-    fs.mkdirSync(cwd, { recursive: true });
+    const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
+    if (scope.isolatedWorktree && engine.id !== 'codex') throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
+    const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
     child = spawnEngine(engine, args, {
-      cwd,
+      cwd: scope.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -2029,11 +2033,21 @@ async function dispatch(req, res) {
     return;
   }
 
+  let scope;
+  try {
+    if (Object.hasOwn(body, 'cwd') || Object.hasOwn(body, 'projectPath')) throw new Error('Worker paths are derived from the owner project registry.');
+    scope = resolveProject(store.config, body.project, body.worktree, store.paths.config);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message });
+    return;
+  }
+
   const task = store.enqueueTask({
     prompt: body.prompt,
     engine,
     model: body.model,
-    cwd: body.cwd,
+    project: body.project,
+    cwd: scope.cwd,
     title: body.title,
     priority: body.priority,
     source: taskSource(body),
@@ -2312,7 +2326,16 @@ async function createLoop(req, res) {
     return;
   }
 
-  const requestedProjectPath = loopProjectPath(project);
+  let selected;
+  try {
+    if (body.worktree !== undefined || Object.hasOwn(store.config.allowedProjects, project)) {
+      selected = resolveProject(store.config, project, body.worktree, store.paths.config);
+    }
+  } catch (error) {
+    sendJson(res, 400, { error: error.message });
+    return;
+  }
+  const requestedProjectPath = selected ? selected.cwd : loopProjectPath(project);
 
   if (!isDirectory(requestedProjectPath)) {
     sendJson(res, 400, { error: 'Project folder does not exist.' });
@@ -2332,8 +2355,15 @@ async function createLoop(req, res) {
 
   const relative = path.relative(rootPath, projectPath);
 
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (!selected && (relative.startsWith('..') || path.isAbsolute(relative))) {
     sendJson(res, 400, { error: 'Project folder must be inside the AgentLoop root.' });
+    return;
+  }
+
+  try {
+    resolveWorkerScope(store.config, projectPath, store.paths.config);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message });
     return;
   }
 

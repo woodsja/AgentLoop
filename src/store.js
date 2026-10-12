@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { configuredProjects } = require('./project-registry');
 
 const root = path.resolve(__dirname, '..');
 function resolveConfigPath() {
@@ -69,6 +70,7 @@ function loadConfig() {
     },
     models: loaded.models ?? {},
     enginePaths: loaded.enginePaths ?? {},
+    allowedProjects: configuredProjects(loaded.allowedProjects, paths.config),
   };
 
   if (loaded.model) {

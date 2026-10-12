@@ -52,7 +52,7 @@ test('ralph_run_task advertises the structured task contract', () => {
   assert.equal(advertised.length, 1);
   const schema = advertised[0].inputSchema;
   assert.equal(schema.type, 'object');
-  assert.deepEqual(schema.required, ['projectPath', 'id', 'goal', 'acceptance', 'verification', 'worker']);
+  assert.deepEqual(schema.required, ['id', 'goal', 'acceptance', 'verification', 'worker']);
   assert.equal(schema.additionalProperties, false);
   for (const field of ['projectPath', 'id', 'goal', 'verification', 'model']) {
     assert.deepEqual(schema.properties[field], { type: 'string' });

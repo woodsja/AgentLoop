@@ -8,7 +8,9 @@ const path = require('node:path');
 const { buildWorkerPrompt, createCliWorker } = require('../src/cli-worker');
 const engines = require('../src/engines');
 
-const projectPath = '/example/project';
+const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-worker-project-'));
+const allowedProjects = { fixture: projectPath };
+test.after(() => fs.rmSync(projectPath, { recursive: true, force: true }));
 const verification = 'SECRET_VERIFICATION_COMMAND_729';
 const baseTask = {
   id: 'T-42',
@@ -123,7 +125,7 @@ test('Codex uses registry arguments, model, cwd, and stdin prompt', async () => 
   const harness = spawnHarness(child => child.emit('close', 0, null));
   let prompt = '';
   harness.child.stdin.on('data', chunk => { prompt += chunk; });
-  const config = { enginePaths: { codex: '/fake/codex' }, models: { codex: 'configured-model' } };
+  const config = { allowedProjects, enginePaths: { codex: '/fake/codex' }, models: { codex: 'configured-model' } };
   const runWorker = createCliWorker({ config, spawnImpl: harness.spawnImpl });
   assert.equal(runWorker.length, 3);
   const result = await runWorker(projectPath, baseTask);
@@ -145,7 +147,7 @@ test('Cli worker passes retry context into the stdin prompt', async () => {
   let prompt = '';
   harness.child.stdin.on('data', chunk => { prompt += chunk; });
   const runWorker = createCliWorker({
-    config: { enginePaths: { codex: '/fake/codex' } },
+    config: { allowedProjects, enginePaths: { codex: '/fake/codex' } },
     spawnImpl: harness.spawnImpl,
   });
   const context = {
@@ -177,7 +179,7 @@ test('Claude uses registry arguments, sanitizes environment, and honors task.mod
   process.env.CLAUDE_CODE_SSE_PORT = '1234';
   try {
     const result = await createCliWorker({
-      config: { enginePaths: { claude: '/fake/claude' }, models: { claude: 'configured-model' } },
+      config: { allowedProjects, enginePaths: { claude: '/fake/claude' }, models: { claude: 'configured-model' } },
       spawnImpl: harness.spawnImpl,
     })(projectPath, task);
     assert.equal(harness.invocation.executable, '/fake/claude');
@@ -205,7 +207,7 @@ test('Codex output file supplies result and is removed after exit', async () => 
       child.emit('close', 0, null);
     });
     const result = await createCliWorker({
-      config: { enginePaths: { codex: '/fake/codex' } },
+      config: { allowedProjects, enginePaths: { codex: '/fake/codex' } },
       spawnImpl: harness.spawnImpl,
       tempDir,
     })(projectPath, baseTask);
@@ -226,7 +228,7 @@ test('Claude stream-json result and cost survive chunk boundaries', async () => 
     child.emit('close', 0, null);
   });
   const result = await createCliWorker({
-    config: { enginePaths: { claude: '/fake/claude' } },
+    config: { allowedProjects, enginePaths: { claude: '/fake/claude' } },
     spawnImpl: harness.spawnImpl,
   })(projectPath, { ...baseTask, worker: 'claude' });
   assert.equal(result.resultText, 'all done');
@@ -238,7 +240,7 @@ test('Claude stream-json result and cost survive chunk boundaries', async () => 
 test('nonzero exit returns metadata', async () => {
   const harness = spawnHarness(child => child.emit('close', 7, null));
   const result = await createCliWorker({
-    config: { enginePaths: { codex: '/fake/codex' } },
+    config: { allowedProjects, enginePaths: { codex: '/fake/codex' } },
     spawnImpl: harness.spawnImpl,
   })(projectPath, baseTask);
   assert.equal(result.exitCode, 7);
@@ -249,7 +251,7 @@ test('nonzero exit returns metadata', async () => {
 test('timeout terminates the child and returns metadata', async () => {
   const harness = spawnHarness();
   const result = await createCliWorker({
-    config: { enginePaths: { claude: '/fake/claude' } },
+    config: { allowedProjects, enginePaths: { claude: '/fake/claude' } },
     spawnImpl: harness.spawnImpl,
     timeoutMs: 5,
   })(projectPath, { ...baseTask, worker: 'claude' });
@@ -260,7 +262,7 @@ test('timeout terminates the child and returns metadata', async () => {
 });
 
 test('start and prompt delivery failures reject', async () => {
-  const config = { enginePaths: { codex: '/fake/codex' } };
+  const config = { allowedProjects, enginePaths: { codex: '/fake/codex' } };
   await assert.rejects(
     createCliWorker({ config, spawnImpl: () => { throw new Error('start failed'); } })(projectPath, baseTask),
     /start failed/,

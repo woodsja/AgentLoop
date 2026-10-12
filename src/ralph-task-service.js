@@ -9,6 +9,7 @@ function createRalphTaskService(options = {}) {
   const runWorker = createCliWorkerImpl({
     config: options.config,
     timeoutMs: options.workerTimeoutMs,
+    ...(options.registryPath ? { registryPath: options.registryPath } : {}),
   });
 
   return {

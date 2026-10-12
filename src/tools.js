@@ -3,6 +3,7 @@ const http = require('node:http');
 
 const store = require('./store');
 const { createRalphTaskService } = require('./ralph-task-service');
+const { resolveProject } = require('./project-registry');
 
 let defaultRalphTaskService;
 
@@ -154,10 +155,12 @@ const tools = [
       type: 'object',
       properties: {
         title: { type: 'string' },
+        project: { type: 'string', description: 'Owner-registered project name.' },
+        worktree: { type: 'string', description: 'Owner-authorized worktree name.' },
         prompt: { type: 'string' },
         engine: { type: 'string', enum: ['claude', 'codex'] },
       },
-      required: ['title', 'prompt'],
+      required: ['project', 'title', 'prompt'],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false },
@@ -169,6 +172,7 @@ const tools = [
       type: 'object',
       properties: {
         project: { type: 'string' },
+        worktree: { type: 'string', description: 'Owner-authorized worktree name.' },
         maxCycles: { type: 'integer', minimum: 1, maximum: 50 },
         taskRetries: { type: 'integer', minimum: 1, maximum: 10, description: 'failed cycles per task before it is blocked and skipped' },
         engine: { type: 'string', enum: ['claude', 'codex'] },
@@ -201,6 +205,8 @@ const tools = [
       type: 'object',
       properties: {
         projectPath: { type: 'string' },
+        project: { type: 'string', description: 'Owner-registered project name.' },
+        worktree: { type: 'string', description: 'Owner-authorized worktree name.' },
         id: { type: 'string' },
         goal: { type: 'string' },
         acceptance: { type: 'array', items: { type: 'string' }, minItems: 1 },
@@ -210,7 +216,8 @@ const tools = [
         reviewPolicy: { type: 'string', enum: ['none', 'risk', 'always'] },
         model: { type: 'string' },
       },
-      required: ['projectPath', 'id', 'goal', 'acceptance', 'verification', 'worker'],
+      required: ['id', 'goal', 'acceptance', 'verification', 'worker'],
+      anyOf: [{ required: ['project'] }, { required: ['projectPath'] }],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false },
@@ -240,6 +247,8 @@ async function callTool(params, options = {}) {
 
   if (name === 'dispatch_task') {
     const response = await daemonRequest('/api/dispatch', {
+      project: args.project,
+      worktree: args.worktree,
       title: args.title,
       prompt: args.prompt,
       engine: args.engine,
@@ -254,6 +263,7 @@ async function callTool(params, options = {}) {
   if (name === 'start_loop') {
     const response = await daemonRequest('/api/loop', {
       project: args.project,
+      worktree: args.worktree,
       maxCycles: args.maxCycles,
       taskRetries: args.taskRetries,
       engine: args.engine,
@@ -291,8 +301,12 @@ async function callTool(params, options = {}) {
     }
 
     try {
+      if (args.worktree !== undefined && !args.project) throw new Error('A worktree must be selected through its registered project.');
+      const selected = args.project
+        ? resolveProject(store.config, args.project, args.worktree, store.paths.config) : null;
+      if (selected && args.projectPath !== undefined && args.projectPath !== selected.cwd) throw new Error('projectPath cannot override the registered workspace.');
       const service = options.ralphTaskService ?? ralphTaskService();
-      return toolResult(compactRalphResult(await service.run(args.projectPath, task)));
+      return toolResult(compactRalphResult(await service.run(selected ? selected.cwd : args.projectPath, task)));
     } catch (error) {
       return toolFailure(error.message);
     }
