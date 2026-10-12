@@ -172,11 +172,12 @@ function validateJob(job, filePath) {
     && typeof value.merge.mergedAt === 'string' && value.merge.mergedAt.length > 0
     && typeof value.merge.issueClosed === 'boolean');
   const hasValidDeployment = value => value.deployment === undefined || value.deployment === null || (isPlainObject(value.deployment)
-    && ['pending', 'deploying', 'deployed', 'failed', 'rolled_back'].includes(value.deployment.status)
+    && ['pending', 'deploying', 'deployed', 'failed', 'rolled_back', 'rollback_failed'].includes(value.deployment.status)
     && typeof value.deployment.commit === 'string' && value.deployment.commit.length > 0
     && (value.deployment.previousCommit === null || typeof value.deployment.previousCommit === 'string')
     && typeof value.deployment.updatedAt === 'string' && value.deployment.updatedAt.length > 0
     && (value.deployment.error === null || typeof value.deployment.error === 'string')
+    && (value.deployment.outcome === undefined || value.deployment.outcome === 'FAILED_DEPLOYMENT')
     && (value.deployment.health === null || isPlainObject(value.deployment.health)));
   const hasValidCiRun = run => isPlainObject(run)
     && Number.isSafeInteger(run.databaseId) && run.databaseId > 0

@@ -73,14 +73,33 @@ async function confirmCurrentHealth(checkout, options = {}) {
 function acquireLock(directory) {
   const file = path.join(directory, DEPLOY_LOCK);
   fs.mkdirSync(directory, { recursive: true });
-  try {
-    const descriptor = fs.openSync(file, 'wx', 0o600);
-    fs.writeFileSync(descriptor, JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); fs.closeSync(descriptor);
-  } catch (error) {
-    if (error.code === 'EEXIST') throw new Error('Ralph deployment refused: another deployment is underway.');
-    throw error;
+  // A oneshot can be killed by a reboot after creating this file.  Its PID is
+  // deliberately part of the lock so a later, explicit deployment launch can
+  // recover; an unreadable lock fails closed rather than being guessed stale.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const descriptor = fs.openSync(file, 'wx', 0o600);
+      fs.writeFileSync(descriptor, JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); fs.closeSync(descriptor);
+      return () => fs.rmSync(file, { force: true });
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      let owner;
+      try { owner = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { throw new Error('Ralph deployment refused: another deployment is underway.'); }
+      if (!Number.isSafeInteger(owner.pid) || owner.pid < 1) throw new Error('Ralph deployment refused: another deployment is underway.');
+      try { process.kill(owner.pid, 0); throw new Error('Ralph deployment refused: another deployment is underway.'); }
+      catch (ownerError) {
+        if (ownerError.message === 'Ralph deployment refused: another deployment is underway.' || ownerError.code === 'EPERM') throw ownerError;
+        if (ownerError.code !== 'ESRCH') throw new Error('Ralph deployment refused: another deployment is underway.');
+        // Atomically move the observed stale inode aside.  Unlinking by name
+        // here could otherwise remove a lock another process acquired between
+        // our liveness check and the cleanup.
+        const stale = `${file}.stale.${process.pid}.${Date.now()}`;
+        try { fs.renameSync(file, stale); fs.rmSync(stale, { force: true }); }
+        catch (renameError) { if (renameError.code !== 'ENOENT') throw renameError; }
+      }
+    }
   }
-  return () => fs.rmSync(file, { force: true });
+  throw new Error('Ralph deployment refused: another deployment is underway.');
 }
 
 function readState(directory) {
@@ -100,41 +119,60 @@ async function deploy(project, job, options = {}) {
   const stateDir = options.stateDir;
   const state = readState(stateDir);
   const sha = job.merge.commit;
-  if (state.deployments[sha]?.status === 'deployed') return { status: 'noop', commit: sha, health: state.deployments[sha].health };
+  const saved = state.deployments[sha];
+  if (saved?.status === 'deployed') return { status: 'noop', commit: sha, previous: saved.previousCommit, health: saved.health };
   cleanCheckout(project.checkout, exec);
   git(project.checkout, ['fetch', '--quiet', 'origin', project.baseBranch], exec);
   const remote = `origin/${project.baseBranch}`;
   // This rejects a stale/rewritten/unrelated merge even when someone has a
   // matching SHA in a local object database.
   git(project.checkout, ['merge-base', '--is-ancestor', sha, remote], exec);
-  git(project.checkout, ['merge-base', '--is-ancestor', 'HEAD', sha], exec);
-  const previous = git(project.checkout, ['rev-parse', 'HEAD'], exec);
+  const head = git(project.checkout, ['rev-parse', 'HEAD'], exec);
+  let targetAlreadyInstalled = head === sha;
+  if (!targetAlreadyInstalled) {
+    try { git(project.checkout, ['merge-base', '--is-ancestor', 'HEAD', sha], exec); }
+    catch {
+      // An older approved merge contained by a newer deployment is a safe
+      // no-op.  It must not be retroactively marked as a failed deployment.
+      try { git(project.checkout, ['merge-base', '--is-ancestor', sha, 'HEAD'], exec); }
+      catch { throw new Error('Ralph deployment refused: installed branch cannot fast-forward to the approved merge.'); }
+      return { status: 'noop', commit: sha, previous: saved?.previousCommit || null, health: saved?.health || null };
+    }
+  }
+  const previous = saved?.previousCommit || head;
+  // This is the interrupted window: the fast-forward succeeded but the
+  // process died before restart/health persistence.  Restart the candidate,
+  // retaining the durable pre-merge rollback target.
+  const resuming = targetAlreadyInstalled && saved?.status === 'deploying';
+  if (targetAlreadyInstalled && !resuming) return { status: 'noop', commit: sha, previous: saved?.previousCommit || null, health: saved?.health || null };
   // A rollback target is never merely "whatever HEAD was": establish health
   // evidence for the running version first, and reject disagreement with a
   // prior confirmed deployment record.
-  await confirmCurrentHealth(project.checkout, options);
+  if (!resuming) await confirmCurrentHealth(project.checkout, options);
   if (state.knownGood && state.knownGood !== previous) {
     throw new Error('Ralph deployment refused: installed SHA differs from the recorded known-good version.');
   }
   if (!state.knownGood) { state.knownGood = previous; saveState(stateDir, state); }
-  const record = { status: 'deploying', commit: sha, previousCommit: previous, updatedAt: new Date().toISOString(), error: null, health: null };
+  const record = saved?.status === 'deploying' ? saved : { status: 'deploying', commit: sha, previousCommit: previous, updatedAt: new Date().toISOString(), error: null, health: null };
   state.deployments[sha] = record; saveState(stateDir, state);
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-deploy-'));
-  try {
+  const temp = resuming ? null : fs.mkdtempSync(path.join(options.tempDir || os.tmpdir(), 'ralph-deploy-'));
+  try { if (!resuming) {
     // Test a detached candidate so the currently running daemon stays on its
     // known-good checkout until all validation has succeeded.
     git(project.checkout, ['worktree', 'add', '--detach', temp, sha], exec);
     git(temp, ['diff', '--check'], exec);
     runCommand('npm', ['test'], spawn, temp);
-  } catch (error) {
-    record.status = 'failed'; record.error = String(error.message); record.updatedAt = new Date().toISOString(); saveState(stateDir, state); throw error;
-  } finally {
-    try { git(project.checkout, ['worktree', 'remove', '--force', temp], exec); } catch { fs.rmSync(temp, { recursive: true, force: true }); }
   }
+  } catch (error) {
+    record.status = 'failed'; record.outcome = 'FAILED_DEPLOYMENT'; record.error = String(error.message); record.updatedAt = new Date().toISOString(); saveState(stateDir, state); error.previousCommit = previous; throw error;
+  } finally {
+    if (temp) try { git(project.checkout, ['worktree', 'remove', '--force', temp], exec); } catch { fs.rmSync(temp, { recursive: true, force: true }); }
+  }
+  let oldPid = null;
   try {
     // A checked-clean fast-forward is the only mutation of the installed tree.
-    git(project.checkout, ['merge', '--ff-only', sha], exec);
-    const oldPid = (() => { try { return JSON.parse(fs.readFileSync(path.join(project.checkout, 'state', 'daemon.json'), 'utf8')).pid; } catch { return null; } })();
+    if (!resuming) git(project.checkout, ['merge', '--ff-only', sha], exec);
+    oldPid = (() => { try { return JSON.parse(fs.readFileSync(path.join(project.checkout, 'state', 'daemon.json'), 'utf8')).pid; } catch { return null; } })();
     runCommand('systemctl', ['--user', 'restart', SERVICE], spawn);
     const health = await waitForHealth(project.checkout, oldPid, options);
     record.status = 'deployed'; record.health = health; record.updatedAt = new Date().toISOString(); state.knownGood = sha; saveState(stateDir, state);
@@ -142,10 +180,17 @@ async function deploy(project, job, options = {}) {
   } catch (error) {
     // The checkout was proven clean before this run, and previous is an exact
     // recorded Git object; this is the only permitted hard reset.
-    try { git(project.checkout, ['reset', '--hard', previous], exec); runCommand('systemctl', ['--user', 'restart', SERVICE], spawn); }
-    catch (rollbackError) { error = new Error(`${error.message}; rollback failed: ${rollbackError.message}`); }
-    record.status = 'rolled_back'; record.error = String(error.message); record.updatedAt = new Date().toISOString(); saveState(stateDir, state);
-    error.deploymentStatus = 'rolled_back';
+    try {
+      git(project.checkout, ['reset', '--hard', previous], exec);
+      runCommand('systemctl', ['--user', 'restart', SERVICE], spawn);
+      await waitForHealth(project.checkout, oldPid, options);
+      record.status = 'rolled_back';
+    } catch (rollbackError) {
+      record.status = 'rollback_failed'; record.outcome = 'FAILED_DEPLOYMENT';
+      error = new Error(`${error.message}; rollback failed or was unhealthy: ${rollbackError.message}`);
+    }
+    record.error = String(error.message); record.updatedAt = new Date().toISOString(); saveState(stateDir, state);
+    error.deploymentStatus = record.status; error.previousCommit = previous;
     throw error;
   }
 }
@@ -157,8 +202,11 @@ async function run(options = {}) {
   const release = acquireLock(stateDir);
   try {
     const store = options.jobStore || createJobStore(stateDir);
-    const job = store.list().find(value => approved(value, project)
-      && (!value.deployment || ['pending', 'deploying'].includes(value.deployment.status)));
+    const job = store.list().filter(value => approved(value, project)
+      // Failed deployment is retryable only when this oneshot is explicitly
+      // started again; there is no deployment polling loop.
+      && (!value.deployment || ['pending', 'deploying', 'failed', 'rolled_back', 'rollback_failed'].includes(value.deployment.status)))
+      .sort((a, b) => String(b.merge.mergedAt).localeCompare(String(a.merge.mergedAt)))[0];
     if (!job) return { status: 'noop' };
     try {
       const result = await deploy(project, job, { ...options, stateDir });
@@ -168,7 +216,8 @@ async function run(options = {}) {
     } catch (error) {
       // Keep the merge terminal; deployment failures must never re-open or
       // re-merge an approved PR.  The diagnostic is durable and observable.
-      job.deployment = { status: error.deploymentStatus || 'failed', commit: job.merge.commit, previousCommit: null,
+      job.deployment = { status: error.deploymentStatus || 'failed', outcome: 'FAILED_DEPLOYMENT', commit: job.merge.commit,
+        previousCommit: error.previousCommit || job.deployment?.previousCommit || null,
         updatedAt: new Date().toISOString(), error: String(error.message), health: null };
       store.save(job); throw error;
     }
