@@ -190,6 +190,72 @@ async function observePullRequestCi(project, { number, commit }, { execFile: exe
   };
 }
 
+function normalizePullRequestObservation(value) {
+  if (!isPlainObject(value) || !Number.isSafeInteger(value.number) || value.number < 1
+    || typeof value.url !== 'string' || !value.url || typeof value.state !== 'string'
+    || typeof value.headRefName !== 'string' || !value.headRefName
+    || typeof value.headRefOid !== 'string' || !value.headRefOid
+    || typeof value.baseRefName !== 'string' || !value.baseRefName
+    || !(value.mergeCommit === null || value.mergeCommit === undefined
+      || (isPlainObject(value.mergeCommit) && typeof value.mergeCommit.oid === 'string' && value.mergeCommit.oid))) {
+    throw new Error('GitHub pull request observation failed: gh returned an unexpected pull request shape');
+  }
+  return {
+    number: value.number, url: value.url, state: value.state,
+    headRefName: value.headRefName, headRefOid: value.headRefOid,
+    baseRefName: value.baseRefName, mergedAt: value.mergedAt ?? null,
+    mergeCommit: value.mergeCommit && value.mergeCommit.oid || null,
+  };
+}
+
+// This is deliberately a fresh GitHub read, rather than trusting the PR URL
+// recorded at delivery time.  A maintainer can retarget or update a PR while
+// Actions/review are running, and neither condition is safe to merge.
+async function observePullRequest(project, number, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(number) || number < 1 || typeof executeFile !== 'function') {
+    throw new TypeError('GitHub pull request observation requires a project, pull request number, and execFile');
+  }
+  const output = await runGh([
+    'pr', 'view', String(number), '--repo', project.repo,
+    '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergedAt,mergeCommit',
+  ], executeFile, 'GitHub pull request observation');
+  let response;
+  try { response = JSON.parse(output); } catch (error) {
+    throw new Error(`GitHub pull request observation failed: gh returned malformed JSON: ${error.message}`);
+  }
+  return normalizePullRequestObservation(response);
+}
+
+// GitHub's pull merge endpoint rejects the request if this is no longer the
+// PR head.  That makes a retry after an uncertain transport failure safe: we
+// either record the resulting merge or re-observe a changed/closed PR.
+async function mergePullRequest(project, { number, commit }, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(number) || number < 1 || typeof commit !== 'string' || !commit.trim()
+    || typeof executeFile !== 'function') throw new TypeError('GitHub pull request merge requires project, pull request, exact head commit, and execFile');
+  const output = await runGh([
+    'api', '--method', 'PUT', `repos/${project.repo}/pulls/${number}/merge`,
+    '-f', `sha=${commit}`, '-f', 'merge_method=merge',
+  ], executeFile, 'GitHub pull request merge');
+  let response;
+  try { response = JSON.parse(output); } catch (error) {
+    throw new Error(`GitHub pull request merge failed: gh returned malformed JSON: ${error.message}`);
+  }
+  if (!isPlainObject(response) || response.merged !== true || typeof response.sha !== 'string' || !response.sha) {
+    throw new Error(`GitHub pull request merge failed: ${isPlainObject(response) && typeof response.message === 'string' ? response.message : 'GitHub did not confirm a merge'}`);
+  }
+  return { mergeCommit: response.sha, message: typeof response.message === 'string' ? response.message : null };
+}
+
+async function closeImplementedIssue(project, issueNumber, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(issueNumber) || issueNumber < 1 || typeof executeFile !== 'function') {
+    throw new TypeError('GitHub issue closure requires a project, issue number, and execFile');
+  }
+  await runGh(['issue', 'close', String(issueNumber), '--repo', project.repo], executeFile, 'GitHub issue closure');
+}
+
 const MAX_DIAGNOSTIC_RUNS = 5;
 const MAX_RUN_LOG_LENGTH = 6000;
 const LOG_BUFFER = 16 * 1024 * 1024;
@@ -294,6 +360,9 @@ module.exports = {
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,
+  observePullRequest,
+  mergePullRequest,
+  closeImplementedIssue,
   ciStateForRuns,
   collectCiFailureDiagnostics,
 };

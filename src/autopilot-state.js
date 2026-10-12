@@ -145,6 +145,7 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     reviewHistory: [],
     correction: null,
     reviewCorrection: null,
+    merge: null,
     runs: 0,
     correctiveCycles: 0,
     reviewCorrectiveCycles: 0,
@@ -266,6 +267,12 @@ function validateJob(job, filePath) {
     && typeof value.phase === 'string' && value.phase.length > 0
     && typeof value.message === 'string' && value.message.length > 0
     && value.message.length <= MAX_DIAGNOSTIC_LENGTH;
+  const hasValidMerge = value => value.merge === undefined || value.merge === null
+    || (isPlainObject(value.merge) && ['merged'].includes(value.merge.status)
+      && Number.isSafeInteger(value.merge.prNumber) && value.merge.prNumber > 0
+      && typeof value.merge.headCommit === 'string' && value.merge.headCommit.length > 0
+      && typeof value.merge.mergeCommit === 'string' && value.merge.mergeCommit.length > 0
+      && typeof value.merge.mergedAt === 'string' && value.merge.mergedAt.length > 0);
   const problem = !isPlainObject(job) ? 'not an object'
     : job.schemaVersion !== SCHEMA_VERSION ? `unsupported schemaVersion ${String(job.schemaVersion)}`
       : typeof job.project !== 'string' || !job.project ? 'missing project identity'
@@ -285,6 +292,7 @@ function validateJob(job, filePath) {
                 : !hasValidReview(job) ? 'invalid independent review state'
                 : !hasValidReviewHistory(job) ? 'invalid review attempt history'
                 : !hasValidReviewSkip(job) ? 'invalid review skip state'
+                : !hasValidMerge(job) ? 'invalid merge state'
                 : !hasValidReviewCorrection(job) ? 'invalid reviewer corrective cycle state'
                 : !hasValidCorrection(job) ? 'invalid corrective cycle state'
           : typeof job.terminal !== 'boolean' ? 'missing terminal flag'
@@ -313,6 +321,15 @@ function recordFailure(job, phase, error, now = () => new Date().toISOString()) 
 function markTerminal(job, terminalState) {
   job.terminal = true;
   job.terminalState = terminalState;
+  return job;
+}
+
+function recordMerge(job, { prNumber, headCommit, mergeCommit }, now = () => new Date().toISOString()) {
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1 || typeof headCommit !== 'string' || !headCommit
+    || typeof mergeCommit !== 'string' || !mergeCommit) throw new TypeError('Merge state requires PR number and head and merge commits');
+  job.merge = { status: 'merged', prNumber, headCommit, mergeCommit, mergedAt: now() };
+  job.status = 'merged';
+  markTerminal(job, 'merged');
   return job;
 }
 
@@ -699,6 +716,7 @@ module.exports = {
   recordCorrectiveCycle,
   recordDelivery,
   recordFailure,
+  recordMerge,
   recordPullRequest,
   beginReviewAttempt,
   failReviewAttempt,

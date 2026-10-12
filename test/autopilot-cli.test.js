@@ -1931,6 +1931,37 @@ function saveJob(store, number, fields) {
   });
 }
 
+test('autoMerge rechecks an approved exact-SHA PR and merges it exactly once without a worker', async () => {
+  const store = temporaryStore();
+  const issue = { number: 90, title: 'Autonomous merge' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-90-autonomous-merge', worktreePath: null, now: store.now });
+  job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  job.verification = verifiedEvidence('abc123');
+  recordReview(job, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123', policy: 'always', attempt: beginReviewAttempt(job, store.now) }, store.now);
+  job.ci = { state: 'green', details: 'CI passed', prNumber: 99, headCommit: 'abc123', runs: [] };
+  job.status = 'ready_for_human_merge'; job.terminal = true; job.terminalState = 'ready_for_human_merge';
+  store.save(job);
+  let merges = 0;
+  const dependencies = enabledDependencies(store, {
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'ralph-dev', verification: 'check', reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [],
+    observePullRequest: async () => ({ number: 99, url: job.pr.url, state: 'OPEN', headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'ralph-dev', mergedAt: null }),
+    observePullRequestCi: async () => ({ state: 'green', details: 'CI passed', prNumber: 99, headCommit: 'abc123', runs: [] }),
+    mergePullRequest: async (value, identity) => { merges += 1; assert.equal(value.repo, 'example/repo'); assert.deepEqual(identity, { number: 99, commit: 'abc123' }); return { mergeCommit: 'merge123' }; },
+    closeImplementedIssue: async () => {},
+    createRalphTaskService: () => assert.fail('approved merge must not restart Ralph'),
+  });
+  const result = await runAutopilot(['--project', 'demo'], dependencies);
+  assert.equal(result.outcome.status, 'merged');
+  const saved = createJobStore(store.directory).load(90);
+  assert.equal(merges, 1);
+  assert.deepEqual(saved.merge && { prNumber: saved.merge.prNumber, headCommit: saved.merge.headCommit, mergeCommit: saved.merge.mergeCommit }, { prNumber: 99, headCommit: 'abc123', mergeCommit: 'merge123' });
+  assert.equal(saved.terminalState, 'merged');
+  assert.equal(await runAutopilot(['--project', 'demo'], dependencies), null);
+  assert.equal(merges, 1);
+});
+
 test('cleans only the recorded workspace of terminal jobs and leaves live or unfinished work alone', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-cli-state-'));
   temporaryDirectories.add(directory);
