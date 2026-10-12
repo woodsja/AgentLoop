@@ -17,7 +17,7 @@ const DEFAULT_UNIT_NAME = 'ralph-finance-autopilot';
 const USAGE = 'Usage: node src/autopilot-systemd.js [--root <dir>] [--project <name>] [--unit <name>] [--run-once] [--dry-run]';
 
 function parseArguments(argv) {
-  const options = { root: REPO_ROOT, project: DEFAULT_PROJECT, unitName: DEFAULT_UNIT_NAME, runOnce: false, dryRun: false };
+  const options = { root: REPO_ROOT, project: DEFAULT_PROJECT, unitName: undefined, runOnce: false, dryRun: false };
   const valued = { '--root': 'root', '--project': 'project', '--unit': 'unitName' };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -31,6 +31,11 @@ function parseArguments(argv) {
     }
   }
   if (!/^[A-Za-z0-9._-]+$/.test(options.project)) throw new Error(`Invalid project name: ${options.project}`);
+  if (options.unitName === undefined) {
+    options.unitName = options.project === DEFAULT_PROJECT
+      ? DEFAULT_UNIT_NAME
+      : `ralph-${options.project}-autopilot`;
+  }
   if (!/^[A-Za-z0-9._@-]+$/.test(options.unitName)) throw new Error(`Invalid unit name: ${options.unitName}`);
   options.root = path.resolve(options.root);
   return options;
