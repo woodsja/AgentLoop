@@ -134,3 +134,22 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   assert.throws(() => jobs.submit({ project: 'demo', issue: 7 }), /explicitly authorized/);
   assert.equal(queued.length, 1);
 });
+
+test('R1 dependency metadata is line-anchored and requires durable project-bound merge approval', () => {
+  const { dependenciesForIssue, hasApprovedPrerequisite } = require('../src/r1-jobs');
+  assert.deepEqual(dependenciesForIssue({ number: 12, body: 'Summary\nDepends on: #3, #11\nMore detail' }), [3, 11]);
+  assert.deepEqual(dependenciesForIssue({ number: 12, body: 'Depends on #3 in prose' }), []);
+  for (const body of ['Depends on:', 'Depends on: #3, nope', 'Depends on: #12', 'Depends on: #13', 'Depends on: #3\nDepends on: #4']) {
+    assert.throws(() => dependenciesForIssue({ number: 12, body }), /Depends on|dependencies/);
+  }
+  const approved = {
+    terminal: true, terminalState: 'merged', project: 'demo', repo: 'example/repo', issue: { number: 3 },
+    delivery: { commit: 'abc' }, merge: { approvedHead: 'abc', repo: 'example/repo' },
+    review: { verdict: 'PASS', commit: 'abc', findings: [] },
+    verification: { command: 'npm test', commit: 'abc', passed: true, exitCode: 0, timedOut: false, stdout: '', stderr: '' },
+  };
+  assert.equal(hasApprovedPrerequisite(approved, 3, 'demo', { repo: 'example/repo' }), true);
+  assert.equal(hasApprovedPrerequisite({ ...approved, project: 'other' }, 3, 'demo', { repo: 'example/repo' }), false);
+  assert.equal(hasApprovedPrerequisite({ ...approved, terminalState: 'failed' }, 3, 'demo', { repo: 'example/repo' }), false);
+  assert.equal(hasApprovedPrerequisite({ ...approved, review: { ...approved.review, findings: [{ summary: 'unresolved' }] } }, 3, 'demo', { repo: 'example/repo' }), false);
+});

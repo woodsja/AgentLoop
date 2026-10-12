@@ -23,6 +23,10 @@ const CI_TIMEOUT_MS = 60 * 60 * 1000;
 const ADMIT_INTERVAL_MS = 60 * 1000;
 const MIN_SPECIFICATION_LENGTH = 40;
 const TEMPORARY_BRANCH = /^ralph\/issue-\d+-[A-Za-z0-9._-]+$/;
+// Dependency metadata is deliberately a tiny, line-anchored convention.  It
+// is not a general issue graph: lower-numbered prerequisites make cycles
+// impossible and keep admission a local check against durable R1 evidence.
+const MAX_DEPENDENCIES = 8;
 
 // Projects that opted into autonomous merging are driven to exactly one of
 // merged, needs_specification, or failed. Every other project keeps the
@@ -43,6 +47,34 @@ function approvedMerge(job) {
     && job.merge.approvedHead === job.delivery.commit && job.review && job.review.verdict === 'PASS'
     && job.review.commit === job.delivery.commit && Array.isArray(job.review.findings) && job.review.findings.length === 0
     && hasPassingVerification(job.verification, job.delivery.commit));
+}
+
+function dependenciesForIssue(issue) {
+  const lines = String(issue && issue.body || '').split(/\r?\n/);
+  const markers = lines.filter(line => /^\s*Depends on:/.test(line));
+  if (markers.length === 0) return [];
+  if (markers.length !== 1) throw new Error(`issue #${issue.number} has multiple Depends on: metadata lines`);
+  const match = /^\s*Depends on:\s*(.*?)\s*$/.exec(markers[0]);
+  const value = match && match[1];
+  if (!value || !/^#(?:[1-9]\d*)(?:\s*,\s*#(?:[1-9]\d*))*$/.test(value)) {
+    throw new Error(`issue #${issue.number} has malformed Depends on: metadata`);
+  }
+  const dependencies = value.split(',').map(entry => Number(entry.trim().slice(1)));
+  if (dependencies.length > MAX_DEPENDENCIES || new Set(dependencies).size !== dependencies.length) {
+    throw new Error(`issue #${issue.number} has too many or duplicate Depends on: references`);
+  }
+  if (dependencies.some(number => !Number.isSafeInteger(number) || number >= issue.number)) {
+    throw new Error(`issue #${issue.number} dependencies must reference smaller issue numbers`);
+  }
+  return dependencies;
+}
+
+function hasApprovedPrerequisite(job, issueNumber, projectName, project) {
+  // A file in another project's state directory, or a stale/incomplete
+  // checkpoint, is never evidence that this project's prerequisite merged.
+  return Boolean(job && job.terminal === true && job.issue && job.issue.number === issueNumber
+    && job.project === projectName && job.repo === project.repo
+    && job.merge && job.merge.repo === project.repo && approvedMerge(job));
 }
 
 function evidence(job) {
@@ -320,7 +352,24 @@ function createR1Jobs(store, options = {}) {
           .filter(task => task.workflow === 'r1' && task.project === name && task.status === 'needs_specification')
           .map(task => [task.issue, task.specificationDigest]));
         const issues = (await discover(project)).filter(issue => waiting.get(issue.number) !== digest(issue));
-        const selection = selectIssueForJobs(issues, jobs, selectReadyIssue);
+        // Keep the existing selection policy (including resumptions), but do
+        // not let a dependency declaration enter it until every prerequisite
+        // has durable, project-bound merge and independent-review evidence.
+        const eligible = [];
+        for (const issue of issues) {
+          let dependencies;
+          try {
+            dependencies = dependenciesForIssue(issue);
+          } catch (error) {
+            console.error(`R1 admission deferred: ${safeText(error.message)}`);
+            continue;
+          }
+          if (dependencies.every(number => hasApprovedPrerequisite(
+            jobs.find(job => job.issue && job.issue.number === number), number, name, project))) {
+            eligible.push(issue);
+          }
+        }
+        const selection = selectIssueForJobs(eligible, jobs, selectReadyIssue);
         if (!selection) continue;
         return submit({ project: name, issue: selection.issue.number, title: selection.issue.title, source: 'runner' });
       }
@@ -363,4 +412,4 @@ function createR1Jobs(store, options = {}) {
   return { submit, advance, admit, recover, read, stop };
 }
 
-module.exports = { createR1Jobs };
+module.exports = { createR1Jobs, dependenciesForIssue, hasApprovedPrerequisite };
