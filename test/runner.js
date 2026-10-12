@@ -12,6 +12,17 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const WORKSPACE = path.join(REPO_ROOT, 'workspace', `run-${process.pid}`);
 const FIXTURES = path.join(__dirname, 'fixtures', 'project');
 const SCENARIOS_DIR = path.join(__dirname, 'scenarios');
+// The harness deliberately registers only its finite set of synthetic fixture
+// projects.  Keep this explicit: the daemon must exercise its normal project
+// authorization rather than accepting arbitrary workspace paths.
+const SCENARIO_PROJECTS = Object.freeze({
+  'clean-pass': path.join(WORKSPACE, 'clean-pass'),
+  'plan-walk': path.join(WORKSPACE, 'plan-walk'),
+  'task-retry': path.join(WORKSPACE, 'task-retry'),
+  'budget-exhaustion': path.join(WORKSPACE, 'budget-exhaustion'),
+  'invalid-critic': path.join(WORKSPACE, 'invalid-critic'),
+  'no-change-worker': path.join(WORKSPACE, 'no-change-worker'),
+});
 const DEFAULT_PORT = 5761;
 const HOST = '127.0.0.1';
 const MOCK_CMD = path.join(__dirname, 'mock-engine.cmd');
@@ -105,7 +116,10 @@ function writePlan(dir, items) {
 }
 
 function seedProject(name, scenario) {
-  const dir = path.join(WORKSPACE, name);
+  const dir = SCENARIO_PROJECTS[name];
+  if (!dir) {
+    throw new Error(`Unknown harness scenario project: ${name}`);
+  }
   rmrf(dir);
   copyTree(FIXTURES, dir);
   if (Array.isArray(scenario.plan) && scenario.plan.length) {
@@ -120,6 +134,12 @@ function seedProject(name, scenario) {
     throw new Error(`git commit failed in ${dir}: ${commit.stderr || commit.stdout}`);
   }
   return dir;
+}
+
+function loadScenario(scenarioName) {
+  const scenarioFile = path.join(SCENARIOS_DIR, `${scenarioName}.json`);
+  const scenarioRaw = fs.readFileSync(scenarioFile, 'utf8');
+  return JSON.parse(scenarioRaw.replace(/^\s*\/\/.*$/gm, ''));
 }
 
 function readNdjson(file) {
@@ -220,6 +240,19 @@ async function waitForLoop(id, timeoutMs = 45000, port = currentPort) {
   return { done: false, state: last, foundRecent: null, elapsedMs: Date.now() - started };
 }
 
+async function waitForJob(id, timeoutMs = 45000, port = currentPort) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    last = await request('GET', `/api/jobs/${encodeURIComponent(id)}`, undefined, port);
+    if (last.statusCode === 200 && last.body && TERMINAL_STATUSES.has(last.body.status)) {
+      return { done: true, job: last.body, elapsedMs: Date.now() - started };
+    }
+    await sleep(100);
+  }
+  return { done: false, job: last && last.body, elapsedMs: Date.now() - started };
+}
+
 async function startDaemon(overridePort) {
   const port = overridePort || (process.env.AGENTLOOP_HARNESS_PORT
     ? Number(process.env.AGENTLOOP_HARNESS_PORT)
@@ -241,9 +274,13 @@ async function startDaemon(overridePort) {
     mcpBridge: { port: bridgePort },
     models: { codex: 'gpt-5.6-terra' },
     enginePaths: { codex: MOCK_EXECUTABLE },
-    allowedProjects: Object.fromEntries(fs.readdirSync(SCENARIOS_DIR).filter(name => name.endsWith('.json'))
-      .map(name => [name.slice(0, -5), path.join(WORKSPACE, name.slice(0, -5))])),
+    allowedProjects: SCENARIO_PROJECTS,
   };
+
+  // Create the exact configured fixture roots before the daemon starts.
+  for (const scenarioName of Object.keys(SCENARIO_PROJECTS)) {
+    seedProject(scenarioName, loadScenario(scenarioName));
+  }
 
   fs.writeFileSync(tempConfigPath, `${JSON.stringify(testConfig, null, 2)}\n`, 'utf8');
 
@@ -339,8 +376,7 @@ function collectActual(id, projectDir, mockState, waited, child) {
 
 async function runScenario(scenarioName, child) {
   const scenarioFile = path.join(SCENARIOS_DIR, `${scenarioName}.json`);
-  const scenarioRaw = fs.readFileSync(scenarioFile, 'utf8');
-  const scenario = JSON.parse(scenarioRaw.replace(/^\s*\/\/.*$/gm, ''));
+  const scenario = loadScenario(scenarioName);
   const name = scenario.name || scenarioName;
   const mockState = path.join(WORKSPACE, 'mock-state', name);
   rmrf(mockState);
@@ -356,7 +392,7 @@ async function runScenario(scenarioName, child) {
   const port = (child && child.port) || currentPort;
 
   const started = await request('POST', '/api/loop', {
-    project: projectDir,
+    project: name,
     maxCycles: scenario.maxCycles,
     taskRetries: scenario.taskRetries,
     engine: 'codex',
@@ -377,10 +413,32 @@ async function runScenario(scenarioName, child) {
   return { actual, expect: scenario.expect, scenario };
 }
 
+function prepareMockScenario(scenarioName, projectName) {
+  const scenario = loadScenario(scenarioName);
+  const name = projectName || scenario.name || scenarioName;
+  const mockState = path.join(WORKSPACE, 'mock-state', `${scenarioName}-${name}`);
+
+  if (!SCENARIO_PROJECTS[name]) {
+    throw new Error(`Unknown harness scenario project: ${name}`);
+  }
+
+  rmrf(mockState);
+  fs.mkdirSync(mockState, { recursive: true });
+  const projectDir = seedProject(name, scenario);
+  fs.writeFileSync(path.join(WORKSPACE, 'current-scenario.json'), `${JSON.stringify({
+    scenario: path.join(SCENARIOS_DIR, `${scenarioName}.json`),
+    state: mockState,
+  }, null, 2)}\n`);
+  return { projectDir, mockState };
+}
+
 module.exports = {
   startDaemon,
   stopDaemon,
   runScenario,
+  prepareMockScenario,
+  request,
+  waitForJob,
   cleanWorkspace,
   get PORT() {
     return activePort();

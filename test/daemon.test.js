@@ -3,12 +3,165 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const http = require('node:http');
 const { spawnSync } = require('node:child_process');
 
 const daemon = require('../src/daemon');
 const store = require('../src/store');
 
 const daemonSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'daemon.js'), 'utf8');
+
+function requestJson(server, method, requestPath, body) {
+  return new Promise((resolve, reject) => {
+    const address = server.address();
+    const payload = body === undefined ? '' : JSON.stringify(body);
+    const req = http.request({
+      host: '127.0.0.1',
+      port: address.port,
+      method,
+      path: requestPath,
+      headers: payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {},
+    }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) }));
+    });
+    req.on('error', reject);
+    req.end(payload);
+  });
+}
+
+function isolatedDaemon(config, stateDir) {
+  const configPath = path.join(stateDir, 'config.json');
+  fs.writeFileSync(configPath, JSON.stringify(config));
+  const oldConfig = process.env.AGENTLOOP_CONFIG_PATH;
+  const oldState = process.env.AGENTLOOP_STATE_DIR;
+  const daemonModule = require.resolve('../src/daemon');
+  const storeModule = require.resolve('../src/store');
+  const oldDaemon = require.cache[daemonModule];
+  const oldStore = require.cache[storeModule];
+  process.env.AGENTLOOP_CONFIG_PATH = configPath;
+  process.env.AGENTLOOP_STATE_DIR = path.join(stateDir, 'state');
+  delete require.cache[daemonModule];
+  delete require.cache[storeModule];
+  const isolatedStore = require('../src/store');
+  const isolated = require('../src/daemon');
+
+  return {
+    daemon: isolated,
+    store: isolatedStore,
+    restore() {
+      if (oldConfig === undefined) delete process.env.AGENTLOOP_CONFIG_PATH;
+      else process.env.AGENTLOOP_CONFIG_PATH = oldConfig;
+      if (oldState === undefined) delete process.env.AGENTLOOP_STATE_DIR;
+      else process.env.AGENTLOOP_STATE_DIR = oldState;
+      delete require.cache[daemonModule];
+      delete require.cache[storeModule];
+      if (oldDaemon) require.cache[daemonModule] = oldDaemon;
+      if (oldStore) require.cache[storeModule] = oldStore;
+    },
+  };
+}
+
+async function listenHttp(t, server) {
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+    return true;
+  } catch (error) {
+    if (error.code === 'EPERM') {
+      t.skip('loopback listeners are unavailable in this sandbox');
+      return false;
+    }
+    throw error;
+  }
+}
+
+test('authorized HTTP jobs persist under a configured project and expose compact state/result', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));
+  const project = path.join(directory, 'registered-project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({
+    allowedProjects: { demo: project },
+    defaultEngine: 'codex',
+  }, directory);
+  const server = isolated.daemon.createHttpServer();
+
+  try {
+    if (!await listenHttp(t, server)) return;
+    const projects = await requestJson(server, 'GET', '/api/projects');
+    assert.deepEqual(projects, { status: 200, body: { projects: ['demo'] } });
+    const submitted = await requestJson(server, 'POST', '/api/jobs', { project: 'demo', prompt: 'Write a focused test.' });
+    assert.equal(submitted.status, 201);
+    assert.match(submitted.body.id, /^t-/);
+
+    const pending = isolated.store.readTask(submitted.body.id, 'pending');
+    assert.equal(pending.project, 'demo');
+    assert.equal(pending.cwd, fs.realpathSync(project));
+
+    fs.writeFileSync(path.join(project, 'PLAN.md'), '# Plan\n');
+    const loopSubmitted = await requestJson(server, 'POST', '/api/loop', { project: 'demo', autoCommit: false });
+    assert.equal(loopSubmitted.status, 201);
+    const pendingLoop = isolated.store.readTask(loopSubmitted.body.id, 'pending');
+    assert.equal(pendingLoop.project, 'demo');
+    assert.equal(pendingLoop.projectPath, fs.realpathSync(project));
+
+    const queued = await requestJson(server, 'GET', `/api/jobs/${submitted.body.id}`);
+    assert.deepEqual(queued.body, { id: submitted.body.id, status: 'pending', project: 'demo' });
+
+    isolated.store.writeTask({ ...pending, status: 'done' }, 'pending');
+    isolated.store.moveTask(submitted.body.id, 'pending', 'done');
+    isolated.store.writeResult({ id: submitted.body.id, status: 'done', summary: 'Completed.' });
+    const completed = await requestJson(server, 'GET', `/api/jobs/${submitted.body.id}`);
+    assert.deepEqual(completed.body, {
+      id: submitted.body.id,
+      status: 'done',
+      project: 'demo',
+      result: { id: submitted.body.id, status: 'done', summary: 'Completed.' },
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('HTTP submission and legacy dispatch/loop fail closed for unknown projects and cwd spoofing', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));
+  const project = path.join(directory, 'registered-project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project } }, directory);
+  const server = isolated.daemon.createHttpServer();
+
+  try {
+    if (!await listenHttp(t, server)) return;
+    const projects = await requestJson(server, 'GET', '/api/projects');
+    assert.deepEqual(projects.body, { projects: ['demo'] });
+    assert.equal(JSON.stringify(projects.body).includes(project), false);
+    for (const [endpoint, body] of [
+      ['/api/jobs', { project: 'missing', prompt: 'nope' }],
+      ['/api/jobs', { project: 'demo', prompt: 'nope', cwd: os.tmpdir() }],
+      ['/api/jobs', { project: 'demo', prompt: 'nope', operation: 'shell' }],
+      ['/api/dispatch', { project: 'missing', prompt: 'nope' }],
+      ['/api/loop', { project: 'missing' }],
+    ]) {
+      const response = await requestJson(server, 'POST', endpoint, body);
+      assert.equal(response.status, 400);
+    }
+    assert.equal(isolated.store.listTasks('pending').length, 0);
+    assert.equal((await requestJson(server, 'POST', '/api/projects', { project: 'new' })).status, 404);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function tempRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-test-'));
@@ -696,5 +849,3 @@ test('registerFailedCycle records checkpoint error into cycle checkpointError an
     try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
   }
 });
-
-

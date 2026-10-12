@@ -66,6 +66,10 @@ const codex = {
 
   args({ model, outputPath, workspaceRoot = null }) {
     return [
+      // Global flags: must precede the exec subcommand. Turns off the apps and
+      // plugins features so host-injected app tools never reach the worker.
+      '--disable', 'apps',
+      '--disable', 'plugins',
       'exec',
       '--json',
       ...(workspaceRoot ? [

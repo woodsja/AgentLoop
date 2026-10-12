@@ -45,13 +45,13 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
   };
   try {
     let port = await launch();
-    const bad = await request(port, '/api/jobs', { project: 'demo', issue: 99 }); assert.equal(bad.status, 400);
-    const submitted = await request(port, '/api/jobs', { project: 'demo', issue: 1 }); assert.equal(submitted.status, 201);
+    const bad = await request(port, '/api/r1/jobs', { project: 'demo', issue: 99 }); assert.equal(bad.status, 400);
+    const submitted = await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 }); assert.equal(submitted.status, 201);
     const id = submitted.value.id;
     assert.equal(fs.existsSync(path.join(root, 'worker-release')), false, 'HTTP response precedes release of implementation');
-    const get = async jobId => (await request(port, `/api/jobs/${jobId}`)).value;
+    const get = async jobId => (await request(port, `/api/r1/jobs/${jobId}`)).value;
     await until(async () => (await get(id)).phase === 'implementation');
-    const second = (await request(port, '/api/jobs', { project: 'demo', issue: 2 })).value.id;
+    const second = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 2 })).value.id;
     await delay(1700);
     assert.equal((await get(second)).phase, 'queued');
     assert.equal(fs.readFileSync(path.join(root, 'workers'), 'utf8').trim().split('\n').length, 1);
@@ -70,9 +70,16 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.match(completed.evidence.commit, /^[a-f0-9]{40}$/);
     assert.equal(completed.evidence.reviewHistory[0].status, 'completed');
     for (const phase of ['queued', 'preparing', 'implementation', 'verification', 'delivering', 'ci', 'review', 'completed']) assert.ok(completed.phases.some(p => p.phase === phase), phase);
+    // The generic job contract is unchanged: it reports R1 IDs compactly and
+    // never accepts an R1-shaped submission.
+    const generic = await request(port, `/api/jobs/${id}`);
+    assert.equal(generic.status, 200);
+    assert.deepEqual([generic.value.id, generic.value.status, generic.value.project, generic.value.phases], [id, 'passed', 'demo', undefined]);
+    const r1Shaped = await request(port, '/api/jobs', { project: 'demo', issue: 1 });
+    assert.deepEqual([r1Shaped.status, r1Shaped.value.error], [400, 'prompt is required.']);
     await until(async () => (await get(second)).status === 'passed');
     fs.writeFileSync(path.join(root, 'review-error'), '');
-    const third = (await request(port, '/api/jobs', { project: 'demo', issue: 3 })).value.id;
+    const third = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 3 })).value.id;
     const failed = await until(async () => { const job = await get(third); return job.status === 'blocked' && job; });
     assert.equal(failed.evidence.reviewHistory[0].status, 'failed');
     assert.match(failed.evidence.reviewHistory[0].diagnostics, /could not be completed/);
@@ -80,12 +87,12 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     await halt(); port = await launch();
     assert.deepEqual(await get(id), completed);
     const before = fs.readFileSync(path.join(root, 'reviews'), 'utf8');
-    const replay = (await request(port, '/api/jobs', { project: 'demo', issue: 1 })).value.id;
+    const replay = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 })).value.id;
     await until(async () => (await get(replay)).status === 'passed');
     assert.equal(fs.readFileSync(path.join(root, 'reviews'), 'utf8'), before, 'persisted exact-SHA approval is reused');
-    assert.equal((await request(port, '/api/jobs/unknown')).status, 404);
+    assert.equal((await request(port, '/api/r1/jobs/unknown')).status, 404);
     fs.unlinkSync(path.join(root, 'review-release'));
-    const interrupted = (await request(port, '/api/jobs', { project: 'demo', issue: 4 })).value.id;
+    const interrupted = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 4 })).value.id;
     await until(async () => (await get(interrupted)).phase === 'review');
     const recorded = fs.readFileSync(path.join(root, 'reviews'), 'utf8');
     const died = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await died;

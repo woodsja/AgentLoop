@@ -1,0 +1,16 @@
+{
+  "_comment": "Delayed no-op worker leaves time for the async HTTP acceptance test to observe pending/running.",
+  "name": "clean-pass",
+  "engine": {
+    "worker": [
+      {
+        "noChange": true,
+        "latencyMs": 3000,
+        "loopResult": {
+          "status": "done",
+          "summary": "async mock job completed independently"
+        }
+      }
+    ]
+  }
+}

@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const tools = require('../src/tools');
 
@@ -18,12 +21,18 @@ test('every tool advertises an object input schema', () => {
 });
 
 const taskArguments = {
-  projectPath: '/project/example',
+  project: 'example',
   id: 'task-1',
   goal: 'Add the feature',
   acceptance: ['Feature works'],
   verification: 'node test.js',
   worker: 'codex',
+};
+
+const permittedProjectPath = '/registered/example';
+const permittedProjectResolver = (project) => {
+  if (project !== 'example') throw new Error('Unknown project.');
+  return permittedProjectPath;
 };
 
 function passingResult(attemptOverrides = {}) {
@@ -52,9 +61,10 @@ test('ralph_run_task advertises the structured task contract', () => {
   assert.equal(advertised.length, 1);
   const schema = advertised[0].inputSchema;
   assert.equal(schema.type, 'object');
-  assert.deepEqual(schema.required, ['id', 'goal', 'acceptance', 'verification', 'worker']);
+  assert.deepEqual(schema.required, ['project', 'id', 'goal', 'acceptance', 'verification', 'worker']);
   assert.equal(schema.additionalProperties, false);
-  for (const field of ['projectPath', 'id', 'goal', 'verification', 'model']) {
+  assert.deepEqual(schema.properties.project, { type: 'string', description: 'Registered project name.' });
+  for (const field of ['id', 'goal', 'verification', 'model']) {
     assert.deepEqual(schema.properties[field], { type: 'string' });
   }
   assert.deepEqual(schema.properties.acceptance, {
@@ -76,10 +86,10 @@ test('ralph_run_task passes only supplied task fields and returns a compact resu
   const result = await tools.callTool({
     name: 'ralph_run_task',
     arguments: { ...taskArguments, extra: 'ignored' },
-  }, { ralphTaskService });
+  }, { ralphTaskService, resolveProject: permittedProjectResolver });
 
   assert.deepEqual(calls, [{
-    projectPath: taskArguments.projectPath,
+    projectPath: permittedProjectPath,
     task: {
       id: taskArguments.id,
       goal: taskArguments.goal,
@@ -105,7 +115,7 @@ test('ralph_run_task passes only supplied task fields and returns a compact resu
   });
   assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
   for (const privateValue of ['private worker output', 'private model', 'full task must stay private',
-    taskArguments.projectPath, taskArguments.verification]) {
+    permittedProjectPath, taskArguments.verification]) {
     assert.equal(JSON.stringify(result).includes(privateValue), false);
   }
 });
@@ -121,9 +131,9 @@ test('ralph_run_task preserves supplied optional task fields', async () => {
   await tools.callTool({
     name: 'ralph_run_task',
     arguments: { ...taskArguments, maxAttempts: 3, reviewPolicy: 'risk', model: 'chosen-model' },
-  }, { ralphTaskService });
+  }, { ralphTaskService, resolveProject: permittedProjectResolver });
   assert.deepEqual(received, {
-    projectPath: taskArguments.projectPath,
+    projectPath: permittedProjectPath,
     task: {
       id: taskArguments.id,
       goal: taskArguments.goal,
@@ -147,7 +157,7 @@ test('ralph_run_task bounds each verification stream and keeps its tail', async 
       } });
     },
   };
-  const result = await tools.callTool({ name: 'ralph_run_task', arguments: taskArguments }, { ralphTaskService });
+  const result = await tools.callTool({ name: 'ralph_run_task', arguments: taskArguments }, { ralphTaskService, resolveProject: permittedProjectResolver });
   const verification = result.structuredContent.attempts[0].verification;
   for (const [actual, original] of [[verification.stdout, stdout], [verification.stderr, stderr]]) {
     assert.equal(actual.length, 4000);
@@ -171,7 +181,7 @@ test('ralph_run_task returns compact worker errors', async () => {
       };
     },
   };
-  const result = await tools.callTool({ name: 'ralph_run_task', arguments: taskArguments }, { ralphTaskService });
+  const result = await tools.callTool({ name: 'ralph_run_task', arguments: taskArguments }, { ralphTaskService, resolveProject: permittedProjectResolver });
   assert.deepEqual(result.structuredContent, {
     id: 'task-1',
     status: 'needs_planning',
@@ -183,9 +193,182 @@ test('ralph_run_task converts service errors to MCP failures', async () => {
   const ralphTaskService = {
     async run() { throw new Error('service failed'); },
   };
-  const result = await tools.callTool({ name: 'ralph_run_task', arguments: taskArguments }, { ralphTaskService });
+  const result = await tools.callTool({ name: 'ralph_run_task', arguments: taskArguments }, { ralphTaskService, resolveProject: permittedProjectResolver });
   assert.deepEqual(result, {
     content: [{ type: 'text', text: 'service failed' }],
     isError: true,
+  });
+});
+
+test('ralph_run_task rejects unknown, empty, and path-like projects before starting a worker', async () => {
+  let runs = 0;
+  const ralphTaskService = { async run() { runs += 1; } };
+  const resolveProject = (project) => {
+    if (typeof project !== 'string' || !project.trim() || /[\\/]/.test(project) || /^[A-Za-z]:/.test(project)) {
+      throw new Error('Unknown project.');
+    }
+    if (project !== 'example') throw new Error('Unknown project.');
+    return permittedProjectPath;
+  };
+
+  for (const project of ['', '.', '..', 'unknown', '../example', '/registered/example', 'C:\\registered\\example']) {
+    const result = await tools.callTool({
+      name: 'ralph_run_task', arguments: { ...taskArguments, project },
+    }, { ralphTaskService, resolveProject });
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, 'Unknown project.');
+  }
+  const suppliedPath = await tools.callTool({
+    name: 'ralph_run_task', arguments: { ...taskArguments, projectPath: '/arbitrary/path' },
+  }, { ralphTaskService, resolveProject });
+  assert.deepEqual(suppliedPath, {
+    content: [{ type: 'text', text: 'cwd and projectPath are derived from the registered project.' }],
+    isError: true,
+  });
+  assert.equal(runs, 0);
+});
+
+test('registered Ralph projects resolve to their canonical configured root', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-tool-project-'));
+  try {
+    const config = { allowedProjects: { example: directory, '/path-like-name': directory } };
+    assert.equal(tools.resolveRegisteredProject('example', config), fs.realpathSync(directory));
+    assert.throws(() => tools.resolveRegisteredProject('', config), /Unknown project/);
+    assert.throws(() => tools.resolveRegisteredProject('.', config), /Unknown project/);
+    assert.throws(() => tools.resolveRegisteredProject('../example', config), /Unknown project/);
+    assert.throws(() => tools.resolveRegisteredProject('/path-like-name', config), /Unknown project/);
+    assert.throws(() => tools.resolveRegisteredProject('missing', config), /Unknown project/);
+    assert.throws(() => tools.resolveRegisteredProject('gone', {
+      allowedProjects: { gone: path.join(directory, 'missing') },
+    }), /Registered project folder does not exist/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('submit_job queues a registered project and returns its persisted id without waiting', async () => {
+  const calls = [];
+  const result = await tools.callTool({
+    name: 'submit_job',
+    arguments: { project: 'demo', title: 'Add coverage', prompt: 'Write one focused test.', engine: 'codex' },
+  }, {
+    async daemonRequest(requestPath, body) {
+      calls.push({ requestPath, body });
+      return { statusCode: 201, value: { id: 't-queued' } };
+    },
+  });
+
+  assert.deepEqual(calls, [{
+    requestPath: '/api/jobs',
+    body: {
+      project: 'demo', title: 'Add coverage', prompt: 'Write one focused test.', engine: 'codex', source: 'mcp',
+    },
+  }]);
+  assert.deepEqual(result.structuredContent, { id: 't-queued' });
+});
+
+test('job tools read compact status and completed result without worker-private fields', async () => {
+  const calls = [];
+  const job = {
+    id: 't-complete',
+    status: 'done',
+    project: 'demo',
+    prompt: 'private worker prompt',
+    cwd: '/private/project',
+    result: {
+      id: 't-complete',
+      status: 'done',
+      summary: 'private worker result',
+      resultText: 'credentials=private',
+      durationMs: 42,
+      finishedAt: '2026-10-09T00:00:00.000Z',
+      costUsd: 0.12,
+    },
+  };
+  const daemonRequest = async (requestPath) => {
+    calls.push(requestPath);
+    return { statusCode: 200, value: job };
+  };
+
+  const status = await tools.callTool({ name: 'get_job_status', arguments: { id: 't-complete' } }, { daemonRequest });
+  const result = await tools.callTool({ name: 'get_job_result', arguments: { id: 't-complete' } }, { daemonRequest });
+
+  assert.deepEqual(calls, ['/api/jobs/t-complete', '/api/jobs/t-complete']);
+  assert.deepEqual(status.structuredContent, { id: 't-complete', status: 'done', project: 'demo' });
+  assert.deepEqual(result.structuredContent, {
+    id: 't-complete',
+    status: 'done',
+    project: 'demo',
+    result: { status: 'done', durationMs: 42, finishedAt: '2026-10-09T00:00:00.000Z', costUsd: 0.12 },
+  });
+  for (const privateValue of ['private worker prompt', '/private/project', 'private worker result', 'credentials=private']) {
+    assert.equal(JSON.stringify(result).includes(privateValue), false);
+  }
+});
+
+test('R1 tools use their own job namespace and leave generic job tools unchanged', async () => {
+  const calls = [];
+  const daemonRequest = async (requestPath, body) => {
+    calls.push({ requestPath, body });
+    return body ? { statusCode: 201, value: { id: 't-0000r1' } } : { statusCode: 200, value: { id: 't-0000r1', phase: 'review' } };
+  };
+  const submitted = await tools.callTool({ name: 'submit_r1_job', arguments: { project: 'demo', issue: 7, worktree: 'issue7' } }, { daemonRequest });
+  const status = await tools.callTool({ name: 'get_r1_job_status', arguments: { id: 't-0000r1' } }, { daemonRequest });
+
+  assert.deepEqual(calls, [
+    { requestPath: '/api/r1/jobs', body: { project: 'demo', issue: 7, worktree: 'issue7', source: 'mcp' } },
+    { requestPath: '/api/r1/jobs/t-0000r1', body: undefined },
+  ]);
+  assert.deepEqual(submitted.structuredContent, { id: 't-0000r1' });
+  assert.deepEqual(status.structuredContent, { id: 't-0000r1', phase: 'review' });
+  const generic = tools.tools.find((tool) => tool.name === 'submit_job');
+  assert.deepEqual(generic.inputSchema.required, ['project', 'title', 'prompt']);
+  assert.equal(Object.hasOwn(generic.inputSchema.properties, 'issue'), false);
+});
+
+test('submit_job rejects unknown projects and reports a down daemon', async () => {
+  const rejected = await tools.callTool({
+    name: 'submit_job',
+    arguments: { project: '/arbitrary/path', title: 'Nope', prompt: 'Nope' },
+  }, {
+    async daemonRequest(requestPath, body) {
+      assert.equal(requestPath, '/api/jobs');
+      assert.equal(body.project, '/arbitrary/path');
+      return { statusCode: 400, value: { error: 'Unknown project.' } };
+    },
+  });
+  assert.deepEqual(rejected, {
+    content: [{ type: 'text', text: 'Unknown project.' }],
+    isError: true,
+  });
+
+  const unavailable = await tools.callTool({
+    name: 'submit_job',
+    arguments: { project: 'demo', title: 'Retry later', prompt: 'Nope' },
+  }, {
+    async daemonRequest() { throw new Error('connect ECONNREFUSED'); },
+  });
+  assert.deepEqual(unavailable, {
+    content: [{ type: 'text', text: 'Daemon unavailable.' }],
+    isError: true,
+  });
+});
+
+test('dispatch_task requires and forwards a registered project name', async () => {
+  const dispatch = tools.tools.find((tool) => tool.name === 'dispatch_task');
+  assert.deepEqual(dispatch.inputSchema.required, ['project', 'title', 'prompt']);
+  let received;
+  await tools.callTool({
+    name: 'dispatch_task',
+    arguments: { project: 'demo', title: 'Legacy task', prompt: 'Do it' },
+  }, {
+    async daemonRequest(requestPath, body) {
+      received = { requestPath, body };
+      return { statusCode: 201, value: { id: 't-legacy' } };
+    },
+  });
+  assert.deepEqual(received, {
+    requestPath: '/api/dispatch',
+    body: { project: 'demo', title: 'Legacy task', prompt: 'Do it', engine: undefined, source: 'mcp' },
   });
 });

@@ -70,6 +70,8 @@ function loadConfig() {
     },
     models: loaded.models ?? {},
     enginePaths: loaded.enginePaths ?? {},
+    // This is deliberately configuration only.  Requests can select a name,
+    // never add a project or provide the path where a worker will run.
     allowedProjects: configuredProjects(loaded.allowedProjects, paths.config),
   };
 

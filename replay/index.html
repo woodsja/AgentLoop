@@ -791,8 +791,10 @@ body.panel-open{overflow:hidden}
   </div>
   <div class="pform">
     <form id="loopForm">
-      <label for="lProject" style="margin-top:0">Project folder</label>
-      <input id="lProject" required autocomplete="off" placeholder="folder with PLAN.md + GUIDELINES.md">
+      <label for="lProject" style="margin-top:0">Project</label>
+      <select id="lProject" required disabled>
+        <option value="">Loading registered projects…</option>
+      </select>
       <div class="frow">
         <div>
           <label for="lMax">Max cycles</label>
@@ -828,8 +830,10 @@ body.panel-open{overflow:hidden}
     <form id="taskForm">
       <label for="tTitle" style="margin-top:0">What should the agent do</label>
       <textarea id="tTitle" required placeholder="one-shot task - a worker runs once, no critic"></textarea>
-      <label for="tProject">Project folder <span style="opacity:.6">- optional</span></label>
-      <input id="tProject" autocomplete="off" placeholder="folder to run in">
+      <label for="tProject">Project</label>
+      <select id="tProject" required disabled>
+        <option value="">Loading registered projects…</option>
+      </select>
       <label for="tEngine">Engine</label>
       <select id="tEngine">
         <option value="claude">Claude Code</option>
@@ -1403,6 +1407,27 @@ async function post(url, body){
   } catch (e) {
     if (mockActive && !liveEverOk) return mockPost(url, body);
     throw e;
+  }
+}
+
+async function loadProjects(){
+  try {
+    const r = await fetch('/api/projects', {cache: 'no-store'});
+    if (!r.ok) throw new Error('http ' + r.status);
+    const data = await r.json();
+    const projects = Array.isArray(data?.projects) ? data.projects.filter(name => typeof name === 'string' && name) : [];
+    for (const id of ['lProject', 'tProject']) {
+      const select = $('#' + id);
+      select.replaceChildren(new Option(projects.length ? 'Select a project' : 'No registered projects', ''));
+      for (const name of projects) select.add(new Option(name, name));
+      select.disabled = projects.length === 0;
+    }
+  } catch (e) {
+    for (const id of ['lProject', 'tProject']) {
+      const select = $('#' + id);
+      select.replaceChildren(new Option('Unable to load projects', ''));
+      select.disabled = true;
+    }
   }
 }
 
@@ -2261,10 +2286,11 @@ function init(){
     if (!submit || submit.disabled) return;
     const title = $('#tTitle').value.trim();
     if (!title) return;
-    /* daemon contract: POST /api/dispatch {prompt, title?, cwd?, engine?} - the one textarea feeds both title and prompt */
+    /* daemon contract: POST /api/dispatch {project, prompt, title?, engine?} */
     const body = {title, prompt: title, engine: $('#tEngine').value};
     const project = $('#tProject').value.trim();
-    if (project) body.cwd = project;
+    if (!project) return;
+    body.project = project;
     submit.disabled = true;
     try {
       const j = await post('/api/dispatch', body);
@@ -2312,6 +2338,7 @@ function init(){
   initSpy();
   navCue();
   window.addEventListener('resize', navCue);
+  loadProjects();
   poll();
   setInterval(poll, 2000);
   setInterval(tickElapsed, 1000);

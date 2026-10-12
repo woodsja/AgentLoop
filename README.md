@@ -139,7 +139,7 @@ Claude Code can connect to the local bridge directly, no tunnel needed:
 claude mcp add --transport http agentloop "http://127.0.0.1:5758/mcp?key=<token-from-Connector>"
 ```
 
-The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `dispatch_task`, `start_loop`, and `send_message`. `dispatch_task` and `start_loop` both take an optional `engine`.
+The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `submit_job`, `get_job_status`, `get_job_result`, `submit_r1_job`, `get_r1_job_status`, `get_r1_job_result`, `dispatch_task`, `start_loop`, and `send_message`. Job and dispatch submission require a registered project name; `dispatch_task` and `start_loop` both take an optional `engine`.
 
 ## Try the demo loop
 
@@ -167,8 +167,19 @@ Watch the cycle timeline in **Active run** and critic verdicts in the **Event lo
 | `mcpBridge.port` | `5758` | Local MCP bridge port. |
 | `models` | `{ "claude": "opus", "codex": "gpt-5.6-terra" }` | Default model per engine. |
 | `enginePaths` | none | Optional absolute path per engine, for a CLI that is not on `PATH`. |
+| `allowedProjects` | none | Admin-owned map of project name to root used by `/api/jobs`, `/api/dispatch`, and `/api/loop`. Missing or invalid entries deny submission. |
 
 The shipped `config.json` includes every key above except the optional `enginePaths` key.
+
+To enable HTTP submission, explicitly register each project (relative roots are resolved relative to `config.json`):
+
+```json
+"allowedProjects": {
+  "starter": "examples/starter"
+}
+```
+
+Requests send the project name, never a working directory. The daemon resolves the configured root to its canonical path and rejects unknown projects, supplied `cwd` values, and requested operations.
 
 A model named on the task or loop itself wins over `models`.
 
@@ -190,7 +201,7 @@ Worker directories must be explicitly registered in the owner configuration (`AG
 {"allowedProjects":{"ralph":{"root":"/path/to/checkout","worktrees":{"review":"/path/to/feature-worktree"}}}}
 ```
 
-Keep that authoritative configuration outside every writable worker directory. Requests select `project: "ralph"` and `worktree: "review"`; they cannot register a project or override its path. The resolver checks the canonical directory, Git worktree registration, and repository ownership again before execution. Existing structured task clients may pass `projectPath` only when it exactly matches an authorized workspace. Unknown projects, redirected worktrees, and unrelated paths fail closed.
+Keep that authoritative configuration outside every writable worker directory. Requests select `project: "ralph"` and `worktree: "review"`; they cannot register a project or override its path. The resolver checks the canonical directory, Git worktree registration, and repository ownership again before execution. `dispatch_task`, `start_loop`, and `ralph_run_task` accept the optional `worktree` selector; `cwd` and `projectPath` remain rejected. Unknown projects, redirected worktrees, and unrelated paths fail closed.
 
 Isolated worktree implementation uses Codex's filesystem sandbox with only the selected worktree writable; system temporary directories, Git metadata, and `.codex` remain read-only. These workers cannot request sandbox escalation, and ignore user/project configuration that could widen their permissions. Engines without this filesystem boundary are refused for isolated worktrees. Ralph performs verification and Git delivery separately from the implementation worker. This configuration support does not register new live projects or change services.
 
@@ -203,6 +214,34 @@ The job's `review` record holds the latest completed review of the delivered hea
 The job's `verification` record retains the actual Ralph verification command, pass flag, exit code, timeout status, and the last 4000 characters of each test-output stream. It is checkpointed before delivery and bound to the delivered commit, so it survives restarts. The independent reviewer receives this deterministic evidence alongside CI results. Missing, failed, timed-out, or different-SHA verification blocks both a fresh review and reuse of a persisted PASS. A corrected commit requires fresh verification evidence.
 
 The bounded `reviewHistory` preserves each invocation's attempt number, reviewer, model, policy, exact SHA, start/completion timestamps, status, verdict/findings, and sanitized failure diagnostics. Identity is saved before invocation; statuses are `running`, `completed`, `failed`, `timed_out`, `invalid_verdict`, or `interrupted`. Raw reviewer errors, output, stacks, and credentials are not saved as failure diagnostics. On restart, an unfinished review is recorded as interrupted and handed to a human without another invocation; a checkpointed failure is also reconciled without replay. History survives delivery of a corrected SHA, while only a valid exact-SHA PASS can authorize merge readiness. Injected adapters may declare their `reviewer` and `model` identity properties; otherwise their identity is recorded as `independent-review-adapter` with the configured model. Older jobs without history still load.
+
+## AgentLoop daemon (systemd user service)
+
+The AgentLoop daemon has a separate `agentloop.service`; it is not a timer and does not replace or modify the finance autopilot timer. Before starting it, an owner must explicitly authorize every project that may receive work in an owner configuration file kept outside every worker-writable directory and selected with `AGENTLOOP_CONFIG_PATH` (use absolute project paths, since relative entries resolve from that file's directory):
+
+```json
+"allowedProjects": {
+  "starter": "/path/to/AgentLoop/examples/starter"
+}
+```
+
+With no valid `allowedProjects` entries, job and loop submission remains denied. The service installer never registers projects and never supplies a paid-engine fallback; install and authenticate the Codex or Claude CLI you intend to use first.
+
+Preview the exact user unit (the safe default):
+
+```bash
+node src/daemon-systemd.js --root "$(pwd)" --dry-run
+```
+
+Install and enable it explicitly, then start it when you are ready. Installation reloads the user manager but does not start or restart the daemon.
+
+```bash
+node src/daemon-systemd.js --root "$(pwd)" --install
+systemctl --user start agentloop.service
+systemctl --user status agentloop.service
+```
+
+The unit uses this Node executable path, the repository as `WorkingDirectory`, `Restart=on-failure`, and the invoking shell's `PATH` so subscription-authenticated `codex` or `claude` CLIs remain discoverable.
 
 ## Supported platforms
 
@@ -236,8 +275,8 @@ MIT. See [LICENSE](LICENSE).
 
 ## Durable asynchronous R1 jobs
 
-With the existing daemon running, `submit_job({project, issue, worktree?})` (or
-`POST /api/jobs`) persists a job and immediately returns `{id}`. It selects the
+With the existing daemon running, `submit_r1_job({project, issue, worktree?})` (or
+`POST /api/r1/jobs`) persists a job and immediately returns `{id}`. It selects the
 specified ready GitHub issue; implementation and deterministic verification run
 in the owner-authorized issue worktree, followed by CI observation and the existing
 independent Claude review. The owner must enable the project in
@@ -247,10 +286,12 @@ project registry before submission. Requests cannot register paths themselves.
 
 The existing dispatcher runs one R1 job at a time, retains the original per-issue
 lock, retry/correction limits and review history, and checkpoints phases in the
-existing durable queue. `get_job_status({id})`, `get_job_result({id})`, or
-`GET /api/jobs/:id` retrieve persisted phases and sanitized verification/review
+existing durable queue. `get_r1_job_status({id})`, `get_r1_job_result({id})`, or
+`GET /api/r1/jobs/:id` retrieve persisted phases and sanitized verification/review
 evidence, including after daemon recovery. `passed` requires verification and an
 independent PASS for the exact delivered SHA and means ready for human merge.
 Failures return `blocked`; interrupted independent reviews are preserved and handed
 to a human without replaying the reviewer. Saved exact-SHA approval is reused.
-No additional scheduler or service is installed or started by submission.
+No additional scheduler or service is installed or started by submission. The
+generic `submit_job`, `get_job_status`, and `get_job_result` contracts are unchanged;
+the generic tools also report R1 job IDs with their compact status and result.

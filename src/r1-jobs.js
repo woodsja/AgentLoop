@@ -168,9 +168,10 @@ function createR1Jobs(store, options = {}) {
     for (const stage of ['pending', 'running', 'done']) {
       try {
         const task = store.readTask(id, stage);
+        if (task.workflow !== 'r1') return null;
         return { id, status: task.status || stage, project: task.project,
           ...(task.failure ? { failure: task.failure } : {}),
-          ...(task.workflow === 'r1' ? { phase: task.phase, phases: task.phases || [], evidence: evidence(task.r1) } : {}),
+          phase: task.phase, phases: task.phases || [], evidence: evidence(task.r1),
         };
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;

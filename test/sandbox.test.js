@@ -33,6 +33,12 @@ test('Codex sessions use workspace sandboxing', () => {
   assert.ok(args.includes('sandbox_workspace_write.network_access=false'));
 });
 
+test('Codex sessions disable apps and plugins before exec', () => {
+  const args = argsFor('codex');
+
+  assert.deepEqual(args.slice(0, 5), ['--disable', 'apps', '--disable', 'plugins', 'exec']);
+});
+
 test('Claude sessions accept edits without inheriting operator config', () => {
   const args = argsFor('claude');
 
