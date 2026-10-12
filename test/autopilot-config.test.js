@@ -18,6 +18,7 @@ const expectedFinanceDashboard = {
   maxAttempts: 2,
   prepareVenv: true,
   verification: '.venv/bin/finance-dashboard check && .venv/bin/python -m pytest && .venv/bin/ruff check && git diff --check',
+  ciWorkflow: 'Checks',
   reviewPolicy: 'always',
   autoMerge: false,
 };
@@ -112,6 +113,7 @@ test('representative invalid project field values are rejected', () => {
     reviewModel: 'haiku',
     maxAttempts: 1.5,
     prepareVenv: 'yes',
+    ciWorkflow: ' ',
   };
 
   for (const [field, value] of Object.entries(invalidFields)) {

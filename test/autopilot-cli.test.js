@@ -9,7 +9,7 @@ const { parseArguments, classifyRalphResult, run: runAutopilot } = require('../s
 const { beginReviewAttempt, createJob, createJobStore, isResumable, recordReview } = require('../src/autopilot-state');
 const { deliverPassedWork } = require('../src/autopilot-delivery');
 
-const project = { enabled: false, repo: 'example/repo', readyLabel: 'ready', worker: 'codex' };
+const project = { enabled: false, repo: 'example/repo', readyLabel: 'ready', worker: 'codex', ciWorkflow: 'CI' };
 const temporaryDirectories = new Set();
 
 test.afterEach(() => {

@@ -51,6 +51,12 @@ function validateProject(projectName, project) {
     throw new TypeError(`reviewSkipReason for project ${projectName} must be a non-empty explanation of at most 4000 characters`);
   }
 
+  // The GitHub Actions workflow name whose success on the exact delivered
+  // commit is the only acceptable green CI result. Without it CI stays pending.
+  if (Object.hasOwn(project, 'ciWorkflow') && !isNonEmptyString(project.ciWorkflow)) {
+    throw new TypeError(`ciWorkflow for project ${projectName} must be a non-empty string`);
+  }
+
   if (Object.hasOwn(project, 'stateDir') && !isNonEmptyString(project.stateDir)) {
     throw new TypeError(`stateDir for project ${projectName} must be a non-empty string`);
   }

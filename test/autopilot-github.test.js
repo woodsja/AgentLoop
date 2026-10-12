@@ -49,7 +49,7 @@ test('fails closed for gh errors, malformed JSON, and unexpected response shapes
 
 test('observes the persisted PR head through GitHub Actions and normalizes workflow states', async () => {
   const calls = [];
-  const observe = async response => observePullRequestCi({ repo: 'example/repo' }, { number: 42, commit: 'deadbeef' }, {
+  const observe = async response => observePullRequestCi({ repo: 'example/repo', ciWorkflow: 'CI' }, { number: 42, commit: 'deadbeef' }, {
     execFile: (file, args, options, callback) => {
       calls.push([file, args, options]);
       callback(null, JSON.stringify(response), '');
@@ -57,7 +57,7 @@ test('observes the persisted PR head through GitHub Actions and normalizes workf
   });
   const base = { databaseId: 123, status: 'completed', conclusion: 'success', name: 'test', workflowName: 'CI', url: 'https://example/run/123', startedAt: '2026-10-03T00:00:00Z', updatedAt: '2026-10-03T00:01:00Z' };
 
-  const green = await observe([base, { ...base, databaseId: 124, conclusion: 'skipped' }]);
+  const green = await observe([base, { ...base, databaseId: 124, workflowName: 'Docs', conclusion: 'skipped' }]);
   assert.equal(green.state, 'green');
   assert.equal(green.prNumber, 42);
   assert.equal(green.headCommit, 'deadbeef');
@@ -77,8 +77,42 @@ test('observes the persisted PR head through GitHub Actions and normalizes workf
   assertUnattendedGhOptions(calls[0][2]);
 });
 
+test('only a successful run of the required test workflow for the exact commit is green CI', async () => {
+  const calls = [];
+  const observe = (response, project = { repo: 'example/repo', ciWorkflow: 'CI' }) => observePullRequestCi(project, { number: 15, commit: 'efcb3d3' }, {
+    execFile: (file, args, options, callback) => { calls.push(args); callback(null, JSON.stringify(response), ''); },
+  });
+  const test = { databaseId: 10, status: 'completed', conclusion: 'success', name: 'test', workflowName: 'CI', url: null, startedAt: null, updatedAt: null };
+  const review = { ...test, databaseId: 11, name: 'claude-review', workflowName: 'Claude PR Review' };
+
+  // Missing: no runs at all, or only an unrelated successful review workflow.
+  assert.equal((await observe([])).state, 'pending');
+  const unrelated = await observe([review]);
+  assert.equal(unrelated.state, 'pending');
+  assert.match(unrelated.details, /Required CI workflow "CI" has not run for efcb3d3\. Other runs: Claude PR Review \(#11\): completed\/success/);
+  // Pending: queued or in progress, even beside a successful review.
+  assert.equal((await observe([{ ...test, status: 'queued', conclusion: null }, review])).state, 'pending');
+  assert.equal((await observe([{ ...test, status: 'in_progress', conclusion: null }])).state, 'pending');
+  // Failed: any completed conclusion other than success is red.
+  for (const conclusion of ['failure', 'cancelled', 'timed_out', 'skipped', 'neutral', 'action_required']) {
+    assert.equal((await observe([{ ...test, conclusion }, review])).state, 'red', conclusion);
+  }
+  // Successful: the required workflow succeeded for the observed commit.
+  assert.equal((await observe([test, review])).state, 'green');
+  assert.equal((await observe([test])).state, 'green');
+  assert.ok(calls.every(args => args[args.indexOf('--commit') + 1] === 'efcb3d3'));
+  // No required workflow configured: fail closed without consulting GitHub.
+  const before = calls.length;
+  for (const project of [{ repo: 'example/repo' }, { repo: 'example/repo', ciWorkflow: ' ' }]) {
+    const unconfigured = await observe([test, review], project);
+    assert.equal(unconfigured.state, 'pending');
+    assert.match(unconfigured.details, /No required CI workflow/);
+  }
+  assert.equal(calls.length, before);
+});
+
 test('CI observation rejects malformed Actions responses', async () => {
-  const observe = stdout => observePullRequestCi({ repo: 'example/repo' }, { number: 42, commit: 'deadbeef' }, {
+  const observe = stdout => observePullRequestCi({ repo: 'example/repo', ciWorkflow: 'CI' }, { number: 42, commit: 'deadbeef' }, {
     execFile: (file, args, options, callback) => callback(null, stdout, ''),
   });
   await assert.rejects(observe('{bad'), /malformed JSON/);

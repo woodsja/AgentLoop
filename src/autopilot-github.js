@@ -119,8 +119,13 @@ function latestRunPerWorkflow(runs) {
 
 const GREEN_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 
-function ciStateForRuns(allRuns) {
+function ciStateForRuns(allRuns, requiredWorkflow) {
   const runs = latestRunPerWorkflow(allRuns);
+  // Only the owner-configured test workflow can make a commit green; another
+  // successful workflow (such as an advisory review) never substitutes for it.
+  const required = runs.find(run => run.workflowName === requiredWorkflow);
+  if (!required || required.status !== 'completed' || !required.conclusion) return 'pending';
+  if (required.conclusion !== 'success') return 'red';
   // A run which has not reached a completed conclusion is deliberately
   // pending, even when another workflow has already failed or passed. This
   // prevents an in-flight retry from being reported as a final red result.
@@ -128,12 +133,13 @@ function ciStateForRuns(allRuns) {
   return runs.every(run => GREEN_CONCLUSIONS.has(run.conclusion)) ? 'green' : 'red';
 }
 
-function ciDetails(commit, runs) {
-  if (runs.length === 0) return `No GitHub Actions workflow runs found yet for ${commit}.`;
-  return runs.map(run => {
+function ciDetails(commit, runs, requiredWorkflow) {
+  const listed = runs.map(run => {
     const label = run.workflowName || run.name || `run ${run.databaseId}`;
     return `${label} (#${run.databaseId}): ${run.status}${run.conclusion ? `/${run.conclusion}` : ''}`;
   }).join('; ');
+  if (runs.some(run => run.workflowName === requiredWorkflow)) return listed;
+  return `Required CI workflow "${requiredWorkflow}" has not run for ${commit}.${listed ? ` Other runs: ${listed}` : ''}`;
 }
 
 /**
@@ -147,6 +153,16 @@ async function observePullRequestCi(project, { number, commit }, { execFile: exe
     throw new TypeError('GitHub Actions observation requires a project, pull request, and head commit');
   }
   if (typeof executeFile !== 'function') throw new TypeError('GitHub Actions observation requires an execFile function');
+  // Without a required test workflow nothing can prove CI passed: fail closed.
+  if (typeof project.ciWorkflow !== 'string' || !project.ciWorkflow.trim()) {
+    return {
+      state: 'pending',
+      details: `No required CI workflow (ciWorkflow) is configured for ${project.repo}; CI cannot be green.`,
+      prNumber: number,
+      headCommit: commit,
+      runs: [],
+    };
+  }
 
   const output = await runGh([
     'run', 'list',
@@ -166,8 +182,8 @@ async function observePullRequestCi(project, { number, commit }, { execFile: exe
   }
   const runs = response.map(normalizeWorkflowRun).sort((left, right) => left.databaseId - right.databaseId);
   return {
-    state: ciStateForRuns(runs),
-    details: ciDetails(commit, runs),
+    state: ciStateForRuns(runs, project.ciWorkflow),
+    details: ciDetails(commit, runs, project.ciWorkflow),
     prNumber: number,
     headCommit: commit,
     runs,
