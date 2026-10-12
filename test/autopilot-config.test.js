@@ -18,6 +18,7 @@ const expectedFinanceDashboard = {
   maxAttempts: 2,
   prepareVenv: true,
   verification: '.venv/bin/finance-dashboard check && .venv/bin/python -m pytest && .venv/bin/ruff check && git diff --check',
+  reviewPolicy: 'always',
   autoMerge: false,
 };
 
