@@ -190,6 +190,72 @@ async function observePullRequestCi(project, { number, commit }, { execFile: exe
   };
 }
 
+function normalizePullRequestObservation(value) {
+  if (!isPlainObject(value) || !Number.isSafeInteger(value.number) || value.number < 1
+    || typeof value.url !== 'string' || !value.url
+    || typeof value.state !== 'string' || !['OPEN', 'CLOSED', 'MERGED'].includes(value.state)
+    || typeof value.headRefName !== 'string' || !value.headRefName
+    || typeof value.headRefOid !== 'string' || !value.headRefOid
+    || typeof value.baseRefName !== 'string' || !value.baseRefName
+    || !(value.mergeCommit === null || (isPlainObject(value.mergeCommit) && typeof value.mergeCommit.oid === 'string' && value.mergeCommit.oid))) {
+    throw new Error('GitHub pull request observation failed: gh returned an unexpected pull request shape');
+  }
+  return { number: value.number, url: value.url, state: value.state, headRefName: value.headRefName,
+    headRefOid: value.headRefOid, baseRefName: value.baseRefName,
+    mergeCommit: value.mergeCommit ? value.mergeCommit.oid : null };
+}
+
+async function observePullRequest(project, number, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(number) || number < 1 || typeof executeFile !== 'function') {
+    throw new TypeError('GitHub pull request observation requires a project and pull request number');
+  }
+  let response;
+  try {
+    response = JSON.parse(await runGh(['pr', 'view', String(number), '--repo', project.repo,
+      '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergeCommit'], executeFile, 'GitHub pull request observation'));
+  } catch (error) {
+    if (error.message.includes('GitHub pull request observation failed:')) throw error;
+    throw new Error(`GitHub pull request observation failed: gh returned malformed JSON: ${error.message}`);
+  }
+  return normalizePullRequestObservation(response);
+}
+
+async function mergePullRequest(project, { number, headCommit }, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(number) || number < 1 || typeof headCommit !== 'string' || !headCommit
+    || typeof executeFile !== 'function') throw new TypeError('GitHub pull request merge requires a project, number, and expected head commit');
+  let response;
+  try {
+    response = JSON.parse(await runGh(['api', '--method', 'PUT', `repos/${project.repo}/pulls/${number}/merge`, '-f', `sha=${headCommit}`], executeFile, 'GitHub pull request merge'));
+  } catch (error) {
+    if (error.message.includes('GitHub pull request merge failed:')) throw error;
+    throw new Error(`GitHub pull request merge failed: gh returned malformed JSON: ${error.message}`);
+  }
+  if (!isPlainObject(response) || response.merged !== true || typeof response.sha !== 'string' || !response.sha) {
+    throw new Error('GitHub pull request merge failed: GitHub did not confirm a merge commit');
+  }
+  return { mergeCommit: response.sha };
+}
+
+async function reconcileIssueClosure(project, issueNumber, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(issueNumber) || issueNumber < 1 || typeof executeFile !== 'function') {
+    throw new TypeError('GitHub issue reconciliation requires a project and issue number');
+  }
+  let response;
+  try {
+    response = JSON.parse(await runGh(['api', '--method', 'PATCH', `repos/${project.repo}/issues/${issueNumber}`, '-f', 'state=closed'], executeFile, 'GitHub issue reconciliation'));
+  } catch (error) {
+    if (error.message.includes('GitHub issue reconciliation failed:')) throw error;
+    throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`);
+  }
+  if (!isPlainObject(response) || response.number !== issueNumber || response.state !== 'closed') {
+    throw new Error('GitHub issue reconciliation failed: GitHub did not confirm issue closure');
+  }
+  return { number: issueNumber, state: 'closed' };
+}
+
 const MAX_DIAGNOSTIC_RUNS = 5;
 const MAX_RUN_LOG_LENGTH = 6000;
 const LOG_BUFFER = 16 * 1024 * 1024;
@@ -294,6 +360,9 @@ module.exports = {
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,
+  observePullRequest,
+  mergePullRequest,
+  reconcileIssueClosure,
   ciStateForRuns,
   collectCiFailureDiagnostics,
 };

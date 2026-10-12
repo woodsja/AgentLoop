@@ -5,6 +5,9 @@ const {
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,
+  observePullRequest,
+  mergePullRequest,
+  reconcileIssueClosure,
   collectCiFailureDiagnostics,
 } = require('./autopilot-github');
 const { deliverPassedWork, findOpenIssuePullRequests } = require('./autopilot-delivery');
@@ -32,6 +35,8 @@ const {
   recordFailure,
   recordDelivery,
   recordPullRequest,
+  recordMerge,
+  recordIssueReconciled,
   beginReviewAttempt,
   failReviewAttempt,
   normalizeReviewFindings,
@@ -218,6 +223,66 @@ async function run(argv, dependencies = {}) {
   const createService = dependencies.createRalphTaskService || createRalphTaskService;
   const maxJobRuns = dependencies.maxJobRuns ?? DEFAULT_MAX_JOB_RUNS;
 
+  // The final GitHub identity read is deliberately separate from CI and
+  // review.  Both may be true for an old head if the PR was force-pushed or
+  // retargeted afterwards, so the merge path always reads the PR immediately
+  // before deciding whether to merge or recover a prior merge.
+  const finishApprovedMerge = async () => {
+    if (!project.autoMerge) {
+      job.status = 'ready_for_human_merge';
+      markTerminal(job, 'ready_for_human_merge');
+      return;
+    }
+    if (!job.pr || !job.delivery || !job.delivery.commit || !matchingPass(job.review, job.delivery.commit)
+      || !Array.isArray(job.review.findings) || job.review.findings.length !== 0
+      || !job.review.reviewer.startsWith('claude:')) {
+      throw new Error(`Autopilot merge for issue #${candidate.number} requires an exact independent PASS with no findings`);
+    }
+    const observePr = dependencies.observePullRequest || observePullRequest;
+    const remote = await observePr(project, job.pr.number, { execFile: dependencies.execFile });
+    const expectedBase = project.baseBranch;
+    if (!remote || remote.number !== job.pr.number || remote.headRefName !== job.branch
+      || remote.headRefOid !== job.delivery.commit || remote.baseRefName !== expectedBase) {
+      handToHuman(job, 'merge', `GitHub PR identity changed or is ambiguous for PR #${job.pr.number}; expected ${job.branch} at ${job.delivery.commit} into ${expectedBase}.`, store.now);
+      return;
+    }
+    if (remote.state === 'MERGED') {
+      if (!remote.mergeCommit) {
+        handToHuman(job, 'merge', `GitHub reports PR #${job.pr.number} merged without a merge commit SHA; refusing to infer success.`, store.now);
+        return;
+      }
+      if (job.merge && (job.merge.prNumber !== job.pr.number || job.merge.approvedHead !== job.delivery.commit
+        || job.merge.repo !== project.repo || job.merge.commit !== remote.mergeCommit)) {
+        handToHuman(job, 'merge', `Recorded merge evidence for PR #${job.pr.number} does not match GitHub's recovered merge.`, store.now);
+        return;
+      }
+      if (!job.merge) {
+        recordMerge(job, { prNumber: job.pr.number, approvedHead: job.delivery.commit, commit: remote.mergeCommit, repo: project.repo }, store.now);
+        store.save(job);
+      }
+    } else if (remote.state === 'OPEN') {
+      phase = 'merge';
+      const merge = dependencies.mergePullRequest || mergePullRequest;
+      const result = await merge(project, { number: job.pr.number, headCommit: job.delivery.commit }, { execFile: dependencies.execFile });
+      if (!result || typeof result.mergeCommit !== 'string' || !result.mergeCommit) {
+        throw new Error(`GitHub merge for PR #${job.pr.number} returned no confirmed merge commit`);
+      }
+      recordMerge(job, { prNumber: job.pr.number, approvedHead: job.delivery.commit, commit: result.mergeCommit, repo: project.repo }, store.now);
+      // This is the intentional crash checkpoint: a later pass observes the
+      // remote MERGED state and will not submit another merge request.
+      store.save(job);
+    } else {
+      handToHuman(job, 'merge', `GitHub PR #${job.pr.number} is ${remote.state}, not open or a valid recovered merge.`, store.now);
+      return;
+    }
+    phase = 'merge';
+    const closeIssue = dependencies.reconcileIssueClosure || reconcileIssueClosure;
+    await closeIssue(project, candidate.number, { execFile: dependencies.execFile });
+    recordIssueReconciled(job);
+    job.status = 'merged';
+    markTerminal(job, 'merged');
+  };
+
   const lock = store.acquire(candidate.number);
   let job;
   let workspace;
@@ -294,8 +359,7 @@ async function run(argv, dependencies = {}) {
           if (!hasPassingVerification(job.verification, job.delivery.commit)) {
             handToHuman(job, 'review', 'Independent review requires passing deterministic verification evidence for the exact delivered commit.', store.now);
           } else if (matchingPass(job.review, job.delivery.commit)) {
-            job.status = 'ready_for_human_merge';
-            markTerminal(job, 'ready_for_human_merge');
+            await finishApprovedMerge();
           } else if ((job.reviewAttempts ?? 0) >= MAX_REVIEW_ATTEMPTS) {
             handToHuman(job, 'review', `Independent review attempt limit (${MAX_REVIEW_ATTEMPTS}) reached; no further automatic review will run.`, store.now);
           } else {
@@ -334,8 +398,7 @@ async function run(argv, dependencies = {}) {
               // an on-disk PASS must exist before the PR becomes merge-ready.
               recordReview(job, { ...pass, policy: project.reviewPolicy, attempt }, store.now);
               store.save(job);
-              job.status = 'ready_for_human_merge';
-              markTerminal(job, 'ready_for_human_merge');
+              await finishApprovedMerge();
             } else if (!job.terminal && needsChanges) {
               // Feedback is checkpointed now, but the worker is deliberately
               // deferred to the next timer pass so review observation remains
@@ -573,7 +636,9 @@ async function run(argv, dependencies = {}) {
       try {
         recordFailure(job, phase, error, store.now);
         if (job.ralph && job.ralph.status === 'running') job.ralph.status = 'error';
-        if (phase === 'ci') {
+        if (phase === 'merge' && /did not confirm|returned no confirmed merge commit/.test(errorMessage(error))) {
+          handToHuman(job, 'merge', errorMessage(error), store.now);
+        } else if (phase === 'ci' || phase === 'merge') {
           // An observation failure (gh outage, mismatched head) says nothing
           // about the delivered work; keep polling and never restart Ralph.
           job.status = 'awaiting_ci';

@@ -137,6 +137,7 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     ralph: { status: null, attempts: 0, taskId: null },
     delivery: { branch: null, commit: null, pushed: false },
     pr: null,
+    merge: null,
     ci: null,
     verification: null,
     review: null,
@@ -160,6 +161,13 @@ function validateJob(job, filePath) {
   const hasValidPullRequest = value => value.pr === null || (isPlainObject(value.pr)
     && Number.isSafeInteger(value.pr.number) && value.pr.number > 0
     && typeof value.pr.url === 'string' && value.pr.url.length > 0);
+  const hasValidMerge = value => value.merge === undefined || value.merge === null || (isPlainObject(value.merge)
+    && Number.isSafeInteger(value.merge.prNumber) && value.merge.prNumber > 0
+    && typeof value.merge.approvedHead === 'string' && value.merge.approvedHead.length > 0
+    && typeof value.merge.commit === 'string' && value.merge.commit.length > 0
+    && typeof value.merge.repo === 'string' && value.merge.repo.length > 0
+    && typeof value.merge.mergedAt === 'string' && value.merge.mergedAt.length > 0
+    && typeof value.merge.issueClosed === 'boolean');
   const hasValidCiRun = run => isPlainObject(run)
     && Number.isSafeInteger(run.databaseId) && run.databaseId > 0
     && typeof run.status === 'string' && run.status.length > 0
@@ -280,6 +288,7 @@ function validateJob(job, filePath) {
           : !hasValidRalph(job) ? 'invalid Ralph state'
             : !hasValidDelivery(job) ? 'invalid delivery state'
             : !hasValidPullRequest(job) ? 'invalid pull request state'
+              : !hasValidMerge(job) ? 'invalid merge state'
               : !hasValidCi(job) ? 'invalid CI state'
                 : job.verification != null && !isVerificationEvidence(job.verification) ? 'invalid deterministic verification state'
                 : !hasValidReview(job) ? 'invalid independent review state'
@@ -321,6 +330,21 @@ function recordPullRequest(job, { number, url }) {
     throw new TypeError('Pull request state requires a positive number and url');
   }
   job.pr = { number, url };
+  return job;
+}
+
+function recordMerge(job, { prNumber, approvedHead, commit, repo, issueClosed = false }, now = () => new Date().toISOString()) {
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1 || typeof approvedHead !== 'string' || !approvedHead
+    || typeof commit !== 'string' || !commit || typeof repo !== 'string' || !repo || typeof issueClosed !== 'boolean') {
+    throw new TypeError('Merge state requires PR identity, approved head, merge commit, repository, and issue closure state');
+  }
+  job.merge = { prNumber, approvedHead, commit, repo, mergedAt: now(), issueClosed };
+  return job;
+}
+
+function recordIssueReconciled(job) {
+  if (!job.merge) throw new TypeError('Issue reconciliation requires a recorded merge');
+  job.merge.issueClosed = true;
   return job;
 }
 
@@ -700,6 +724,8 @@ module.exports = {
   recordDelivery,
   recordFailure,
   recordPullRequest,
+  recordMerge,
+  recordIssueReconciled,
   beginReviewAttempt,
   failReviewAttempt,
   normalizeReviewFindings,
