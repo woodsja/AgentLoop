@@ -34,6 +34,7 @@ const {
   recordCiState,
   recordFailure,
   recordMerge,
+  recordIssueClosed,
   recordDelivery,
   recordPullRequest,
   beginReviewAttempt,
@@ -112,6 +113,39 @@ function mergeEvidenceIsCurrent(job) {
     && hasPassingVerification(job.verification, commit)
     && job.ci && job.ci.state === 'green' && job.ci.headCommit === commit
     && matchingPass(job.review, commit);
+}
+
+function isPermanentMergeError(error) {
+  // GitHub reports incompatible heads, permissions, and merge conflicts as
+  // 4xx responses.  Retrying those cannot make an approved PR safe.
+  return /\b(?:400|401|403|404|405|409|410|422)\b/.test(errorMessage(error));
+}
+
+function retryMerge(job, error, store, projectName, candidate, write, { bounded = true } = {}) {
+  if (bounded) job.mergeAttempts = (job.mergeAttempts || 0) + 1;
+  recordFailure(job, 'merge', error, store.now);
+  if (isPermanentMergeError(error) || bounded && job.mergeAttempts >= 3) {
+    blockMerge(job, `Automatic merge could not be completed: ${errorMessage(error)}`, store.now);
+    store.save(job);
+    return { status: job.terminalState, terminal: true };
+  }
+  store.save(job);
+  write(`Autopilot: project ${projectName}; issue #${candidate.number}; merge retry pending.`);
+  return { status: 'merge_retry' };
+}
+
+async function reconcileImplementedIssue(project, job, issueNumber, dependencies, store) {
+  if (project.baseBranch === 'main' || job.merge.issueClosedAt) return;
+  try {
+    const closeIssue = dependencies.closeImplementedIssue || closeImplementedIssue;
+    await closeIssue(project, issueNumber, { execFile: dependencies.execFile });
+    recordIssueClosed(job, store.now);
+  } catch (error) {
+    // recordFailure is deliberately diagnostic-only: the merged checkpoint
+    // remains terminal and is selected on a later pass for reconciliation.
+    recordFailure(job, 'issue-close', error, store.now);
+  }
+  store.save(job);
 }
 
 // The review adapter is intentionally a dependency of the public one-shot
@@ -220,11 +254,17 @@ async function run(argv, dependencies = {}) {
   // A persisted approval is intentionally preferred over fresh issue work.
   // The issue may already be closed by GitHub's closing keyword, so recover
   // it from durable state even when it is absent from the ready-label query.
-  const approved = !dryRun && project.autoMerge
+  const pendingIssueClose = !dryRun && project.autoMerge
+    ? store.list().find(value => value.project === projectName && value.repo === project.repo
+      && value.terminalState === 'merged' && value.merge && !value.merge.issueClosedAt && project.baseBranch !== 'main')
+    : null;
+  const approved = !pendingIssueClose && !dryRun && project.autoMerge
     ? store.list().find(value => value.project === projectName && value.repo === project.repo
       && value.terminalState === 'ready_for_human_merge' && !value.merge)
     : null;
-  const selection = approved
+  const selection = pendingIssueClose
+    ? { issue: discovered.find(issue => issue.number === pendingIssueClose.issue.number) || { ...pendingIssueClose.issue, body: '' }, job: pendingIssueClose }
+    : approved
     ? { issue: discovered.find(issue => issue.number === approved.issue.number) || { ...approved.issue, body: '' }, job: approved }
     : selectIssueForJobs(discovered, store.list(), choose);
 
@@ -254,6 +294,10 @@ async function run(argv, dependencies = {}) {
   try {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
+    if (job && job.terminalState === 'merged' && job.merge && !job.merge.issueClosedAt) {
+      await reconcileImplementedIssue(project, job, candidate.number, dependencies, store);
+      return { issue: candidate, workspace: null, result: null, outcome: { status: 'merged', terminal: true }, job };
+    }
     if (job && job.terminalState === 'ready_for_human_merge' && project.autoMerge) {
       phase = 'merge';
       if (!job.pr || !job.delivery || !job.delivery.commit || !mergeEvidenceIsCurrent(job)) {
@@ -262,7 +306,13 @@ async function run(argv, dependencies = {}) {
         return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true }, job };
       }
       const readPullRequest = dependencies.observePullRequest || observePullRequest;
-      const currentPr = await readPullRequest(project, job.pr.number, { execFile: dependencies.execFile });
+      let currentPr;
+      try {
+        currentPr = await readPullRequest(project, job.pr.number, { execFile: dependencies.execFile });
+      } catch (error) {
+        const outcome = retryMerge(job, error, store, projectName, candidate, write, { bounded: false });
+        return { issue: candidate, workspace: null, result: null, outcome, job };
+      }
       const exactCurrentPr = currentPr.number === job.pr.number
         && currentPr.baseRefName === project.baseBranch && currentPr.headRefName === job.branch
         && currentPr.headRefOid === job.delivery.commit;
@@ -272,15 +322,7 @@ async function run(argv, dependencies = {}) {
       if (exactCurrentPr && currentPr.state === 'MERGED' && currentPr.mergeCommit) {
         recordMerge(job, { prNumber: job.pr.number, headCommit: job.delivery.commit, mergeCommit: currentPr.mergeCommit }, store.now);
         store.save(job);
-        if (project.baseBranch !== 'main') {
-          try {
-            const closeIssue = dependencies.closeImplementedIssue || closeImplementedIssue;
-            await closeIssue(project, candidate.number, { execFile: dependencies.execFile });
-          } catch (error) {
-            recordFailure(job, 'issue-close', error, store.now);
-            store.save(job);
-          }
-        }
+        await reconcileImplementedIssue(project, job, candidate.number, dependencies, store);
         return { issue: candidate, workspace: null, result: null, outcome: { status: 'merged', terminal: true }, job };
       }
       if (!exactCurrentPr || currentPr.state !== 'OPEN') {
@@ -291,14 +333,33 @@ async function run(argv, dependencies = {}) {
       // Refresh required CI immediately before the write.  Persisting the
       // fresh observation prevents a prior green result from being reused.
       const observeCi = dependencies.observePullRequestCi || observePullRequestCi;
-      const ci = await observeCi(project, { number: job.pr.number, commit: job.delivery.commit }, { execFile: dependencies.execFile });
+      let ci;
+      try {
+        ci = await observeCi(project, { number: job.pr.number, commit: job.delivery.commit }, { execFile: dependencies.execFile });
+      } catch (error) {
+        const outcome = retryMerge(job, error, store, projectName, candidate, write, { bounded: false });
+        return { issue: candidate, workspace: null, result: null, outcome, job };
+      }
       if (ci.prNumber !== undefined && ci.prNumber !== job.pr.number || ci.headCommit !== undefined && ci.headCommit !== job.delivery.commit) {
         blockMerge(job, 'Automatic merge refused: final CI observation did not match the delivered pull request head.', store.now);
         store.save(job);
         return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true }, job };
       }
+      if (ci.state === 'red') {
+        recordCiState(job, ci);
+        blockMerge(job, 'Automatic merge refused: required CI is not currently successful for the independently reviewed delivered commit.', store.now);
+        store.save(job);
+        return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true }, job };
+      }
+      // Pending or unrecognised observations are inconclusive, not evidence
+      // that the persisted exact-SHA green result ceased to be true. Keep the
+      // approval retryable and do not overwrite that durable evidence.
+      if (ci.state !== 'green') {
+        const outcome = retryMerge(job, new Error('Required CI is pending or unavailable.'), store, projectName, candidate, write, { bounded: false });
+        return { issue: candidate, workspace: null, result: null, outcome, job };
+      }
       recordCiState(job, ci);
-      if (ci.state !== 'green' || !mergeEvidenceIsCurrent(job)) {
+      if (!mergeEvidenceIsCurrent(job)) {
         blockMerge(job, 'Automatic merge refused: required CI is not currently successful for the independently reviewed delivered commit.', store.now);
         store.save(job);
         return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true }, job };
@@ -309,22 +370,12 @@ async function run(argv, dependencies = {}) {
         merged = await merge(project, { number: job.pr.number, commit: job.delivery.commit }, { execFile: dependencies.execFile });
       } catch (error) {
         // Keep the durable approval intact for a later, fully rechecked retry.
-        recordFailure(job, 'merge', error, store.now);
-        store.save(job);
-        write(`Autopilot: project ${projectName}; issue #${candidate.number}; merge retry pending.`);
-        return { issue: candidate, workspace: null, result: null, outcome: { status: 'merge_retry' }, job };
+        const outcome = retryMerge(job, error, store, projectName, candidate, write);
+        return { issue: candidate, workspace: null, result: null, outcome, job };
       }
       recordMerge(job, { prNumber: job.pr.number, headCommit: job.delivery.commit, mergeCommit: merged.mergeCommit }, store.now);
       store.save(job);
-      if (project.baseBranch !== 'main') {
-        try {
-          const closeIssue = dependencies.closeImplementedIssue || closeImplementedIssue;
-          await closeIssue(project, candidate.number, { execFile: dependencies.execFile });
-        } catch (error) {
-          recordFailure(job, 'issue-close', error, store.now);
-          store.save(job);
-        }
-      }
+      await reconcileImplementedIssue(project, job, candidate.number, dependencies, store);
       write(`Autopilot: project ${projectName}; issue #${candidate.number}; merged PR #${job.pr.number} as ${merged.mergeCommit}.`);
       return { issue: candidate, workspace: null, result: null, outcome: { status: 'merged', terminal: true }, job };
     }

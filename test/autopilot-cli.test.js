@@ -1962,6 +1962,123 @@ test('autoMerge rechecks an approved exact-SHA PR and merges it exactly once wit
   assert.equal(merges, 1);
 });
 
+function approvedMergeJob(store, issueNumber = 91) {
+  const issue = { number: issueNumber, title: 'Approved merge' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: `ralph/issue-${issueNumber}-approved-merge`, worktreePath: null, now: store.now });
+  job.delivery = { branch: job.branch, commit: 'abc123', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  job.verification = verifiedEvidence('abc123');
+  recordReview(job, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123', policy: 'always', attempt: beginReviewAttempt(job, store.now) }, store.now);
+  job.ci = { state: 'green', details: 'CI passed', prNumber: 99, headCommit: 'abc123', runs: [] };
+  job.status = 'ready_for_human_merge'; job.terminal = true; job.terminalState = 'ready_for_human_merge';
+  store.save(job);
+  return job;
+}
+
+test('autoMerge false leaves an approved job ready for human merge and pending CI preserves its green checkpoint', async () => {
+  const store = temporaryStore();
+  const job = approvedMergeJob(store);
+  let merges = 0;
+  const base = {
+    discoverReadyIssues: async () => [],
+    observePullRequest: async () => ({ number: 99, state: 'OPEN', headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'ralph-dev' }),
+    observePullRequestCi: async () => ({ state: 'pending', prNumber: 99, headCommit: 'abc123' }),
+    mergePullRequest: async () => { merges += 1; return { mergeCommit: 'merge123' }; },
+  };
+  assert.equal(await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    ...base, loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: false, baseBranch: 'ralph-dev' }),
+  })), null);
+  assert.equal(merges, 0);
+  assert.equal(createJobStore(store.directory).load(91).terminalState, 'ready_for_human_merge');
+
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    ...base, loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'ralph-dev' }),
+  }));
+  assert.equal(result.outcome.status, 'merge_retry');
+  const saved = createJobStore(store.directory).load(91);
+  assert.equal(saved.ci.state, 'green');
+  assert.equal(saved.terminalState, 'ready_for_human_merge');
+  assert.equal(merges, 0);
+});
+
+test('autoMerge bounds failures and retries issue closure after a recorded merge', async () => {
+  const store = temporaryStore();
+  const job = approvedMergeJob(store, 92);
+  let closeAttempts = 0;
+  const dependencies = enabledDependencies(store, {
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'ralph-dev' }),
+    discoverReadyIssues: async () => [],
+    observePullRequest: async () => ({ number: 99, state: 'OPEN', headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'ralph-dev' }),
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123', runs: [] }),
+    mergePullRequest: async () => ({ mergeCommit: 'merge123' }),
+    closeImplementedIssue: async () => { closeAttempts += 1; if (closeAttempts === 1) throw new Error('temporary close failure'); },
+  });
+  await runAutopilot(['--project', 'demo'], dependencies);
+  let saved = createJobStore(store.directory).load(92);
+  assert.equal(saved.terminalState, 'merged');
+  assert.equal(saved.merge.issueClosedAt, undefined);
+  await runAutopilot(['--project', 'demo'], dependencies);
+  saved = createJobStore(store.directory).load(92);
+  assert.equal(closeAttempts, 2);
+  assert.ok(saved.merge.issueClosedAt);
+  assert.equal(saved.terminalState, 'merged');
+});
+
+test('autoMerge blocks an irreconcilable merge rejection instead of retrying forever', async () => {
+  const store = temporaryStore();
+  const job = approvedMergeJob(store, 93);
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'ralph-dev' }), discoverReadyIssues: async () => [],
+    observePullRequest: async () => ({ number: 99, state: 'OPEN', headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'ralph-dev' }),
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123', runs: [] }),
+    mergePullRequest: async () => { throw new Error('GitHub pull request merge failed: HTTP 409 conflict'); },
+  }));
+  assert.equal(result.outcome.status, 'merge_blocked');
+  assert.equal(createJobStore(store.directory).load(93).terminalState, 'merge_blocked');
+});
+
+test('autoMerge never writes for stale evidence or a changed or closed pull request', async () => {
+  const cases = [
+    ['stale verification', job => { job.verification.commit = 'old'; }],
+    ['review findings', job => { job.review.findings = [{ summary: 'must fix', file: null, line: null, severity: null }]; job.review.verdict = 'NEEDS_CHANGES'; }],
+    ['CI for another SHA', job => { job.ci.headCommit = 'other'; }],
+    ['changed head', null, () => ({ number: 99, state: 'OPEN', headRefName: 'ralph/other', headRefOid: 'other', baseRefName: 'ralph-dev' })],
+    ['changed base', null, job => ({ number: 99, state: 'OPEN', headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'main' })],
+    ['closed PR', null, job => ({ number: 99, state: 'CLOSED', headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'ralph-dev' })],
+  ];
+  for (const [name, mutate, observation] of cases) {
+    const store = temporaryStore();
+    const job = approvedMergeJob(store, 100 + cases.indexOf(cases.find(value => value[0] === name)));
+    if (mutate) { mutate(job); store.save(job); }
+    let merges = 0;
+    const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+      loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'ralph-dev' }), discoverReadyIssues: async () => [],
+      observePullRequest: async () => observation ? observation(job) : ({ number: 99, state: 'OPEN', headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'ralph-dev' }),
+      observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123', runs: [] }),
+      mergePullRequest: async () => { merges += 1; return { mergeCommit: 'never' }; },
+    }));
+    assert.equal(result.outcome.status, 'merge_blocked', name);
+    assert.equal(merges, 0, name);
+  }
+});
+
+test('autoMerge retries a transient merge failure and merges once after rechecking', async () => {
+  const store = temporaryStore();
+  const job = approvedMergeJob(store, 110);
+  let attempts = 0;
+  const dependencies = enabledDependencies(store, {
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'ralph-dev' }), discoverReadyIssues: async () => [],
+    observePullRequest: async () => ({ number: 99, state: 'OPEN', headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'ralph-dev' }),
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'abc123', runs: [] }),
+    mergePullRequest: async () => { attempts += 1; if (attempts === 1) throw new Error('HTTP 503 unavailable'); return { mergeCommit: 'merge123' }; },
+    closeImplementedIssue: async () => {},
+  });
+  assert.equal((await runAutopilot(['--project', 'demo'], dependencies)).outcome.status, 'merge_retry');
+  assert.equal((await runAutopilot(['--project', 'demo'], dependencies)).outcome.status, 'merged');
+  assert.equal(attempts, 2);
+  assert.equal(createJobStore(store.directory).load(110).terminalState, 'merged');
+});
+
 test('cleans only the recorded workspace of terminal jobs and leaves live or unfinished work alone', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-cli-state-'));
   temporaryDirectories.add(directory);

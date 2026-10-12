@@ -29,6 +29,6 @@
     "verification": "npm test && git diff --check",
     "ciWorkflow": "CI",
     "reviewPolicy": "always",
-    "autoMerge": true
+    "autoMerge": false
   }
 }
