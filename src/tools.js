@@ -3,6 +3,8 @@ const http = require('node:http');
 
 const store = require('./store');
 const { createRalphTaskService } = require('./ralph-task-service');
+const { admitOne, ghIssues } = require('./r1-admission');
+const { submitR1Job } = require('./r1-scheduler');
 
 let defaultRalphTaskService;
 
@@ -215,6 +217,18 @@ const tools = [
     },
     annotations: { readOnlyHint: false },
   },
+  {
+    name: 'submit_r1_job',
+    description: 'Submit one eligible registered R1 GitHub issue through the durable R1 queue.',
+    inputSchema: { type: 'object', properties: { issueNumber: { type: 'integer', minimum: 1 } }, required: ['issueNumber'], additionalProperties: false },
+    annotations: { readOnlyHint: false },
+  },
+  {
+    name: 'get_r1_job',
+    description: 'Retrieve durable R1 phases and evidence by job ID.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', minLength: 1 } }, required: ['id'], additionalProperties: false },
+    annotations: { readOnlyHint: true },
+  },
 ];
 
 function daemonError(response) {
@@ -296,6 +310,26 @@ async function callTool(params, options = {}) {
     } catch (error) {
       return toolFailure(error.message);
     }
+  }
+
+  if (name === 'get_r1_job') {
+    const job = store.readR1JobById(args.id);
+    return job ? toolResult(job) : toolFailure('R1 job not found.');
+  }
+
+  if (name === 'submit_r1_job') {
+    try {
+      const project = (store.config.r1Projects || []).find(candidate => candidate?.id === 'ralph');
+      if (!project) throw new Error('No owner-registered R1 project named ralph.');
+      const issues = await ghIssues(project.repository);
+      const target = issues.find(issue => issue?.number === args.issueNumber);
+      if (!target) throw new Error('GitHub issue was not found.');
+      // Keep dependency state available while making this explicit manual call
+      // incapable of silently selecting a different backlog issue.
+      const scopedIssues = issues.map(issue => issue?.number === args.issueNumber ? issue : { ...issue, labels: [] });
+      const result = await admitOne({ project, issues: scopedIssues, submitR1Job });
+      return result.admitted ? toolResult(result.admitted) : toolFailure(result.report.find(x => x.issue === target)?.reason || 'R1 issue was not admitted.');
+    } catch (error) { return toolFailure(error.message); }
   }
 
   return toolFailure(`Unknown tool: ${name}.`);

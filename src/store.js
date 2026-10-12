@@ -23,6 +23,7 @@ const paths = {
   taskRuns: path.join(root, 'state', 'task-runs'),
   r1Jobs: path.join(root, 'state', 'r1-jobs'),
   r1Claims: path.join(root, 'state', 'r1-claims'),
+  r1Locks: path.join(root, 'state', 'r1-locks'),
   pending: path.join(root, 'state', 'tasks', 'pending'),
   running: path.join(root, 'state', 'tasks', 'running'),
   done: path.join(root, 'state', 'tasks', 'done'),
@@ -78,7 +79,7 @@ function loadConfig() {
 const config = loadConfig();
 
 function ensureDirs() {
-  for (const directory of [paths.pending, paths.running, paths.done, paths.taskRuns, paths.r1Jobs, paths.r1Claims, paths.results, paths.logs]) {
+  for (const directory of [paths.pending, paths.running, paths.done, paths.taskRuns, paths.r1Jobs, paths.r1Claims, paths.r1Locks, paths.results, paths.logs]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 }
@@ -107,6 +108,11 @@ function readR1Job(project, issueNumber) {
 function writeR1Job(job) {
   if (!job || typeof job !== 'object') throw new Error('R1 job is required.');
   writeJsonAtomic(r1JobPath(job.project, job.issueNumber), job);
+  // Completion is the sole normal release point for the project-wide pipeline
+  // lock.  Per-issue claims deliberately remain as delivery idempotency data.
+  if (['delivered', 'review_completed', 'completed', 'cancelled', 'failed'].includes(job.status)) {
+    releaseR1ProjectClaim(job.project);
+  }
 }
 
 function listR1Jobs() {
@@ -146,6 +152,43 @@ function readR1Claim(project, issueNumber) {
     if (error.code === 'ENOENT') return null;
     throw error;
   }
+}
+
+// A project lock protects the "one active R1 pipeline" invariant across timer
+// ticks and manual MCP submissions.  It is intentionally separate from the
+// per-issue claim, which remains as the delivered-work idempotency record.
+function r1LockPath(project) {
+  if (typeof project !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(project)) throw new Error('A repository owner/name is required.');
+  return path.join(paths.r1Locks, `${crypto.createHash('sha256').update(project.toLowerCase()).digest('hex')}.lock`);
+}
+
+function claimR1Project(project, lock) {
+  ensureDirs();
+  let descriptor;
+  try {
+    descriptor = fs.openSync(r1LockPath(project), 'wx');
+    fs.writeFileSync(descriptor, `${JSON.stringify(lock)}\n`, 'utf8');
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST') return false;
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function readR1ProjectClaim(project) {
+  try { return JSON.parse(fs.readFileSync(r1LockPath(project), 'utf8')); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function releaseR1ProjectClaim(project, id) {
+  const lock = readR1ProjectClaim(project);
+  if (!lock || (id && lock.id !== id)) return false;
+  fs.unlinkSync(r1LockPath(project));
+  return true;
 }
 
 function stageDir(stage) {
@@ -529,6 +572,9 @@ module.exports = {
   readR1JobById,
   claimR1Issue,
   readR1Claim,
+  claimR1Project,
+  readR1ProjectClaim,
+  releaseR1ProjectClaim,
   listTasks,
   writeResult,
   appendLogLine,

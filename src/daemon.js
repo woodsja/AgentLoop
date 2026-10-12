@@ -96,6 +96,26 @@ function recordEvent(type, data) {
   }
 }
 
+// R1 admission is only a queue adapter; ordinary task completion is not review
+// approval.  Preserve the verification result as evidence and leave successful
+// work in reviewing until the R1 review path marks it terminal.
+function recordR1TaskOutcome(task, result) {
+  if (!task?.r1JobId) return;
+  const job = store.readR1JobById(task.r1JobId);
+  if (!job) return;
+  const failed = result.status === 'failed' || result.status === 'cancelled';
+  store.writeR1Job({
+    ...job,
+    status: failed ? 'failed' : 'reviewing',
+    taskId: task.id,
+    error: failed ? (result.reason || result.summary) : undefined,
+    phases: [...(Array.isArray(job.phases) ? job.phases : []), {
+      name: 'implementation', status: failed ? 'failed' : 'passed', at: result.finishedAt,
+      evidence: { taskId: task.id, resultStatus: result.status, summary: result.summary },
+    }],
+  });
+}
+
 function streamLines(stream, onLine) {
   let buffered = '';
   stream.setEncoding('utf8');
@@ -630,6 +650,7 @@ function completeTask(task, details) {
 
   try {
     store.writeResult(result);
+    recordR1TaskOutcome(task, result);
     store.writeTask(completedTask, 'running');
     store.moveTask(task.id, 'running', 'done');
     if (status === 'cancelled') {
@@ -2616,6 +2637,7 @@ function recoverRunningTasks() {
 
     try {
       store.writeResult(result);
+      recordR1TaskOutcome(task, result);
       store.writeTask(recovered, 'running');
       store.moveTask(task.id, 'running', 'done');
       recordEvent(isLoop ? 'loop_ended' : 'fail', {

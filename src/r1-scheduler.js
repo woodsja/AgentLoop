@@ -6,6 +6,22 @@ const path = require('node:path');
 const { admitOne, ghIssues } = require('./r1-admission');
 const store = require('./store');
 
+// The durable daemon queue is the existing execution path.  Keeping this tiny
+// adapter here makes a direct one-shot invocation useful without creating a
+// second scheduler or worker framework.
+function submitR1Job(request) {
+  const task = store.enqueueTask({
+    title: `R1 #${request.issue.number}: ${request.issue.title || ''}`,
+    prompt: `Implement GitHub issue #${request.issue.number} for ${request.project.repository}. Preserve reviewPolicy always and autoMerge false.`,
+    projectPath: request.project.worktree,
+    source: 'r1-admission',
+    r1JobId: request.id,
+    reviewPolicy: 'always',
+    autoMerge: false,
+  });
+  return { id: request.id, taskId: task.id };
+}
+
 function argument(name) {
   const index = process.argv.indexOf(name);
   return index < 0 ? null : process.argv[index + 1] || null;
@@ -22,8 +38,7 @@ async function main(options = {}) {
     ? JSON.parse(fs.readFileSync(path.resolve(issuesFile), 'utf8'))
     : await (options.discoverIssues || ghIssues)(project.repository));
   const dryRun = options.dryRun ?? process.argv.includes('--dry-run');
-  const submitR1Job = options.submitR1Job;
-  const result = await admitOne({ project, issues, dryRun, submitR1Job, storeImpl: options.storeImpl });
+  const result = await admitOne({ project, issues, dryRun, submitR1Job: options.submitR1Job || submitR1Job, storeImpl: options.storeImpl });
   return result;
 }
 
@@ -34,4 +49,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main };
+module.exports = { main, submitR1Job };

@@ -180,9 +180,10 @@ report. It uses only an owner-installed `r1Projects` configuration entry for
 the command cannot register a repository or select a worktree itself. Candidates
 are ordered by issue number, and the report records every skip reason.
 
-No timer is installed or enabled by this change. After owner review, a systemd
-oneshot service may invoke the command with the registered project and an R1
-submit adapter; first run the dry-run, then authorize the timer separately.
+No timer is installed or enabled by this change. The one-shot command submits
+through the existing durable task queue; first run the dry-run, then authorize
+a systemd oneshot service separately. The MCP `submit_r1_job` path uses the
+same admission claim and `get_r1_job` retrieves its phases and evidence by ID.
 R1 admission always requests review policy `always` and records `autoMerge:false`.
 
 ## Supported platforms
