@@ -59,6 +59,7 @@ function evidence(job) {
     review: review(job.review),
     reviewAttempts: job.reviewAttempts,
     reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: safeText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && safeText(entry.diagnostics) })),
+    deployment: job.deployment && { ...job.deployment, error: job.deployment.error && safeText(job.deployment.error) },
     diagnostics: (job.failures || []).map(failure => ({ phase: failure.phase, at: failure.at, message: safeText(failure.message) })),
   };
 }
@@ -74,6 +75,7 @@ function createR1Jobs(store, options = {}) {
   const nextAdvance = new Map();
   let nextAdmission = 0;
   let admitting = null;
+  let deploymentRecoveryChecked = false;
   const active = new Map();
   const children = new Set();
   let closing = false;
@@ -134,6 +136,20 @@ function createR1Jobs(store, options = {}) {
     store.writeResult({ id: task.id, status: task.status, project: task.project, finishedAt: task.finishedAt,
       ...(task.failure ? { failure: task.failure } : {}), ...(task.cleanup ? { cleanup: task.cleanup } : {}), evidence: evidence(job) });
     store.moveTask(task.id, 'running', 'done');
+    // This is deliberately after the queue result and cleanup have both been
+    // durably written.  The oneshot independently re-reads the R1 checkpoint,
+    // so losing this best-effort start is recoverable on the next completion
+    // or an operator-started Ralph deploy service.
+    if (task.status === 'merged' && task.project === 'ralph' && approvedMerge(job)) {
+      const start = options.execFile || execFile;
+      start('systemctl', ['--user', 'start', 'ralph-deploy.service'], { encoding: 'utf8', shell: false }, error => {
+        task.deploymentLaunch = error
+          ? { status: 'failed', at: now(), error: safeText(error.message) }
+          : { status: 'started', at: now() };
+        try { store.writeTask(task, 'done'); } catch { console.error(`Ralph deployment launch diagnostic could not be persisted for ${task.id}.`); }
+        if (error) console.error(`Ralph deployment launch failed for ${task.id}: ${safeText(error.message)}`);
+      });
+    }
   }
 
   function command(file, args, cwd) {
@@ -308,6 +324,22 @@ function createR1Jobs(store, options = {}) {
     if (closing || admitting || Date.now() < nextAdmission) return admitting;
     nextAdmission = Date.now() + admitIntervalMs;
     admitting = (async () => {
+      // One recovery scan, not a deployment poller.  A daemon crash after the
+      // durable MERGED+cleanup result but before systemd accepted the launch
+      // must not strand that deployment forever.
+      if (!deploymentRecoveryChecked) {
+        deploymentRecoveryChecked = true;
+        const completed = typeof store.listTasks === 'function' ? store.listTasks('done') : [];
+        const pendingDeploy = completed.some(task => task.workflow === 'r1' && task.project === 'ralph'
+          && task.status === 'merged' && Array.isArray(task.cleanup) && approvedMerge(task.r1)
+          && (!task.r1.deployment || ['pending', 'deploying'].includes(task.r1.deployment.status)));
+        if (pendingDeploy) {
+          const start = options.execFile || execFile;
+          start('systemctl', ['--user', 'start', 'ralph-deploy.service'], { encoding: 'utf8', shell: false }, error => {
+            if (error) console.error(`Ralph deployment recovery launch failed: ${safeText(error.message)}`);
+          });
+        }
+      }
       if (['pending', 'running'].some(stage => store.listTasks(stage).some(task => task.workflow === 'r1'))) return null;
       for (const name of Object.keys(store.config.allowedProjects || {}).sort()) {
         let project;
@@ -345,6 +377,7 @@ function createR1Jobs(store, options = {}) {
         if (task.workflow !== 'r1') return null;
         return { id, status: task.status || stage, project: task.project,
           ...(task.failure ? { failure: task.failure } : {}),
+          ...(task.deploymentLaunch ? { deploymentLaunch: task.deploymentLaunch } : {}),
           phase: task.phase, phases: task.phases || [], evidence: evidence(task.r1),
         };
       } catch (error) {

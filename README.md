@@ -249,6 +249,18 @@ systemctl --user status agentloop.service
 
 The unit uses this Node executable path, the repository as `WorkingDirectory`, `Restart=on-failure`, and the invoking shell's `PATH` so subscription-authenticated `codex` or `claude` CLIs remain discoverable.
 
+### Ralph merge deployment bootstrap
+
+`ralph-deploy.service` is the only deployment unit. It has no timer: a completed, cleaned-up Ralph `merged` R1 job starts it, and it re-reads the durable exact-SHA merge/review/verification checkpoint. The deployer accepts only the configured `woodsja/AgentLoop` `ralph-dev` merge, requires a clean canonical checkout and remote ancestry, tests a detached candidate with `npm test` and `git diff --check`, then fast-forwards and restarts only `agentloop.service`. It records the previous healthy SHA, health evidence from the local `/api/state` endpoint, and a failed/rolled-back outcome when necessary.
+
+The first release needs this one-time operator bootstrap (it installs no timer and does not restart the daemon):
+
+```bash
+npm run ralph:install-deployer
+```
+
+After that, approved Ralph merges launch the independent oneshot; interrupted launches are recoverable by starting `ralph-deploy.service`, which is idempotent once its target SHA is healthy.
+
 ## Supported platforms
 
 Windows is the primary path:

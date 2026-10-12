@@ -151,6 +151,9 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
     reviewCorrectiveCycles: 0,
     terminal: false,
     terminalState: null,
+    // Deployment is intentionally separate from the merge decision.  It is
+    // populated only by the Ralph deployer after the terminal merge record.
+    deployment: null,
     failures: [],
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -168,6 +171,13 @@ function validateJob(job, filePath) {
     && typeof value.merge.repo === 'string' && value.merge.repo.length > 0
     && typeof value.merge.mergedAt === 'string' && value.merge.mergedAt.length > 0
     && typeof value.merge.issueClosed === 'boolean');
+  const hasValidDeployment = value => value.deployment === undefined || value.deployment === null || (isPlainObject(value.deployment)
+    && ['pending', 'deploying', 'deployed', 'failed', 'rolled_back'].includes(value.deployment.status)
+    && typeof value.deployment.commit === 'string' && value.deployment.commit.length > 0
+    && (value.deployment.previousCommit === null || typeof value.deployment.previousCommit === 'string')
+    && typeof value.deployment.updatedAt === 'string' && value.deployment.updatedAt.length > 0
+    && (value.deployment.error === null || typeof value.deployment.error === 'string')
+    && (value.deployment.health === null || isPlainObject(value.deployment.health)));
   const hasValidCiRun = run => isPlainObject(run)
     && Number.isSafeInteger(run.databaseId) && run.databaseId > 0
     && typeof run.status === 'string' && run.status.length > 0
@@ -289,6 +299,7 @@ function validateJob(job, filePath) {
             : !hasValidDelivery(job) ? 'invalid delivery state'
             : !hasValidPullRequest(job) ? 'invalid pull request state'
               : !hasValidMerge(job) ? 'invalid merge state'
+              : !hasValidDeployment(job) ? 'invalid deployment state'
               : !hasValidCi(job) ? 'invalid CI state'
                 : job.verification != null && !isVerificationEvidence(job.verification) ? 'invalid deterministic verification state'
                 : !hasValidReview(job) ? 'invalid independent review state'
