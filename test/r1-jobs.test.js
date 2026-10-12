@@ -51,6 +51,9 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.equal(fs.existsSync(path.join(root, 'worker-release')), false, 'HTTP response precedes release of implementation');
     const get = async jobId => (await request(port, `/api/r1/jobs/${jobId}`)).value;
     await until(async () => (await get(id)).phase === 'implementation');
+    const liveTranscript = (await request(port, `/api/log/${id}?lines=200`)).value.lines;
+    assert.ok(liveTranscript.some(line => /R1 admitted and queued for issue #1/.test(line)));
+    assert.ok(liveTranscript.some(line => /R1 implementation started for issue #1/.test(line)));
     const second = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 2 })).value.id;
     await delay(1700);
     assert.equal((await get(second)).phase, 'queued');
@@ -70,6 +73,12 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.match(completed.evidence.commit, /^[a-f0-9]{40}$/);
     assert.equal(completed.evidence.reviewHistory[0].status, 'completed');
     for (const phase of ['queued', 'preparing', 'implementation', 'verification', 'delivering', 'ci', 'review', 'completed']) assert.ok(completed.phases.some(p => p.phase === phase), phase);
+    const transcript = (await request(port, `/api/log/${id}?lines=200`)).value.lines;
+    assert.ok(transcript.some(line => /deterministic verification passed/.test(line)));
+    assert.ok(transcript.some(line => /delivered head [a-f0-9]{12}/.test(line)));
+    assert.ok(transcript.some(line => /independent Claude review PASS/.test(line)));
+    assert.ok(transcript.some(line => /CI (pending|green)/.test(line)));
+    assert.ok(transcript.every(line => line.length <= 1000 && !/private|\/tmp\/r1-async-|Bearer\s|api[_-]?key/i.test(line)));
     // The generic job contract is unchanged: it reports R1 IDs compactly and
     // never accepts an R1-shaped submission.
     const generic = await request(port, `/api/jobs/${id}`);
@@ -84,6 +93,8 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.equal(failed.evidence.reviewHistory[0].status, 'failed');
     assert.match(failed.evidence.reviewHistory[0].diagnostics, /could not be completed/);
     assert.ok(!JSON.stringify(failed).includes('private'));
+    const failedTranscript = (await request(port, `/api/log/${third}?lines=200`)).value.lines;
+    assert.ok(failedTranscript.some(line => /independent Claude review failed: Independent review could not be completed/.test(line)));
     await halt(); port = await launch();
     assert.deepEqual(await get(id), completed);
     const before = fs.readFileSync(path.join(root, 'reviews'), 'utf8');

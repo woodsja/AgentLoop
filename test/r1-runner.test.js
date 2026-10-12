@@ -74,6 +74,11 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.equal(merged.job.evidence.review.verdict, 'PASS');
     assert.equal(merged.job.evidence.ci.state, 'green');
     assert.equal(merged.job.evidence.verification.passed, true);
+    const mergedTranscript = (await get(port, `/api/log/${merged.task.id}?lines=200`)).lines;
+    assert.ok(mergedTranscript.some(line => /R1 CI pending/.test(line)));
+    assert.ok(mergedTranscript.some(line => /R1 CI green/.test(line)));
+    assert.ok(mergedTranscript.some(line => /R1 independent Claude review PASS/.test(line)));
+    assert.ok(mergedTranscript.some(line => /terminal state MERGED/.test(line)));
     assert.deepEqual(lines(path.join(root, 'merges')), [{ number: 7, headCommit: merged.job.evidence.commit, issue: 7 }]);
     assert.deepEqual(lines(path.join(root, 'closures')), [7]);
     assert.ok(commands().some(c => c.join(' ') === 'gh api --method DELETE repos/example/repo/git/refs/heads/ralph/issue-7-issue-7'));
@@ -119,6 +124,9 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.deepEqual([recovered.task.id, recovered.job.status], [waiting.id, 'merged']);
     assert.equal(lines(path.join(root, 'workers')).filter(name => name === 'issue-11').length, 1);
     assert.equal(lines(path.join(root, 'merges')).filter(merge => merge.number === 11).length, 1);
+    const resumedTranscript = (await get(port, `/api/log/${recovered.task.id}?lines=200`)).lines;
+    const progress = resumedTranscript.filter(line => /R1 CI (pending|green|red)/.test(line)).map(line => line.replace(/^\[[^\]]+\]\s*/, ''));
+    assert.equal(new Set(progress).size, progress.length, 'CI polling and restart do not flood identical progress lines');
 
     // Repeated admission never duplicates a queued, running, or terminal issue.
     ready([7, 8, 9, 10, 11]);

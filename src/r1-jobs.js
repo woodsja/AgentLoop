@@ -12,6 +12,7 @@ const { managesWorktree, resolveProject } = require('./project-registry');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+)\b/g, '[redacted]')
     .replace(/(?:[A-Za-z]:\\|\/)(?:[^\s"']+[\\/])*[^\s"']+/g, '[path]').slice(0, limit);
 }
 
@@ -23,6 +24,7 @@ const CI_TIMEOUT_MS = 60 * 60 * 1000;
 const ADMIT_INTERVAL_MS = 60 * 1000;
 const MIN_SPECIFICATION_LENGTH = 40;
 const TEMPORARY_BRANCH = /^ralph\/issue-\d+-[A-Za-z0-9._-]+$/;
+const TRANSCRIPT_LIMIT = 900;
 
 // Projects that opted into autonomous merging are driven to exactly one of
 // merged, needs_specification, or failed. Every other project keeps the
@@ -78,14 +80,97 @@ function createR1Jobs(store, options = {}) {
   const children = new Set();
   let closing = false;
   const now = () => new Date().toISOString();
+  const transcriptLines = new Map();
+
+  // The dashboard transcript is deliberately only a compact rendering of
+  // durable R1 state.  It is not a worker-output capture: that could expose
+  // prompts or credentials and would turn a CI poll into log spam.
+  function transcript(task, key, message) {
+    if (typeof store.appendLogLine !== 'function') return;
+    const line = safeText(message, TRANSCRIPT_LIMIT).replace(/[\x00-\x1f\x7f]+/g, ' ').trim();
+    if (!line) return;
+    let seen = transcriptLines.get(task.id);
+    if (!seen) {
+      let existing = [];
+      try { if (typeof store.readLogLines === 'function') existing = store.readLogLines(task.id, 200); }
+      catch (error) { console.error(`R1 transcript read failed for ${task.id} (${key}): ${safeText(error.message, 200)}`); }
+      seen = new Set(existing.map(value => String(value).replace(/^\[[^\]]+\]\s*/, '')));
+      transcriptLines.set(task.id, seen);
+    }
+    const rendered = `R1 ${line}`;
+    if (seen.has(rendered)) return;
+    seen.add(rendered);
+    try { store.appendLogLine(task.id, `[${now()}] ${rendered}`); }
+    catch (error) { console.error(`R1 transcript append failed for ${task.id} (${key}): ${safeText(error.message, 200)}`); }
+  }
+
+  function phaseTranscript(task, phase) {
+    const issue = `issue #${task.issue}`;
+    const correction = task.r1 && (task.r1.reviewCorrection || task.r1.correction);
+    const correctionKind = task.r1 && task.r1.reviewCorrection ? 'review' : 'CI';
+    const messages = {
+      queued: `admitted and queued for ${issue}.`,
+      preparing: `preparing workspace for ${issue}.`,
+      implementation: correction ? `${correctionKind} correction started for ${issue}.` : `implementation started for ${issue}.`,
+      verification: `deterministic verification started for ${issue}.`,
+      delivery: `delivering verified work for ${issue}.`,
+      ci: `awaiting CI for ${issue}.`,
+      review: `independent Claude review started for ${issue}.`,
+      completed: `execution completed for ${issue}.`,
+      needs_specification: `execution stopped: NEEDS_SPECIFICATION for ${issue}.`,
+      failed: `execution stopped: FAILED for ${issue}.`,
+    };
+    if (messages[phase]) transcript(task, `phase:${phase}`, messages[phase]);
+  }
+
+  function jobTranscript(task, previous, job) {
+    const commit = job.delivery && job.delivery.commit;
+    const short = value => typeof value === 'string' ? value.slice(0, 12) : 'unknown head';
+    if (job.verification && (!previous.verification || previous.verification.passed !== job.verification.passed
+      || previous.verification.exitCode !== job.verification.exitCode || previous.verification.commit !== job.verification.commit)) {
+      const result = job.verification.passed ? 'passed' : 'failed';
+      const detail = job.verification.passed ? '' : `: ${safeText(job.verification.stderr || job.verification.stdout || 'no test output', 300)}`;
+      transcript(task, `verification:${job.verification.commit || 'local'}:${result}:${job.verification.exitCode}`, `deterministic verification ${result} (exit ${job.verification.exitCode})${detail}`);
+    }
+    if (commit && (!previous.delivery || previous.delivery.commit !== commit || previous.delivery.pushed !== job.delivery.pushed)) {
+      transcript(task, `delivery:${commit}`, `delivered head ${short(commit)}${job.delivery.pushed ? ' and pushed' : ''}.`);
+    }
+    if (job.pr && (!previous.pr || previous.pr.number !== job.pr.number)) {
+      transcript(task, `pr:${job.pr.number}:${commit || ''}`, `PR #${job.pr.number} recorded${commit ? ` for head ${short(commit)}` : ''}.`);
+    }
+    if (job.ci && (!previous.ci || previous.ci.state !== job.ci.state || previous.ci.headCommit !== job.ci.headCommit)) {
+      const detail = job.ci.state === 'red' ? `: ${safeText(job.ci.diagnostics || job.ci.details || 'no details', 300)}` : '';
+      transcript(task, `ci:${job.ci.headCommit || ''}:${job.ci.state}`, `CI ${job.ci.state} for ${short(job.ci.headCommit || commit)}${detail}`);
+    }
+    const review = job.reviewHistory && job.reviewHistory.at(-1);
+    const oldReview = previous.reviewHistory && previous.reviewHistory.at(-1);
+    if (review && (!oldReview || oldReview.number !== review.number || oldReview.status !== review.status || oldReview.verdict !== review.verdict)) {
+      if (review.status === 'running') transcript(task, `review:${review.number}:running`, `independent Claude review attempt ${review.number} started for ${short(review.commit)}.`);
+      else if (review.verdict === 'PASS') transcript(task, `review:${review.number}:PASS`, `independent Claude review PASS for ${short(review.commit)}.`);
+      else if (review.verdict === 'NEEDS_CHANGES') {
+        const findings = (review.findings || []).map(finding => safeText(finding.summary, 180)).filter(Boolean).join('; ');
+        transcript(task, `review:${review.number}:needs_changes`, `independent Claude review requested correction${findings ? `: ${findings}` : '.'}`);
+      } else transcript(task, `review:${review.number}:${review.status}`, `independent Claude review ${review.status}: ${safeText(review.diagnostics || 'no verdict recorded', 240)}`);
+    }
+    if (job.merge && (!previous.merge || previous.merge.commit !== job.merge.commit || previous.merge.issueClosed !== job.merge.issueClosed)) {
+      transcript(task, `merge:${job.merge.commit}:${job.merge.issueClosed}`, `merged PR #${job.merge.prNumber} at ${short(job.merge.commit)}${job.merge.issueClosed ? '; issue closed' : ''}.`);
+    }
+    if (job.terminalState && previous.terminalState !== job.terminalState) {
+      const terminal = job.terminalState === 'merged' ? 'MERGED' : job.terminalState === 'needs_specification' ? 'NEEDS_SPECIFICATION' : job.terminalState.toUpperCase();
+      const failure = terminal === 'FAILED' ? job.failures && job.failures.at(-1) : null;
+      transcript(task, `terminal:${job.terminalState}`, `terminal state ${terminal}${failure ? `: ${safeText(failure.message, 300)}` : '.'}`);
+    }
+  }
 
   function checkpoint(task, phase) {
+    const changed = phase !== task.phase;
     if (phase !== task.phase) {
       task.phases = [...(task.phases || []), { phase, at: now() }].slice(-50);
       task.phase = phase;
     }
     task.updatedAt = now();
     store.writeTask(task, 'running');
+    if (changed) phaseTranscript(task, phase);
   }
 
   function submit(body) {
@@ -103,12 +188,14 @@ function createR1Jobs(store, options = {}) {
       .find(([name, candidate]) => candidate === planned && (body.worktree === undefined || name === body.worktree));
     const managed = !named && body.worktree === undefined && managesWorktree(entry, planned);
     if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before R1 submission.');
-    return store.enqueueTask({
+    const task = store.enqueueTask({
       workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
       ...(named ? { worktree: named[0] } : {}), title: body.title || `R1 issue #${body.issue}`,
       phase: 'queued', status: 'queued', phases: [{ phase: 'queued', at: now() }], source: body.source || 'api',
       ...(autonomous(project) ? { autonomous: true } : {}),
     });
+    phaseTranscript(task, 'queued');
+    return task;
   }
 
   function trackedSpawn(...args) {
@@ -134,6 +221,9 @@ function createR1Jobs(store, options = {}) {
     store.writeResult({ id: task.id, status: task.status, project: task.project, finishedAt: task.finishedAt,
       ...(task.failure ? { failure: task.failure } : {}), ...(task.cleanup ? { cleanup: task.cleanup } : {}), evidence: evidence(job) });
     store.moveTask(task.id, 'running', 'done');
+    if (task.status === 'merged') transcript(task, 'finish:merged', `terminal state MERGED for issue #${task.issue}.`);
+    else if (task.status === 'needs_specification') transcript(task, 'finish:needs_specification', `terminal state NEEDS_SPECIFICATION for issue #${task.issue}.`);
+    else if (task.autonomous) transcript(task, 'finish:failed', `terminal state FAILED for issue #${task.issue}${task.failure ? `: ${safeText(task.failure, 300)}` : '.'}`);
   }
 
   function command(file, args, cwd) {
@@ -240,9 +330,11 @@ function createR1Jobs(store, options = {}) {
     const jobStore = { ...original,
       list: () => original.list().filter(job => job.issue.number === task.issue),
       save(job) {
+        const previous = task.r1 ? structuredClone(task.r1) : original.load(task.issue) || {};
         original.save(job);
         task.r1 = structuredClone(job);
         checkpoint(task, phaseOf(job));
+        jobTranscript(task, previous, job);
         return job;
       },
     };
@@ -259,7 +351,14 @@ function createR1Jobs(store, options = {}) {
             checkpoint(task, phase);
           },
         },
-        write: () => {},
+        write: line => {
+          // Only retain the small, public status summaries emitted by the
+          // orchestrator. Never mirror worker/model output into the dashboard.
+          const text = String(line || '');
+          if (/^Autopilot: project [^;]+; issue #\d+; status [a-z_]+(?:; autonomous execution stopped)?\.$/.test(text)) {
+            transcript(task, `status:${text}`, text.replace(/^Autopilot:\s*/, ''));
+          }
+        },
       });
       task.r1 = original.load(task.issue);
       if (!task.r1) task.failure = 'Issue is not ready and has no resumable R1 checkpoint.';
