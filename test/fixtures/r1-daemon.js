@@ -14,7 +14,7 @@ const reviewPullRequest = Object.assign(async context => {
   if (fs.existsSync(path.join(fixture.root, 'review-error'))) throw new Error('Fake reviewer failed: token=private');
   return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: context.headCommit, policy: 'always', findings: [] };
 }, { reviewer: 'claude:sonnet', model: 'sonnet' });
-require('../../src/daemon').start({ r1: { autopilotDependencies: {
+require('../../src/daemon').start({ r1: { ciPollMs: 50, autopilotDependencies: {
   loadProjectConfig: () => project,
   discoverReadyIssues: async () => [1, 2, 3, 4].map(number => ({ number, title: `Issue ${number}`, body: '## Acceptance criteria\n- Write the answer' })),
   findOpenIssuePullRequests: async () => [],

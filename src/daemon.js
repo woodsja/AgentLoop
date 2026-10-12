@@ -1695,6 +1695,7 @@ function fillSlots() {
   const running = store.listTasks('running');
   const r1 = running.find(task => task.workflow === 'r1');
   if (r1) { r1Jobs.advance(r1); return; }
+  r1Jobs.admit();
   const runningCount = running.length;
   const slots = Math.max(0, maxConcurrent - runningCount);
 
