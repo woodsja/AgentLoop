@@ -84,6 +84,8 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.equal(failed.evidence.reviewHistory[0].status, 'failed');
     assert.match(failed.evidence.reviewHistory[0].diagnostics, /could not be completed/);
     assert.ok(!JSON.stringify(failed).includes('private'));
+    const blockedLog = (await request(port, `/api/log/${third}`)).value.lines;
+    assert.equal(blockedLog.filter(line => /terminal outcome: blocked/.test(line)).length, 1, 'the transcript preserves the actual non-autonomous terminal status');
     await halt(); port = await launch();
     assert.deepEqual(await get(id), completed);
     const before = fs.readFileSync(path.join(root, 'reviews'), 'utf8');
@@ -122,13 +124,13 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
     // Logging is best effort: even a full log volume cannot reject an
     // otherwise authorized R1 submission.
     appendLogLine: () => { throw new Error('fixture log append failure'); },
-    writeTask: () => {},
+    writeTask: () => { throw new Error('fixture transcript checkpoint failure'); },
   };
   const project = { enabled: true, repo: 'example/repo', checkout, worktreeRoot: managed, baseBranch: 'main', worker: 'codex', reviewPolicy: 'always', verification: 'true' };
   let current = project;
   const jobs = createR1Jobs(store, { autopilotDependencies: { loadProjectConfig: () => current } });
 
-  assert.equal(jobs.submit({ project: 'demo', issue: 5 }).id, 't-0000abcd');
+  assert.equal(jobs.submit({ project: 'demo', issue: 5 }).id, 't-0000abcd', 'an accepted queue entry remains accepted if transcript metadata cannot be checkpointed');
   assert.equal(queued[0].worktree, undefined);
   assert.throws(() => jobs.submit({ project: 'demo', issue: 5, worktree: 'issue5' }), /explicitly authorized/);
   // A worker-writable project file cannot move the worktree outside the owner root.

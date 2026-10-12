@@ -144,7 +144,13 @@ function createR1Jobs(store, options = {}) {
     logTransition(task, 'queued', 'queued for admission.');
     // enqueueTask has already made the task durable. Persist the dedupe key
     // separately; an unavailable log file remains strictly best effort.
-    store.writeTask(task, 'pending');
+    try {
+      store.writeTask(task, 'pending');
+    } catch (error) {
+      // The queue entry is already durable; failure to persist transcript
+      // metadata must not turn an accepted submission into a failed one.
+      console.error(`R1 job ${task.id}: transcript checkpoint failed.`);
+    }
     return task;
   }
 
@@ -167,7 +173,7 @@ function createR1Jobs(store, options = {}) {
       task.status = approved ? 'passed' : 'blocked';
     }
     task.finishedAt = now();
-    const terminal = ['passed', 'merged', 'needs_specification', 'failed'].includes(task.status) ? task.status : 'failed';
+    const terminal = task.status;
     logTransition(task, `terminal:${terminal}`, `terminal outcome: ${terminal}.`);
     checkpoint(task, ['passed', 'merged'].includes(task.status) ? 'completed' : task.status);
     store.writeResult({ id: task.id, status: task.status, project: task.project, finishedAt: task.finishedAt,

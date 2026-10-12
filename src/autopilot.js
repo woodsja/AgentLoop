@@ -578,6 +578,15 @@ async function run(argv, dependencies = {}) {
       const lastAttempt = attempts[attempts.length - 1];
       if (outcome.deliverable && lastAttempt && lastAttempt.status === 'passed' && lastAttempt.verification) {
         recordVerification(job, result.task ? result.task.verification : task.verification, lastAttempt.verification);
+      } else if (lastAttempt && lastAttempt.status === 'failed' && lastAttempt.verification
+        && typeof lastAttempt.verification.passed === 'boolean'
+        && (typeof lastAttempt.verification.exitCode === 'number' || lastAttempt.verification.exitCode === null)
+        && typeof lastAttempt.verification.timedOut === 'boolean'
+        && typeof lastAttempt.verification.stdout === 'string'
+        && typeof lastAttempt.verification.stderr === 'string') {
+        // A complete failed verifier result is durable evidence too. This
+        // lets R1 report its fixed, sanitized verdict without copying output.
+        recordVerification(job, result.task ? result.task.verification : task.verification, lastAttempt.verification);
       }
       // `passed` is terminal to the scheduler.  Persisting it before the
       // delivery side effects would create a crash window in which a verified

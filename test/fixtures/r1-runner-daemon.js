@@ -7,6 +7,17 @@ const fixture = JSON.parse(fs.readFileSync(process.env.R1_FIXTURE, 'utf8'));
 const project = fixture.project;
 const file = name => path.join(fixture.root, name);
 const record = (name, value) => fs.appendFileSync(file(name), JSON.stringify(value) + '\n');
+// Let the integration test make the durable transcript unavailable without
+// changing any of the queue, verification, CI, review, or merge adapters.
+const store = require('../../src/store');
+const appendLogLine = store.appendLogLine;
+store.appendLogLine = (id, line) => {
+  if (fs.existsSync(file('throw-log-append'))) {
+    record('append-attempts', { id, line });
+    throw new Error('fixture log append failure');
+  }
+  return appendLogLine(id, line);
+};
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 const issueOf = branch => Number(/^ralph\/issue-(\d+)-/.exec(branch)[1]);
 const branchOf = number => git(project.checkout, 'for-each-ref', '--format=%(refname:short)', `refs/heads/ralph/issue-${number}-*`);
@@ -41,7 +52,7 @@ require('../../src/daemon').start({ r1: {
       if (issueOf(git(cwd, 'branch', '--show-current')) === 7) {
         while (!fs.existsSync(file('worker-release-7'))) await new Promise(resolve => setTimeout(resolve, 10));
       }
-      fs.writeFileSync(path.join(cwd, 'answer'), '42');
+      fs.writeFileSync(path.join(cwd, 'answer'), issueOf(git(cwd, 'branch', '--show-current')) === fixture.verificationFailure ? 'not 42' : '42');
       fs.writeFileSync(path.join(cwd, 'revision'), String(process.hrtime.bigint()));
       // This is intentionally hostile fixture output.  R1 transcript logging
       // must never copy it from a worker callback.

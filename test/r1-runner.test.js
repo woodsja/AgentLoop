@@ -34,7 +34,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     verification: `node -e "if(require('fs').readFileSync('answer','utf8')!=='42')process.exit(1)"` };
   const fixture = path.join(root, 'fixture.json');
   const adversarial = `token=credential-do-not-log path=${root}/private/prompt reasoning: hidden chain of thought ${'x'.repeat(1600)}`;
-  fs.writeFileSync(fixture, JSON.stringify({ root, project, rejected: 9, neverGreen: 10, gatedCi: 11, ciTimeoutMs: 6000, adversarial }));
+  fs.writeFileSync(fixture, JSON.stringify({ root, project, rejected: 9, neverGreen: 10, gatedCi: 11, verificationFailure: 12, ciTimeoutMs: 6000, adversarial }));
   const config = path.join(root, 'config.json');
   fs.writeFileSync(config, JSON.stringify({ dashboardPort: 0, allowedProjects: { demo: { root: checkout, worktreeRoot } } }));
   const spec = '## Acceptance criteria\n- Write the answer file containing 42 and keep tests green.';
@@ -90,6 +90,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.equal(merged.job.evidence.verification.passed, true);
     const terminalLog = await get(port, `/api/log/${merged.task.id}?lines=200`);
     assert.ok(terminalLog.lines.some(line => /terminal outcome: merged/.test(line)), 'terminal verdict is recorded');
+    assert.equal(terminalLog.lines.filter(line => /deterministic verification passed/.test(line)).length, 1, 'passing verification verdict is recorded');
     assert.equal(terminalLog.lines.filter(line => /implementation started/.test(line)).length, 1, 'resuming a persisted phase does not flood the transcript');
     assert.deepEqual(lines(path.join(root, 'merges')), [{ number: 7, headCommit: merged.job.evidence.commit, issue: 7 }]);
     assert.deepEqual(lines(path.join(root, 'closures')), [7]);
@@ -105,6 +106,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     ready([7, 8]);
     const unspecified = await outcome(8);
     assert.equal(unspecified.job.status, 'needs_specification');
+    assert.equal((await get(port, `/api/log/${unspecified.task.id}?lines=200`)).lines.filter(line => /terminal outcome: needs_specification/.test(line)).length, 1);
     assert.ok(!lines(path.join(root, 'workers')).includes('issue-8'));
     assert.ok(commands().some(c => c.join(' ') === 'gh issue edit 8 --repo example/repo --remove-label ready-for-agent --add-label ready-for-human'));
     assert.ok(commands().some(c => c[1] === 'issue' && c[2] === 'comment' && c[3] === '8' && /product specification/.test(c.at(-1))));
@@ -113,35 +115,70 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     ready([7, 8, 9]);
     const rejected = await outcome(9);
     assert.equal(rejected.job.status, 'failed');
+    assert.equal((await get(port, `/api/log/${rejected.task.id}?lines=200`)).lines.filter(line => /terminal outcome: failed/.test(line)).length, 1);
     assert.equal(lines(path.join(root, 'reviews')).filter(review => review.number === 9).length, 2);
     const closed = commands().find(c => c.slice(0, 5).join(' ') === 'gh pr close 9 --repo');
     assert.ok(closed && /outcome FAILED/.test(closed.at(-1)) && !/please review|approve/i.test(closed.at(-1)), 'PR closed with an outcome report, not a review request');
     assert.ok(commands().some(c => c.join(' ').includes('git/refs/heads/ralph/issue-9-issue-9')));
     assert.equal(lines(path.join(root, 'merges')).length, 1);
 
+    // FAILED when deterministic verification rejects the implementation.
+    ready([12]);
+    const verificationFailed = await outcome(12);
+    const verificationFailedLog = await get(port, `/api/log/${verificationFailed.task.id}?lines=200`);
+    assert.equal(verificationFailed.job.status, 'failed');
+    assert.equal(verificationFailedLog.lines.filter(line => /deterministic verification failed/.test(line)).length, 1);
+    assert.equal(verificationFailedLog.lines.filter(line => /terminal outcome: failed/.test(line)).length, 1);
+
     // FAILED when required CI never finishes within the bounded watch.
     ready([10]);
     const stalled = await outcome(10);
     assert.equal(stalled.job.status, 'failed');
     assert.match(stalled.task.failure, /Required CI did not reach a final result/);
+    assert.equal((await get(port, `/api/log/${stalled.task.id}?lines=200`)).lines.filter(line => /terminal outcome: failed/.test(line)).length, 1);
     assert.equal(lines(path.join(root, 'merges')).length, 1);
 
     // Crash while waiting for CI: the restarted daemon resumes the same job once.
     ready([11]);
     const [waiting] = await until(() => { const tasks = tasksFor(11); return tasks[0] && tasks[0].phase === 'ci' && tasks; }, '#11 waiting for CI');
-    const died = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await died;
+    // Resume the same persisted CI transition more than once before it is
+    // allowed to finish; neither daemon restart may replay transcript lines.
+    for (let restart = 0; restart < 2; restart += 1) {
+      const died = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await died;
+      await launch();
+      if (restart === 0) await until(() => { const tasks = tasksFor(11); return tasks[0] && tasks[0].phase === 'ci'; }, '#11 resumed CI');
+    }
     fs.writeFileSync(path.join(root, 'ci-release'), '');
-    await launch();
     const recovered = await outcome(11);
     assert.deepEqual([recovered.task.id, recovered.job.status], [waiting.id, 'merged']);
     assert.equal(lines(path.join(root, 'workers')).filter(name => name === 'issue-11').length, 1);
     assert.equal(lines(path.join(root, 'merges')).filter(merge => merge.number === 11).length, 1);
+    const recoveredLog = await get(port, `/api/log/${recovered.task.id}?lines=200`);
+    for (const event of ['queued for admission', 'admitted to the R1 runner', 'implementation started', 'deterministic verification passed', 'terminal outcome: merged']) {
+      assert.equal(recoveredLog.lines.filter(line => line.includes(event)).length, 1, `restart does not duplicate ${event}`);
+    }
+    assert.deepEqual(tasksFor(11)[0].r1LogEvents, ['queued', 'admitted', 'implementation', 'verification:1:passed', 'terminal:merged'], 'dedupe events survive the persisted task checkpoint');
+
+    // Transcript append is best effort at every R1 transition, including
+    // admitted, implementation, verification, and terminal completion.
+    fs.writeFileSync(path.join(root, 'throw-log-append'), '');
+    ready([13]);
+    const appendFailed = await outcome(13);
+    assert.equal(appendFailed.job.status, 'merged');
+    assert.equal(appendFailed.job.evidence.verification.passed, true);
+    assert.equal(appendFailed.job.evidence.ci.state, 'green');
+    assert.equal(appendFailed.job.evidence.review.verdict, 'PASS');
+    assert.equal(lines(path.join(root, 'merges')).filter(merge => merge.number === 13).length, 1);
+    const attempted = lines(path.join(root, 'append-attempts')).filter(entry => entry.id === appendFailed.task.id).map(entry => entry.line);
+    for (const event of ['queued for admission', 'admitted to the R1 runner', 'implementation started', 'deterministic verification passed', 'terminal outcome: merged']) {
+      assert.ok(attempted.some(line => line.includes(event)), `append failure was exercised for ${event}`);
+    }
 
     // Repeated admission never duplicates a queued, running, or terminal issue.
-    ready([7, 8, 9, 10, 11]);
+    ready([7, 8, 9, 10, 11, 12, 13]);
     await delay(800);
-    for (const number of [7, 8, 9, 10, 11]) assert.equal(tasksFor(number).length, 1, `#${number}`);
-    assert.equal(lines(path.join(root, 'merges')).length, 2);
+    for (const number of [7, 8, 9, 10, 11, 12, 13]) assert.equal(tasksFor(number).length, 1, `#${number}`);
+    assert.equal(lines(path.join(root, 'merges')).length, 3);
   } catch (error) { error.message += '\n' + output; throw error; }
   finally {
     if (child && child.exitCode === null) { const ended = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGTERM'); await ended; }
