@@ -233,6 +233,10 @@ async function run(argv, dependencies = {}) {
       markTerminal(job, 'ready_for_human_merge');
       return;
     }
+    // Every GitHub call below is merge-phase work, so a transient failure of
+    // the first observation is retried (boundedly) rather than treated as a
+    // review or worker failure.
+    phase = 'merge';
     if (!job.pr || !job.delivery || !job.delivery.commit || !matchingPass(job.review, job.delivery.commit)
       || !Array.isArray(job.review.findings) || job.review.findings.length !== 0
       || !job.review.reviewer.startsWith('claude:')) {

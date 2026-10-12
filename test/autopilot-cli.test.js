@@ -2175,6 +2175,54 @@ test('a structured permanent merge rejection is terminal, while a transient merg
   }
 });
 
+test('a transient first PR observation failure stays retryable and bounded on the approved and fresh-review paths', async () => {
+  const autoMergeProject = { ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always', verification: 'check', maxAttempts: 2 };
+  const outage = () => Object.assign(new Error('GitHub pull request observation failed: gh exited unsuccessfully: HTTP 502'), { code: 'AUTOPILOT_GITHUB_TRANSPORT', retryable: true });
+  for (const path of ['approved', 'fresh-review']) {
+    const store = temporaryStore();
+    let issue;
+    if (path === 'approved') issue = approvedMergeJob(store, 90);
+    else {
+      issue = { number: 91, title: 'Fresh review then merge', body: '' };
+      await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+        loadProjectConfig: () => autoMergeProject, discoverReadyIssues: async () => [issue], createRalphTaskService: passingRalph,
+      }));
+    }
+    const branch = createJobStore(store.directory).load(issue.number).branch;
+    let merges = 0; let reviews = 0; let workers = 0; let observations = 0;
+    const tick = failObservation => runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+      loadProjectConfig: () => autoMergeProject, discoverReadyIssues: async () => [issue], observePullRequestCi: greenCi,
+      createRalphTaskService: () => { workers += 1; return passingRalph(); },
+      reviewPullRequest: async context => { reviews += 1; return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: context.headCommit }; },
+      observePullRequest: async () => { observations += 1; if (failObservation) throw outage(); return openExpectedPr(branch); },
+      mergePullRequest: async () => { merges += 1; return { mergeCommit: `merge-${issue.number}` }; },
+      reconcileIssueClosure: async () => ({ number: issue.number, state: 'closed' }),
+    }));
+    const expectedReviews = path === 'approved' ? 0 : 1;
+    await assert.rejects(tick(true), /observation failed/);
+    let saved = createJobStore(store.directory).load(issue.number);
+    assert.deepEqual([saved.terminal, saved.status, merges, reviews, workers, saved.failures.at(-1).phase],
+      [false, 'awaiting_ci', 0, expectedReviews, 0, 'merge'], path);
+    assert.equal(saved.review.verdict, 'PASS', `${path}: the persisted PASS survives the outage`);
+    // The next tick merges with neither Ralph nor the reviewer re-run.
+    await tick(false);
+    saved = createJobStore(store.directory).load(issue.number);
+    assert.deepEqual([saved.terminalState, saved.merge.commit, merges, reviews, workers], ['merged', `merge-${issue.number}`, 1, expectedReviews, 0], path);
+  }
+  // Repeated observation failures are bounded rather than retried forever.
+  const store = temporaryStore(); const issue = approvedMergeJob(store, 92); let merges = 0;
+  const failing = () => runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => autoMergeProject, discoverReadyIssues: async () => [issue], observePullRequestCi: greenCi,
+    observePullRequest: async () => { throw outage(); },
+    mergePullRequest: async () => { merges += 1; return { mergeCommit: 'never' }; },
+  }));
+  await assert.rejects(failing(), /observation failed/);
+  await assert.rejects(failing(), /observation failed/);
+  const exhausted = createJobStore(store.directory).load(92);
+  assert.deepEqual([exhausted.terminalState, merges, exhausted.merge], ['ready_for_human', 0, null]);
+  assert.match(exhausted.failures.at(-1).message, /Merge retry limit reached/);
+});
+
 test('an unconfirmed merge response is re-observed and recovered before handing off', async () => {
   const store = temporaryStore(); const issue = approvedMergeJob(store, 86); let observations = 0; let closes = 0;
   const uncertain = new Error('merge response lost'); uncertain.code = 'AUTOPILOT_MERGE_UNCONFIRMED';
