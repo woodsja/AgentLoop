@@ -44,6 +44,9 @@ test('defaults target the finance-dashboard project and ralph-finance-autopilot 
   assert.equal(options.project, 'finance-dashboard');
   assert.equal(options.unitName, 'ralph-finance-autopilot');
   assert.equal(options.root, REPO_ROOT);
+  assert.equal(parseArguments(['--project', 'finance-dashboard']).unitName, 'ralph-finance-autopilot');
+  assert.equal(parseArguments(['--project', 'ralph']).unitName, 'ralph-ralph-autopilot');
+  assert.equal(parseArguments(['--project', 'ralph', '--unit', 'custom-unit']).unitName, 'custom-unit');
   assert.equal(parseArguments(['--root', '/home/woodsja/tools/ralph-autopilot', '--run-once']).runOnce, true);
   assert.throws(() => parseArguments(['--bogus']), /Usage:/);
   assert.throws(() => parseArguments(['--root']), /Usage:/);
