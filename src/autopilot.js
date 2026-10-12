@@ -246,28 +246,54 @@ async function run(argv, dependencies = {}) {
       handToHuman(job, 'merge', `GitHub PR identity changed or is ambiguous for PR #${job.pr.number}; expected ${job.branch} at ${job.delivery.commit} into ${expectedBase}.`, store.now);
       return;
     }
-    if (remote.state === 'MERGED') {
-      if (!remote.mergeCommit) {
+    const recoverMerged = remoteObservation => {
+      const recoveredMerge = remoteObservation.mergeCommit;
+      if (!recoveredMerge) {
         handToHuman(job, 'merge', `GitHub reports PR #${job.pr.number} merged without a merge commit SHA; refusing to infer success.`, store.now);
-        return;
+        return false;
       }
       if (job.merge && (job.merge.prNumber !== job.pr.number || job.merge.approvedHead !== job.delivery.commit
-        || job.merge.repo !== project.repo || job.merge.commit !== remote.mergeCommit)) {
+        || job.merge.repo !== project.repo || job.merge.commit !== recoveredMerge)) {
         handToHuman(job, 'merge', `Recorded merge evidence for PR #${job.pr.number} does not match GitHub's recovered merge.`, store.now);
-        return;
+        return false;
       }
       if (!job.merge) {
-        recordMerge(job, { prNumber: job.pr.number, approvedHead: job.delivery.commit, commit: remote.mergeCommit, repo: project.repo }, store.now);
+        recordMerge(job, { prNumber: job.pr.number, approvedHead: job.delivery.commit, commit: recoveredMerge, repo: project.repo }, store.now);
         store.save(job);
       }
+      return true;
+    };
+    if (remote.state === 'MERGED') {
+      if (!recoverMerged(remote)) return;
     } else if (remote.state === 'OPEN') {
       phase = 'merge';
       const merge = dependencies.mergePullRequest || mergePullRequest;
-      const result = await merge(project, { number: job.pr.number, headCommit: job.delivery.commit }, { execFile: dependencies.execFile });
-      if (!result || typeof result.mergeCommit !== 'string' || !result.mergeCommit) {
-        throw new Error(`GitHub merge for PR #${job.pr.number} returned no confirmed merge commit`);
+      let result;
+      try {
+        result = await merge(project, { number: job.pr.number, headCommit: job.delivery.commit }, { execFile: dependencies.execFile });
+      } catch (error) {
+        if (error && error.code === 'AUTOPILOT_MERGE_UNCONFIRMED') {
+          const observedAfterMerge = await observePr(project, job.pr.number, { execFile: dependencies.execFile });
+          if (observedAfterMerge && observedAfterMerge.number === job.pr.number
+            && observedAfterMerge.headRefName === job.branch && observedAfterMerge.headRefOid === job.delivery.commit
+            && observedAfterMerge.baseRefName === expectedBase && observedAfterMerge.state === 'MERGED'
+            && recoverMerged(observedAfterMerge)) {
+            result = null;
+          } else {
+            throw error;
+          }
+        } else {
+          throw error;
+        }
       }
-      recordMerge(job, { prNumber: job.pr.number, approvedHead: job.delivery.commit, commit: result.mergeCommit, repo: project.repo }, store.now);
+      if (job.terminal) return;
+      if (!result && job.merge) {
+        // The uncertain PUT was reconciled by a fresh MERGED observation.
+      } else if (!result || typeof result.mergeCommit !== 'string' || !result.mergeCommit) {
+        const error = new Error(`GitHub merge for PR #${job.pr.number} returned no confirmed merge commit`);
+        error.code = 'AUTOPILOT_MERGE_UNCONFIRMED';
+        throw error;
+      } else recordMerge(job, { prNumber: job.pr.number, approvedHead: job.delivery.commit, commit: result.mergeCommit, repo: project.repo }, store.now);
       // This is the intentional crash checkpoint: a later pass observes the
       // remote MERGED state and will not submit another merge request.
       store.save(job);
@@ -636,8 +662,14 @@ async function run(argv, dependencies = {}) {
       try {
         recordFailure(job, phase, error, store.now);
         if (job.ralph && job.ralph.status === 'running') job.ralph.status = 'error';
-        if (phase === 'merge' && /did not confirm|returned no confirmed merge commit/.test(errorMessage(error))) {
+        if (phase === 'merge' && error && (error.code === 'AUTOPILOT_MERGE_UNCONFIRMED' || error.code === 'AUTOPILOT_MERGE_REJECTED')) {
           handToHuman(job, 'merge', errorMessage(error), store.now);
+        } else if (phase === 'merge' && job.failures.filter(failure => failure.phase === 'merge').length >= 2) {
+          // A transport failure is retryable once because GitHub may not have
+          // received the request.  It is nevertheless bounded: a broken
+          // credential or permanently unavailable endpoint must not spin a
+          // scheduled job forever.
+          handToHuman(job, 'merge', `Merge retry limit reached: ${errorMessage(error)}`, store.now);
         } else if (phase === 'ci' || phase === 'merge') {
           // An observation failure (gh outage, mismatched head) says nothing
           // about the delivered work; keep polling and never restart Ralph.

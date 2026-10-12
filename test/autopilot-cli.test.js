@@ -2054,8 +2054,19 @@ test('autoMerge merges only the exact approved PR once and recovers a remote mer
   }));
   saved = createJobStore(recovered.directory).load(recoveredIssue.number);
   assert.equal(recoveryMerges, 0); assert.equal(recoveryCloses, 1); assert.equal(saved.merge.commit, 'actual-merge-sha');
-  await runAutopilot(['--project', 'demo'], enabledDependencies(recovered, { ...dependencies, discoverReadyIssues: async () => [recoveredIssue] }));
-  assert.equal(recoveryMerges, 0, 'terminal recovery must be a no-op on later ticks');
+  let secondTickMerges = 0; let secondTickCloses = 0; let secondTickReviews = 0;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(recovered, {
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [recoveredIssue],
+    observePullRequestCi: greenCi,
+    observePullRequest: async () => ({ ...openExpectedPr(`ralph/issue-${recoveredIssue.number}-merge-${recoveredIssue.number}`), state: 'MERGED', mergeCommit: 'actual-merge-sha' }),
+    mergePullRequest: async () => { secondTickMerges += 1; },
+    reconcileIssueClosure: async () => { secondTickCloses += 1; },
+    reviewPullRequest: async () => { secondTickReviews += 1; },
+  }));
+  assert.equal(secondTickMerges, 0, 'terminal recovery must never call merge on later ticks');
+  assert.equal(secondTickCloses, 0, 'terminal recovery must not reconcile twice');
+  assert.equal(secondTickReviews, 0, 'terminal recovery must not review twice');
 });
 
 test('autoMerge rejects a PASS record with findings even at the exact SHA', async () => {
@@ -2067,7 +2078,7 @@ test('autoMerge rejects a PASS record with findings even at the exact SHA', asyn
     load(number) {
       const job = store.load(number);
       job.review.findings = [{ summary: 'Still broken', file: null, line: null, severity: null }];
-      job.reviewAttempts = 2;
+      job.reviewAttempts = 1;
       return job;
     },
     // The fixture emulates an old permissive reader but writes a valid
@@ -2083,8 +2094,54 @@ test('autoMerge rejects a PASS record with findings even at the exact SHA', asyn
   await runAutopilot(['--project', 'demo'], enabledDependencies(unsafeStore, {
     loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always' }),
     discoverReadyIssues: async () => [issue], observePullRequestCi: greenCi,
+    observePullRequest: async () => openExpectedPr(`ralph/issue-${issue.number}-merge-${issue.number}`),
     mergePullRequest: async () => { merges += 1; },
+    reviewPullRequest: async () => ({ reviewer: 'claude:sonnet', verdict: 'PASS', commit: 'abc123', findings: [{ summary: 'Still broken' }] }),
   }));
   assert.equal(merges, 0);
   assert.equal(createJobStore(store.directory).load(issue.number).terminalState, 'ready_for_human');
+});
+
+test('a structured permanent merge rejection is terminal, while a transient merge error gets one bounded retry', async () => {
+  for (const [number, code, terminal] of [[84, 'AUTOPILOT_MERGE_REJECTED', true], [85, 'AUTOPILOT_GITHUB_TRANSPORT', false]]) {
+    const store = temporaryStore(); const issue = approvedMergeJob(store, number);
+    const error = new Error('structured merge failure'); error.code = code; error.retryable = !terminal;
+    await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+      loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always' }),
+      discoverReadyIssues: async () => [issue], observePullRequestCi: greenCi,
+      observePullRequest: async () => openExpectedPr(`ralph/issue-${issue.number}-merge-${issue.number}`),
+      mergePullRequest: async () => { throw error; },
+    })), /structured merge failure/);
+    const saved = createJobStore(store.directory).load(number);
+    assert.equal(saved.terminal, terminal);
+    assert.equal(saved.status, terminal ? 'ready_for_human' : 'awaiting_ci');
+    if (!terminal) {
+      await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+        loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always' }),
+        discoverReadyIssues: async () => [issue], observePullRequestCi: greenCi,
+        observePullRequest: async () => openExpectedPr(`ralph/issue-${issue.number}-merge-${issue.number}`),
+        mergePullRequest: async () => { throw error; },
+      })), /structured merge failure/);
+      const exhausted = createJobStore(store.directory).load(number);
+      assert.equal(exhausted.terminalState, 'ready_for_human');
+      assert.match(exhausted.failures.at(-1).message, /Merge retry limit reached/);
+    }
+  }
+});
+
+test('an unconfirmed merge response is re-observed and recovered before handing off', async () => {
+  const store = temporaryStore(); const issue = approvedMergeJob(store, 86); let observations = 0; let closes = 0;
+  const uncertain = new Error('merge response lost'); uncertain.code = 'AUTOPILOT_MERGE_UNCONFIRMED';
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [issue], observePullRequestCi: greenCi,
+    observePullRequest: async () => (++observations === 1
+      ? openExpectedPr(`ralph/issue-${issue.number}-merge-${issue.number}`)
+      : { ...openExpectedPr(`ralph/issue-${issue.number}-merge-${issue.number}`), state: 'MERGED', mergeCommit: 'recovered-after-uncertain-put' }),
+    mergePullRequest: async () => { throw uncertain; },
+    reconcileIssueClosure: async () => { closes += 1; },
+  }));
+  const saved = createJobStore(store.directory).load(issue.number);
+  assert.equal(observations, 2); assert.equal(closes, 1); assert.equal(saved.terminalState, 'merged');
+  assert.equal(saved.merge.commit, 'recovered-after-uncertain-put');
 });

@@ -12,7 +12,16 @@ function runGh(args, executeFile, operation = 'GitHub issue discovery', maxBuffe
     try {
       executeFile('gh', args, unattendedOptions({ encoding: 'utf8', maxBuffer, shell: false }), (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(`${operation} failed: gh exited unsuccessfully${stderr ? `: ${String(stderr).trim()}` : ''}`));
+          const failure = new Error(`${operation} failed: gh exited unsuccessfully${stderr ? `: ${String(stderr).trim()}` : ''}`);
+          // Keep the transport result structured for callers which need to
+          // decide whether an operation may safely be retried.
+          failure.code = 'AUTOPILOT_GITHUB_TRANSPORT';
+          failure.retryable = true;
+          // Adapters which expose an HTTP status (including test adapters)
+          // retain it without scraping the human-oriented gh stderr text.
+          if (Number.isInteger(error.statusCode)) failure.statusCode = error.statusCode;
+          else if (Number.isInteger(error.status)) failure.statusCode = error.status;
+          reject(failure);
           return;
         }
         resolve(String(stdout));
@@ -229,11 +238,25 @@ async function mergePullRequest(project, { number, headCommit }, { execFile: exe
   try {
     response = JSON.parse(await runGh(['api', '--method', 'PUT', `repos/${project.repo}/pulls/${number}/merge`, '-f', `sha=${headCommit}`], executeFile, 'GitHub pull request merge'));
   } catch (error) {
-    if (error.message.includes('GitHub pull request merge failed:')) throw error;
-    throw new Error(`GitHub pull request merge failed: gh returned malformed JSON: ${error.message}`);
+    // runGh errors retain their retryability.  A malformed successful response
+    // is not a transport retry: it is ambiguous and must be reconciled first.
+    if (error && error.code === 'AUTOPILOT_GITHUB_TRANSPORT') {
+      if (error.statusCode >= 400 && error.statusCode < 500) {
+        error.code = 'AUTOPILOT_MERGE_REJECTED';
+        error.retryable = false;
+      }
+      throw error;
+    }
+    const malformed = new Error(`GitHub pull request merge failed: gh returned malformed JSON: ${error.message}`);
+    malformed.code = 'AUTOPILOT_MERGE_UNCONFIRMED';
+    throw malformed;
   }
   if (!isPlainObject(response) || response.merged !== true || typeof response.sha !== 'string' || !response.sha) {
-    throw new Error('GitHub pull request merge failed: GitHub did not confirm a merge commit');
+    const rejected = new Error('GitHub pull request merge failed: GitHub did not confirm a merge commit');
+    // A completed API response which does not confirm a SHA is ambiguous, not
+    // a proof that no merge happened.  The runner re-observes before deciding.
+    rejected.code = 'AUTOPILOT_MERGE_UNCONFIRMED';
+    throw rejected;
   }
   return { mergeCommit: response.sha };
 }
