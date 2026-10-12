@@ -12,7 +12,22 @@ function runGh(args, executeFile, operation = 'GitHub issue discovery', maxBuffe
     try {
       executeFile('gh', args, unattendedOptions({ encoding: 'utf8', maxBuffer, shell: false }), (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(`${operation} failed: gh exited unsuccessfully${stderr ? `: ${String(stderr).trim()}` : ''}`));
+          const failure = new Error(`${operation} failed: gh exited unsuccessfully${stderr ? `: ${String(stderr).trim()}` : ''}`);
+          // Keep the transport result structured for callers which need to
+          // decide whether an operation may safely be retried.
+          failure.code = 'AUTOPILOT_GITHUB_TRANSPORT';
+          failure.retryable = true;
+          // Adapters which expose an HTTP status (including test adapters)
+          // retain it without scraping the human-oriented gh stderr text.
+          if (Number.isInteger(error.statusCode)) failure.statusCode = error.statusCode;
+          else if (Number.isInteger(error.status)) failure.statusCode = error.status;
+          else {
+            // Real `gh api` failures expose the HTTP status only in stderr,
+            // for example `gh: Head branch was modified. (HTTP 409)`.
+            const status = /\(HTTP (\d{3})\)/.exec(String(stderr || ''));
+            if (status) failure.statusCode = Number(status[1]);
+          }
+          reject(failure);
           return;
         }
         resolve(String(stdout));
@@ -190,6 +205,88 @@ async function observePullRequestCi(project, { number, commit }, { execFile: exe
   };
 }
 
+function normalizePullRequestObservation(value) {
+  if (!isPlainObject(value) || !Number.isSafeInteger(value.number) || value.number < 1
+    || typeof value.url !== 'string' || !value.url
+    || typeof value.state !== 'string' || !['OPEN', 'CLOSED', 'MERGED'].includes(value.state)
+    || typeof value.headRefName !== 'string' || !value.headRefName
+    || typeof value.headRefOid !== 'string' || !value.headRefOid
+    || typeof value.baseRefName !== 'string' || !value.baseRefName
+    || !(value.mergeCommit === null || (isPlainObject(value.mergeCommit) && typeof value.mergeCommit.oid === 'string' && value.mergeCommit.oid))) {
+    throw new Error('GitHub pull request observation failed: gh returned an unexpected pull request shape');
+  }
+  return { number: value.number, url: value.url, state: value.state, headRefName: value.headRefName,
+    headRefOid: value.headRefOid, baseRefName: value.baseRefName,
+    mergeCommit: value.mergeCommit ? value.mergeCommit.oid : null };
+}
+
+async function observePullRequest(project, number, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(number) || number < 1 || typeof executeFile !== 'function') {
+    throw new TypeError('GitHub pull request observation requires a project and pull request number');
+  }
+  let response;
+  try {
+    response = JSON.parse(await runGh(['pr', 'view', String(number), '--repo', project.repo,
+      '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergeCommit'], executeFile, 'GitHub pull request observation'));
+  } catch (error) {
+    if (error.message.includes('GitHub pull request observation failed:')) throw error;
+    throw new Error(`GitHub pull request observation failed: gh returned malformed JSON: ${error.message}`);
+  }
+  return normalizePullRequestObservation(response);
+}
+
+async function mergePullRequest(project, { number, headCommit }, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(number) || number < 1 || typeof headCommit !== 'string' || !headCommit
+    || typeof executeFile !== 'function') throw new TypeError('GitHub pull request merge requires a project, number, and expected head commit');
+  let response;
+  try {
+    response = JSON.parse(await runGh(['api', '--method', 'PUT', `repos/${project.repo}/pulls/${number}/merge`, '-f', `sha=${headCommit}`], executeFile, 'GitHub pull request merge'));
+  } catch (error) {
+    // runGh errors retain their retryability.  A malformed successful response
+    // is not a transport retry: it is ambiguous and must be reconciled first.
+    if (error && error.code === 'AUTOPILOT_GITHUB_TRANSPORT') {
+      // Rate limiting and request timeouts are transient; other client errors
+      // (405 not mergeable, 409 head changed, 422 invalid) are permanent.
+      if (error.statusCode >= 400 && error.statusCode < 500 && error.statusCode !== 408 && error.statusCode !== 429) {
+        error.code = 'AUTOPILOT_MERGE_REJECTED';
+        error.retryable = false;
+      }
+      throw error;
+    }
+    const malformed = new Error(`GitHub pull request merge failed: gh returned malformed JSON: ${error.message}`);
+    malformed.code = 'AUTOPILOT_MERGE_UNCONFIRMED';
+    throw malformed;
+  }
+  if (!isPlainObject(response) || response.merged !== true || typeof response.sha !== 'string' || !response.sha) {
+    const rejected = new Error('GitHub pull request merge failed: GitHub did not confirm a merge commit');
+    // A completed API response which does not confirm a SHA is ambiguous, not
+    // a proof that no merge happened.  The runner re-observes before deciding.
+    rejected.code = 'AUTOPILOT_MERGE_UNCONFIRMED';
+    throw rejected;
+  }
+  return { mergeCommit: response.sha };
+}
+
+async function reconcileIssueClosure(project, issueNumber, { execFile: executeFile = execFile } = {}) {
+  if (!isPlainObject(project) || typeof project.repo !== 'string' || !project.repo.trim()
+    || !Number.isSafeInteger(issueNumber) || issueNumber < 1 || typeof executeFile !== 'function') {
+    throw new TypeError('GitHub issue reconciliation requires a project and issue number');
+  }
+  let response;
+  try {
+    response = JSON.parse(await runGh(['api', '--method', 'PATCH', `repos/${project.repo}/issues/${issueNumber}`, '-f', 'state=closed'], executeFile, 'GitHub issue reconciliation'));
+  } catch (error) {
+    if (error.message.includes('GitHub issue reconciliation failed:')) throw error;
+    throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`);
+  }
+  if (!isPlainObject(response) || response.number !== issueNumber || response.state !== 'closed') {
+    throw new Error('GitHub issue reconciliation failed: GitHub did not confirm issue closure');
+  }
+  return { number: issueNumber, state: 'closed' };
+}
+
 const MAX_DIAGNOSTIC_RUNS = 5;
 const MAX_RUN_LOG_LENGTH = 6000;
 const LOG_BUFFER = 16 * 1024 * 1024;
@@ -294,6 +391,9 @@ module.exports = {
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,
+  observePullRequest,
+  mergePullRequest,
+  reconcileIssueClosure,
   ciStateForRuns,
   collectCiFailureDiagnostics,
 };

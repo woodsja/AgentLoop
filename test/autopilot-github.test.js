@@ -6,6 +6,9 @@ const {
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,
+  observePullRequest,
+  mergePullRequest,
+  reconcileIssueClosure,
   collectCiFailureDiagnostics,
 } = require('../src/autopilot-github');
 
@@ -118,6 +121,43 @@ test('CI observation rejects malformed Actions responses', async () => {
   await assert.rejects(observe('{bad'), /malformed JSON/);
   await assert.rejects(observe(JSON.stringify({})), /unexpected response shape/);
   await assert.rejects(observe(JSON.stringify([{ databaseId: 1 }])), /unexpected workflow run shape/);
+});
+
+test('observes exact PR identity, merges with GitHub expected-head protection, and closes the issue', async () => {
+  const calls = [];
+  const responses = [
+    JSON.stringify({ number: 42, url: 'https://github.com/example/repo/pull/42', state: 'OPEN', headRefName: 'ralph/issue-42', headRefOid: 'deadbeef', baseRefName: 'ralph-dev', mergeCommit: null }),
+    JSON.stringify({ merged: true, sha: 'mergecafe' }),
+    JSON.stringify({ number: 9, state: 'closed' }),
+  ];
+  const executeFile = (file, args, options, callback) => { calls.push([file, args]); assertUnattendedGhOptions(options); callback(null, responses.shift(), ''); };
+  const project = { repo: 'example/repo' };
+  assert.deepEqual(await observePullRequest(project, 42, { execFile: executeFile }), {
+    number: 42, url: 'https://github.com/example/repo/pull/42', state: 'OPEN', headRefName: 'ralph/issue-42', headRefOid: 'deadbeef', baseRefName: 'ralph-dev', mergeCommit: null,
+  });
+  assert.deepEqual(await mergePullRequest(project, { number: 42, headCommit: 'deadbeef' }, { execFile: executeFile }), { mergeCommit: 'mergecafe' });
+  assert.deepEqual(await reconcileIssueClosure(project, 9, { execFile: executeFile }), { number: 9, state: 'closed' });
+  assert.deepEqual(calls.map(([, args]) => args), [
+    ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergeCommit'],
+    ['api', '--method', 'PUT', 'repos/example/repo/pulls/42/merge', '-f', 'sha=deadbeef'],
+    ['api', '--method', 'PATCH', 'repos/example/repo/issues/9', '-f', 'state=closed'],
+  ]);
+});
+
+test('classifies real gh merge failures by the HTTP status gh prints on stderr', async () => {
+  const merge = stderr => mergePullRequest({ repo: 'example/repo' }, { number: 42, headCommit: 'deadbeef' }, {
+    // A real gh failure carries only an exit code; the status is in stderr.
+    execFile: (file, args, options, callback) => callback(Object.assign(new Error('Command failed'), { code: 1 }), '', stderr),
+  });
+  for (const [stderr, code, statusCode, retryable] of [
+    ['gh: Head branch was modified. Review and try the merge again. (HTTP 409)\n', 'AUTOPILOT_MERGE_REJECTED', 409, false],
+    ['gh: Pull Request is not mergeable (HTTP 405)\n', 'AUTOPILOT_MERGE_REJECTED', 405, false],
+    ['gh: API rate limit exceeded (HTTP 429)\n', 'AUTOPILOT_GITHUB_TRANSPORT', 429, true],
+    ['gh: Server Error (HTTP 502)\n', 'AUTOPILOT_GITHUB_TRANSPORT', 502, true],
+    ['error connecting to api.github.com\n', 'AUTOPILOT_GITHUB_TRANSPORT', undefined, true],
+  ]) {
+    await assert.rejects(merge(stderr), error => error.code === code && error.statusCode === statusCode && error.retryable === retryable, stderr);
+  }
 });
 
 test('collects deterministic failed job and log diagnostics without re-running workflows', async () => {

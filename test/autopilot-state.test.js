@@ -17,6 +17,8 @@ const {
   recordDelivery,
   recordFailure,
   recordPullRequest,
+  recordMerge,
+  recordIssueReconciled,
   recordReview,
   recordVerification,
   hasPassingVerification,
@@ -437,4 +439,26 @@ test('summarizes the last Ralph attempt for diagnostics', () => {
     number: 1, status: 'failed', verification: { exitCode: 1, timedOut: false, stdout: '', stderr: 'AssertionError' },
   }), /attempt 1: failed; verification exit 1\nAssertionError/);
   assert.equal(summarizeRalphAttempt(undefined), null);
+});
+
+test('merge records require full identity, persist, reconcile issue closure, and reject malformed records on load', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory);
+  const job = newJob(store);
+  assert.throws(() => recordIssueReconciled(job), /requires a recorded merge/);
+  for (const bad of [{}, { prNumber: 0, approvedHead: 'a', commit: 'm', repo: 'r' }, { prNumber: 1, approvedHead: '', commit: 'm', repo: 'r' },
+    { prNumber: 1, approvedHead: 'a', commit: '', repo: 'r' }, { prNumber: 1, approvedHead: 'a', commit: 'm', repo: '' },
+    { prNumber: 1, approvedHead: 'a', commit: 'm', repo: 'r', issueClosed: 'yes' }]) {
+    assert.throws(() => recordMerge(job, bad), /Merge state requires/);
+  }
+  recordMerge(job, { prNumber: 9, approvedHead: 'abc123', commit: 'merge123', repo: 'example/repo' }, () => '2026-10-12T00:00:00.000Z');
+  store.save(job);
+  assert.deepEqual(store.load(7).merge, { prNumber: 9, approvedHead: 'abc123', commit: 'merge123', repo: 'example/repo', mergedAt: '2026-10-12T00:00:00.000Z', issueClosed: false });
+  recordIssueReconciled(job);
+  store.save(job);
+  assert.equal(store.load(7).merge.issueClosed, true);
+  for (const merge of [{ ...job.merge, commit: '' }, { ...job.merge, issueClosed: 'no' }, { ...job.merge, prNumber: -1 }, 'merged']) {
+    fs.writeFileSync(path.join(directory, 'issue-7.json'), JSON.stringify({ ...job, merge }));
+    assert.throws(() => createJobStore(directory).load(7), /invalid merge state/);
+  }
 });
