@@ -19,15 +19,27 @@ function configuredProjects(value, configPath) {
   for (const [name, entry] of Object.entries(value)) {
     if (!name.trim()) continue;
     if (typeof entry === 'string' && entry.trim()) entries.push([name, resolve(entry)]);
-    else if (entry && typeof entry.root === 'string' && entry.root.trim()
-      && entry.worktrees && typeof entry.worktrees === 'object' && !Array.isArray(entry.worktrees)) {
-      const worktrees = Object.fromEntries(Object.entries(entry.worktrees)
+    else if (entry && typeof entry.root === 'string' && entry.root.trim()) {
+      const named = entry.worktrees && typeof entry.worktrees === 'object' && !Array.isArray(entry.worktrees);
+      const managed = typeof entry.worktreeRoot === 'string' && entry.worktreeRoot.trim();
+      if (!named && !managed) continue;
+      const worktrees = Object.fromEntries(Object.entries(named ? entry.worktrees : {})
         .filter(([name, value]) => name.trim() && typeof value === 'string' && value.trim())
         .map(([name, value]) => [name, resolve(value)]));
-      entries.push([name, Object.freeze({ root: resolve(entry.root), worktrees: Object.freeze(worktrees) })]);
+      entries.push([name, Object.freeze({
+        root: resolve(entry.root), worktrees: Object.freeze(worktrees),
+        ...(managed ? { worktreeRoot: resolve(entry.worktreeRoot) } : {}),
+      })]);
     }
   }
   return Object.freeze(Object.fromEntries(entries));
+}
+
+// Lexical containment only; callers still verify the canonical Git worktree.
+function managesWorktree(entry, candidate) {
+  if (!entry || typeof entry !== 'object' || typeof entry.worktreeRoot !== 'string') return false;
+  const relative = path.relative(entry.worktreeRoot, path.resolve(candidate));
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 function git(cwd, args) {
@@ -35,7 +47,8 @@ function git(cwd, args) {
 }
 
 function worktree(root, checkout = null) {
-  if (!fs.statSync(path.join(root, '.git')).isFile()) throw new Error('Authorized worktree must be an isolated Git worktree.');
+  const marker = path.join(root, '.git');
+  if (!fs.existsSync(marker) || !fs.statSync(marker).isFile()) throw new Error('Authorized worktree must be an isolated Git worktree.');
   const records = git(root, ['worktree', 'list', '--porcelain', '-z']).split('\0\0');
   const paths = records.map(record => record.split('\0').find(line => line.startsWith('worktree ')))
     .filter(Boolean).map(line => path.resolve(line.slice(9)));
@@ -79,8 +92,12 @@ function resolveWorkerScope(config, requestedPath, configPath) {
     for (const candidate of Object.values(typeof entry === 'object' ? entry.worktrees : {})) {
       if (requested === path.resolve(candidate)) return checkedScope(candidate, configPath, directory(root));
     }
+    // Ralph-created worktrees under an owner-managed root are authorized only
+    // as canonical, registered worktrees of this project's repository.
+    // The requested path is already canonical, so a redirected root never contains it.
+    if (managesWorktree(entry, requested)) return checkedScope(requested, configPath, directory(root));
   }
   throw new Error('Worker workspace is not explicitly authorized in the project registry.');
 }
 
-module.exports = { configuredProjects, resolveProject, resolveWorkerScope };
+module.exports = { configuredProjects, managesWorktree, resolveProject, resolveWorkerScope };

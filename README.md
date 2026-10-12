@@ -201,6 +201,8 @@ Worker directories must be explicitly registered in the owner configuration (`AG
 {"allowedProjects":{"ralph":{"root":"/path/to/checkout","worktrees":{"review":"/path/to/feature-worktree"}}}}
 ```
 
+To let Ralph create and use its own issue worktrees, an entry may instead (or also) name a managed `worktreeRoot`, such as `{"root":"/path/to/checkout","worktreeRoot":"/path/to/worktrees"}`. A worker directory under that root is authorized only when its canonical path stays inside the root and it is a registered Git worktree of that same repository, not its main checkout; symlink escapes, plain directories, and other repositories' worktrees are refused.
+
 Keep that authoritative configuration outside every writable worker directory. Requests select `project: "ralph"` and `worktree: "review"`; they cannot register a project or override its path. The resolver checks the canonical directory, Git worktree registration, and repository ownership again before execution. `dispatch_task`, `start_loop`, and `ralph_run_task` accept the optional `worktree` selector; `cwd` and `projectPath` remain rejected. Unknown projects, redirected worktrees, and unrelated paths fail closed.
 
 Isolated worktree implementation uses Codex's filesystem sandbox with only the selected worktree writable; system temporary directories, Git metadata, and `.codex` remain read-only. These workers cannot request sandbox escalation, and ignore user/project configuration that could widen their permissions. Engines without this filesystem boundary are refused for isolated worktrees. Ralph performs verification and Git delivery separately from the implementation worker. This configuration support does not register new live projects or change services.

@@ -104,3 +104,33 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
   } catch (error) { error.message += '\n' + output; throw error; }
   finally { if (child && child.exitCode === null) await halt(); fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('R1 submission accepts issue worktrees planned inside an owner-managed root only', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-r1-managed-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const checkout = path.join(root, 'repo'); fs.mkdirSync(checkout);
+  execFileSync('git', ['init', '-q'], { cwd: checkout });
+  const managed = path.join(root, 'worktrees');
+  const registryPath = path.join(root, 'owner.json'); fs.writeFileSync(registryPath, '{}');
+  const { configuredProjects } = require('../src/project-registry');
+  const { createR1Jobs } = require('../src/r1-jobs');
+  const queued = [];
+  const store = {
+    paths: { config: registryPath },
+    config: { allowedProjects: configuredProjects({ demo: { root: checkout, worktreeRoot: managed } }, registryPath) },
+    enqueueTask: task => { queued.push(task); return { id: 't-0000abcd', ...task }; },
+  };
+  const project = { enabled: true, repo: 'example/repo', checkout, worktreeRoot: managed, baseBranch: 'main', worker: 'codex', reviewPolicy: 'always', verification: 'true' };
+  let current = project;
+  const jobs = createR1Jobs(store, { autopilotDependencies: { loadProjectConfig: () => current } });
+
+  assert.equal(jobs.submit({ project: 'demo', issue: 5 }).id, 't-0000abcd');
+  assert.equal(queued[0].worktree, undefined);
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, worktree: 'issue5' }), /explicitly authorized/);
+  // A worker-writable project file cannot move the worktree outside the owner root.
+  current = { ...project, worktreeRoot: path.join(root, 'elsewhere') };
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 6 }), /explicitly authorized/);
+  current = { ...project, worktreeRoot: root };
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 7 }), /explicitly authorized/);
+  assert.equal(queued.length, 1);
+});

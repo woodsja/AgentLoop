@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
-const { configuredProjects, resolveProject, resolveWorkerScope } = require('../src/project-registry');
+const { configuredProjects, managesWorktree, resolveProject, resolveWorkerScope } = require('../src/project-registry');
 const { createCliWorker } = require('../src/cli-worker');
 const engines = require('../src/engines');
 
@@ -77,6 +77,51 @@ test('a worktree from a different repository cannot inherit authorization', t =>
   const other = fixture(t);
   const config = { allowedProjects: { ralph: { root: f.checkout, worktrees: { feature: other.feature } } } };
   assert.throws(() => resolveProject(config, 'ralph', 'feature', f.registryPath), /does not belong/);
+});
+
+test('an owner-managed worktree root authorizes only verified worktrees of its own repository', t => {
+  const f = fixture(t);
+  const other = fixture(t);
+  const managedRoot = path.join(f.root, 'managed');
+  fs.mkdirSync(managedRoot);
+  const registry = { ralph: { root: f.checkout, worktreeRoot: managedRoot }, legacy: f.unrelated };
+  const config = { allowedProjects: configuredProjects(registry, f.registryPath) };
+  const add = (checkout, branch, target) => execFileSync('git', ['-C', checkout, 'worktree', 'add', '-b', branch, target], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  // Created by Ralph after the owner configuration was loaded.
+  const issue = path.join(managedRoot, 'issue-7');
+  add(f.checkout, 'ralph/issue-7', issue);
+  assert.deepEqual(resolveWorkerScope(config, issue, f.registryPath), { cwd: issue, isolatedWorktree: true });
+  // Existing project permissions are unchanged.
+  assert.deepEqual(resolveProject(config, 'legacy', undefined, f.registryPath), { cwd: f.unrelated, isolatedWorktree: false });
+  assert.deepEqual(resolveWorkerScope(config, f.checkout, f.registryPath), { cwd: f.checkout, isolatedWorktree: false });
+  assert.throws(() => resolveProject(config, 'ralph', 'issue-7', f.registryPath), /Unknown authorized worktree/);
+
+  const plain = path.join(managedRoot, 'plain');
+  fs.mkdirSync(plain);
+  assert.throws(() => resolveWorkerScope(config, plain, f.registryPath), /isolated Git worktree/);
+  const foreign = path.join(managedRoot, 'foreign');
+  add(other.checkout, 'foreign', foreign);
+  assert.throws(() => resolveWorkerScope(config, foreign, f.registryPath), /does not belong/);
+  assert.throws(() => resolveWorkerScope(config, path.join(managedRoot, '..', 'feature'), f.registryPath), /not explicitly authorized/);
+  assert.throws(() => resolveWorkerScope(config, managedRoot, f.registryPath), /not explicitly authorized/);
+  fs.symlinkSync(f.feature, path.join(managedRoot, 'escape'), 'dir');
+  assert.throws(() => resolveWorkerScope(config, path.join(managedRoot, 'escape'), f.registryPath), /not explicitly authorized/);
+  const insideRegistry = path.join(issue, 'owner.json');
+  fs.writeFileSync(insideRegistry, '{}');
+  assert.throws(() => resolveWorkerScope(config, issue, insideRegistry), /outside the writable/);
+
+  const linkedRoot = path.join(f.root, 'linked-managed');
+  fs.symlinkSync(managedRoot, linkedRoot, 'dir');
+  const linked = { allowedProjects: { ralph: { root: f.checkout, worktrees: {}, worktreeRoot: linkedRoot } } };
+  assert.throws(() => resolveWorkerScope(linked, issue, f.registryPath), /not explicitly authorized/);
+  assert.throws(() => resolveWorkerScope(linked, path.join(linkedRoot, 'issue-7'), f.registryPath), /not explicitly authorized/);
+
+  assert.equal(managesWorktree(config.allowedProjects.ralph, path.join(managedRoot, 'issue-8')), true);
+  for (const outside of [managedRoot, path.join(managedRoot, '..', 'x'), f.unrelated]) {
+    assert.equal(managesWorktree(config.allowedProjects.ralph, outside), false);
+  }
+  assert.deepEqual(configuredProjects({ bare: { root: f.checkout } }, f.registryPath), {});
 });
 
 test('an unrelated stale Git worktree record does not block the authorized worktree', t => {

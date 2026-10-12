@@ -7,7 +7,7 @@ const { discoverReadyIssues } = require('./autopilot-github');
 const { deriveWorktreePath } = require('./autopilot-workspace');
 const { createClaudeReviewAdapter } = require('./autopilot-review');
 const { createJobStore, resolveStateDir, hasPassingVerification } = require('./autopilot-state');
-const { resolveProject } = require('./project-registry');
+const { managesWorktree, resolveProject } = require('./project-registry');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -60,12 +60,13 @@ function createR1Jobs(store, options = {}) {
     if (fs.realpathSync(project.checkout) !== scope.cwd) throw new Error('R1 checkout does not match the registered project.');
     const planned = deriveWorktreePath(project, { number: body.issue, title: body.title || 'Queued issue' });
     const entry = store.config.allowedProjects[body.project];
-    const authorized = entry && typeof entry === 'object' && Object.entries(entry.worktrees)
+    const named = entry && typeof entry === 'object' && Object.entries(entry.worktrees)
       .find(([name, candidate]) => candidate === planned && (body.worktree === undefined || name === body.worktree));
-    if (!authorized) throw new Error('The issue worktree must be explicitly authorized before R1 submission.');
+    const managed = !named && body.worktree === undefined && managesWorktree(entry, planned);
+    if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before R1 submission.');
     return store.enqueueTask({
       workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
-      worktree: authorized[0], title: body.title || `R1 issue #${body.issue}`,
+      ...(named ? { worktree: named[0] } : {}), title: body.title || `R1 issue #${body.issue}`,
       phase: 'queued', status: 'queued', phases: [{ phase: 'queued', at: now() }], source: body.source || 'api',
     });
   }
@@ -95,7 +96,9 @@ function createR1Jobs(store, options = {}) {
     const scope = resolveProject(store.config, task.project, undefined, store.paths.config);
     const planned = deriveWorktreePath(project, { number: task.issue, title: task.title });
     if (fs.realpathSync(project.checkout) !== scope.cwd
-      || store.config.allowedProjects[task.project]?.worktrees?.[task.worktree] !== planned
+      || (task.worktree !== undefined
+        ? store.config.allowedProjects[task.project]?.worktrees?.[task.worktree] !== planned
+        : !managesWorktree(store.config.allowedProjects[task.project], planned))
       || !project.enabled || project.worker !== 'codex' || !['always', 'risk'].includes(project.reviewPolicy)) {
       task.failure = 'Owner configuration no longer authorizes this R1 job.';
       return finish(task, null);
