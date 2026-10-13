@@ -42,7 +42,7 @@ test('a nonzero exit fails and retains the exit code', async () => {
 });
 
 test('the command runs in projectPath', async () => {
-  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-verifier-'));
+  const projectPath = fs.mkdtempSync(path.join(process.cwd(), '.ralph-verifier-'));
 
   try {
     const result = await runVerification(projectPath, commands.cwd, 5000);
@@ -60,6 +60,20 @@ test('stdout and stderr are captured separately', async () => {
   assert.equal(result.passed, true);
   assert.equal(result.stdout.trim(), 'out');
   assert.equal(result.stderr.trim(), 'err');
+});
+
+test('stdout and stderr are captured when the OS temporary directory is unavailable', async () => {
+  const originalTmpdir = os.tmpdir;
+  os.tmpdir = () => path.join(process.cwd(), 'missing-os-temp-directory');
+  try {
+    const result = await runVerification(process.cwd(), commands.output, 5000);
+
+    assert.equal(result.passed, true);
+    assert.equal(result.stdout.trim(), 'out');
+    assert.equal(result.stderr.trim(), 'err');
+  } finally {
+    os.tmpdir = originalTmpdir;
+  }
 });
 
 test('a timeout terminates the command and fails verification', async () => {

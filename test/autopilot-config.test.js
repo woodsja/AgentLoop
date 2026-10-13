@@ -16,6 +16,7 @@ const expectedFinanceDashboard = {
   humanLabel: 'ready-for-human',
   worker: 'codex',
   maxAttempts: 2,
+  maxReviewRounds: 2,
   prepareVenv: true,
   verification: '.venv/bin/finance-dashboard check && .venv/bin/python -m pytest && .venv/bin/ruff check && git diff --check',
   ciWorkflow: 'Checks',
@@ -73,6 +74,23 @@ test('defaults attempts to two but preserves an explicit project retry limit', (
 
   assert.equal(loadProjectConfig('defaulted', { configPath }).maxAttempts, 2);
   assert.equal(loadProjectConfig('explicit', { configPath }).maxAttempts, 3);
+});
+
+test('defaults independent review rounds to two, accepts up to five, and rejects values outside that range', () => {
+  const defaulted = validProject();
+  delete defaulted.maxReviewRounds;
+  const configPath = writeConfig({
+    defaulted,
+    fiveRounds: { ...validProject(), maxReviewRounds: 5 },
+  });
+
+  assert.equal(loadProjectConfig('defaulted', { configPath }).maxReviewRounds, 2);
+  assert.equal(loadProjectConfig('fiveRounds', { configPath }).maxReviewRounds, 5);
+  for (const maxReviewRounds of [0, 6, 2.5, '5']) {
+    assert.throws(() => loadProjectConfig('demo', {
+      configPath: writeConfig({ demo: { ...validProject(), maxReviewRounds } }),
+    }), /maxReviewRounds/);
+  }
 });
 
 test('unknown projects fail with a clear error', () => {

@@ -926,6 +926,120 @@ test('a second matching reviewer NEEDS_CHANGES after the reviewer budget is spen
   assert.match(saved.failures.at(-1).message, /second finding/);
 });
 
+test('the fifth review exhausts a five-round budget after four delivered reviewer corrections', async () => {
+  const store = temporaryStore();
+  const issue = { number: 252, title: 'Five-round review budget', body: '' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-252-five-rounds', worktreePath: null, now: store.now });
+  job.delivery = { branch: job.branch, commit: 'e5', pushed: true };
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  job.status = 'awaiting_ci';
+  job.verification = verifiedEvidence('e5');
+  job.reviewAttempts = 4;
+  job.reviewCorrectiveCycles = 4;
+  job.reviewCorrection = { cycle: 4, status: 'delivered', reviewCommit: 'd4', reviewer: 'claude:opus', findings: 'fourth finding', commit: 'e5' };
+  job.reviewHistory = ['a1', 'b2', 'c3', 'd4'].map((commit, index) => ({
+    number: index + 1, reviewer: 'claude:opus', model: 'opus', policy: 'always', commit,
+    startedAt: store.now(), completedAt: store.now(), status: 'completed', verdict: 'NEEDS_CHANGES',
+    findings: [{ summary: `finding ${index + 1}`, file: null, line: null, severity: null }], diagnostics: null,
+  }));
+
+  // This is a forward-schema record. Keep it in memory so the current
+  // validator can remain strict while the coordinator behavior is specified.
+  let saved = structuredClone(job);
+  const futureStore = {
+    ...store,
+    list: () => [structuredClone(saved)],
+    load: () => structuredClone(saved),
+    save: value => { saved = structuredClone(value); return value; },
+  };
+  let reviews = 0;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(futureStore, {
+    loadProjectConfig: () => ({ ...project, enabled: true, verification: 'check', reviewPolicy: 'always', maxReviewRounds: 5 }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', details: 'ok', prNumber: 99, headCommit: 'e5', runs: [] }),
+    reviewPullRequest: async () => { reviews += 1; return { reviewer: 'claude:opus', verdict: 'NEEDS_CHANGES', commit: 'e5', findings: 'fifth finding' }; },
+  }));
+  assert.equal(reviews, 1);
+  assert.equal(saved.reviewAttempts, 5);
+  assert.equal(saved.reviewCorrectiveCycles, 4);
+  assert.equal(saved.status, 'ready_for_human');
+  assert.match(saved.failures.at(-1).message, /after 4 reviewer corrective cycle/);
+  assert.match(saved.failures.at(-1).message, /fifth finding/);
+});
+
+test('five persisted review rounds recover across restarts and finish with a fifth-round PASS', async () => {
+  const store = temporaryStore();
+  const issue = { number: 253, title: 'Recover five review rounds', body: 'Keep the durable review budget.' };
+  const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always', maxReviewRounds: 5 };
+  const commits = ['a1', 'b2', 'c3', 'd4', 'e5'];
+  const reopened = () => createJobStore(store.directory);
+
+  // First boot creates and delivers the initial candidate. Every following
+  // call deliberately opens a new store to exercise the persisted restart
+  // path, rather than carrying an in-memory job through the five rounds.
+  await runAutopilot(['--project', 'demo'], enabledDependencies(reopened(), {
+    loadProjectConfig: () => reviewedProject,
+    discoverReadyIssues: async () => [issue],
+    createRalphTaskService: passingRalph,
+    deliverPassedWork: async ({ workspace }) => ({ branch: workspace.branch, commit: commits[0], pr: { number: 99, url: 'https://github.com/example/repo/pull/99' } }),
+  }));
+
+  const correctiveTaskIds = [];
+  for (let round = 0; round < 4; round += 1) {
+    const commit = commits[round];
+    await runAutopilot(['--project', 'demo'], enabledDependencies(reopened(), {
+      loadProjectConfig: () => ({ ...reviewedProject, maxReviewRounds: 1 }),
+      discoverReadyIssues: async () => [issue],
+      observePullRequestCi: async () => ({ state: 'green', details: 'ok', prNumber: 99, headCommit: commit, runs: [] }),
+      reviewPullRequest: async context => {
+        assert.equal(context.headCommit, commit);
+        assert.equal(context.verification.commit, commit);
+        return { reviewer: 'claude:opus', verdict: 'NEEDS_CHANGES', commit, findings: `finding ${round + 1}` };
+      },
+    }));
+    let checkpoint = reopened().load(issue.number);
+    assert.equal(checkpoint.reviewMaxRounds, 5);
+    assert.equal(checkpoint.reviewCorrectiveCycles, round + 1);
+    assert.equal(checkpoint.status, 'review_correction_eligible');
+
+    await runAutopilot(['--project', 'demo'], enabledDependencies(reopened(), {
+      loadProjectConfig: () => ({ ...reviewedProject, maxReviewRounds: 1 }),
+      discoverReadyIssues: async () => [issue],
+      createRalphTaskService: () => ({ run: async (cwd, task) => {
+        correctiveTaskIds.push(task.id);
+        return { status: 'passed', attempts: [{ number: 1, status: 'passed', verification: verifierResult }] };
+      } }),
+      deliverPassedWork: async ({ workspace }) => ({ branch: workspace.branch, commit: commits[round + 1], pr: { number: 99, url: 'https://github.com/example/repo/pull/99' } }),
+    }));
+    checkpoint = reopened().load(issue.number);
+    assert.equal(checkpoint.delivery.commit, commits[round + 1]);
+    assert.equal(checkpoint.reviewCorrection.status, 'delivered');
+  }
+
+  await runAutopilot(['--project', 'demo'], enabledDependencies(reopened(), {
+    loadProjectConfig: () => ({ ...reviewedProject, maxReviewRounds: 1 }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', details: 'ok', prNumber: 99, headCommit: commits[4], runs: [] }),
+    reviewPullRequest: async () => ({ reviewer: 'claude:opus', verdict: 'PASS', commit: commits[4] }),
+  }));
+
+  const recovered = reopened().load(issue.number);
+  assert.deepEqual(correctiveTaskIds, [
+    'autopilot:example/repo#253:review-correction-1',
+    'autopilot:example/repo#253:review-correction-2',
+    'autopilot:example/repo#253:review-correction-3',
+    'autopilot:example/repo#253:review-correction-4',
+  ]);
+  assert.equal(recovered.reviewMaxRounds, 5);
+  assert.equal(recovered.reviewAttempts, 5);
+  assert.equal(recovered.reviewCorrectiveCycles, 4);
+  assert.deepEqual(recovered.reviewHistory.map(entry => [entry.commit, entry.verdict]), [
+    ['a1', 'NEEDS_CHANGES'], ['b2', 'NEEDS_CHANGES'], ['c3', 'NEEDS_CHANGES'], ['d4', 'NEEDS_CHANGES'], ['e5', 'PASS'],
+  ]);
+  assert.equal(recovered.review.commit, 'e5');
+  assert.equal(recovered.status, 'ready_for_human_merge');
+});
+
 test('a second reviewer block and an interrupted reviewer worker are exhausted without duplicate work', async () => {
   const reviewedProject = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always' };
   const issue = { number: 235, title: 'Bound review repair', body: '' };

@@ -25,6 +25,7 @@
     "humanLabel": "ready-for-human",
     "worker": "codex",
     "maxAttempts": 2,
+    "maxReviewRounds": 5,
     "prepareVenv": false,
     "verification": "npm test && git diff --check",
     "ciWorkflow": "CI",

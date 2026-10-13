@@ -40,6 +40,19 @@ test('builds a reviewer corrective task with findings and original issue context
   assert.doesNotMatch(task.goal, /Fix the failing CI/);
 });
 
+test('builds the fourth reviewer corrective task without losing the original issue context', () => {
+  const project = { repo: 'example/finance', verification: 'deterministic check', maxReviewRounds: 5 };
+  const issue = { number: 42, title: 'Improve totals', body: 'Original context\n\n## Acceptance Criteria\n- Show totals' };
+  const task = buildCorrectiveTask(project, issue, [], {
+    kind: 'review', cycle: 4, status: 'eligible', reviewCommit: 'def456',
+    reviewer: 'claude:opus', findings: 'totals.js:20: preserve zero balances', commit: null,
+  });
+  assert.equal(task.id, 'autopilot:example/finance#42:review-correction-4');
+  assert.match(task.goal, /commit def456/);
+  assert.match(task.goal, /preserve zero balances/);
+  assert.match(task.goal, /Original context/);
+});
+
 test('builds a bounded Codex Ralph task from issue data and repository instructions', () => {
   const issue = { number: 42, title: 'Improve totals', body: 'Context for the issue.\n\n## Acceptance Criteria\n- Show totals\n- Cover empty data\n\n## Notes\nLater text' };
   const task = buildAutopilotTask({ repo: 'example/finance', worker: 'codex', verification: 'deterministic check' }, issue, [{ path: 'AGENTS.md', content: 'Use .venv.' }]);

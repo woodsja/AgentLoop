@@ -4,7 +4,12 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const fixture = JSON.parse(fs.readFileSync(process.env.R1_FIXTURE, 'utf8'));
 const project = fixture.project;
-const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+const git = (cwd, ...args) => {
+  try { return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim(); } catch (error) {
+    if (error && error.status === 0) return String(error.stdout || '').trim();
+    throw error;
+  }
+};
 async function gate(name) {
   while (!fs.existsSync(path.join(fixture.root, name))) await new Promise(resolve => setTimeout(resolve, 20));
 }

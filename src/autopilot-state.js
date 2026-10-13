@@ -21,7 +21,7 @@ const CORRECTION_STATUSES = new Set(['eligible', 'running', 'passed', 'delivered
 const REVIEW_VERDICTS = new Set(['PASS', 'NEEDS_CHANGES']);
 const REVIEW_POLICIES = new Set(['risk', 'always']);
 const MAX_REVIEW_FINDINGS = 50;
-const MAX_REVIEW_HISTORY = 2;
+const MAX_REVIEW_HISTORY = 5;
 const REVIEW_ATTEMPT_STATUSES = new Set(['running', 'completed', 'failed', 'timed_out', 'invalid_verdict', 'interrupted']);
 const JOB_FILE = /^issue-([1-9][0-9]*)\.json$/;
 
@@ -244,9 +244,11 @@ function validateJob(job, filePath) {
         && (value.review.verdict === 'PASS') === (value.review.findings.length === 0)
         && hasValidReviewAttempt(value.review.attempt)
         && value.review.attempt.number <= (value.reviewAttempts ?? 0))));
+  const reviewMaxRounds = value => value.reviewMaxRounds ?? 2;
   const hasValidReviewCorrection = value => value.reviewCorrection === undefined || value.reviewCorrection === null
     || (isPlainObject(value.reviewCorrection)
-      && value.reviewCorrection.cycle === 1
+      && Number.isSafeInteger(value.reviewCorrection.cycle) && value.reviewCorrection.cycle >= 1
+      && value.reviewCorrection.cycle < reviewMaxRounds(value)
       && CORRECTION_STATUSES.has(value.reviewCorrection.status)
       && typeof value.reviewCorrection.reviewCommit === 'string' && value.reviewCorrection.reviewCommit.length > 0
       && typeof value.reviewCorrection.reviewer === 'string' && value.reviewCorrection.reviewer.length > 0
@@ -302,9 +304,11 @@ function validateJob(job, filePath) {
               || !job.failures.every(hasValidFailure) ? 'invalid failure diagnostics'
               : !Number.isSafeInteger(job.runs) || job.runs < 0
                 || !Number.isSafeInteger(job.correctiveCycles) || ![0, 1].includes(job.correctiveCycles) ? 'invalid counters'
-                : job.reviewCorrectiveCycles !== undefined && (!Number.isSafeInteger(job.reviewCorrectiveCycles) || ![0, 1].includes(job.reviewCorrectiveCycles)) ? 'invalid review corrective counters'
+                : job.reviewMaxRounds !== undefined && (!Number.isInteger(job.reviewMaxRounds) || job.reviewMaxRounds < 1 || job.reviewMaxRounds > MAX_REVIEW_HISTORY) ? 'invalid review round limit'
+                : job.reviewCorrectiveCycles !== undefined && (!Number.isSafeInteger(job.reviewCorrectiveCycles) || job.reviewCorrectiveCycles < 0 || job.reviewCorrectiveCycles >= reviewMaxRounds(job)) ? 'invalid review corrective counters'
                 : job.reviewAttempts !== undefined && (!Number.isSafeInteger(job.reviewAttempts) || job.reviewAttempts < 0) ? 'invalid review attempt counter'
-                : job.reviewCorrection && job.reviewCorrectiveCycles !== 1 ? 'review corrective cycle counter does not match state'
+                : job.reviewHistory && job.reviewHistory.length > reviewMaxRounds(job) ? 'review history exceeds configured round limit'
+                : job.reviewCorrection && job.reviewCorrectiveCycles !== job.reviewCorrection.cycle ? 'review corrective cycle counter does not match state'
                 : typeof job.createdAt !== 'string' || !job.createdAt
                   || typeof job.updatedAt !== 'string' || !job.updatedAt ? 'missing timestamps'
                   : null;
@@ -452,13 +456,19 @@ function recordReviewSkip(job, { commit, reason }, now = () => new Date().toISOS
 // Each reviewer invocation consumes an attempt number before it starts, so a
 // crashed or failed review is still counted and never reused for a new record.
 function beginReviewAttempt(job, now = () => new Date().toISOString(), identity = null) {
+  const maxReviewRounds = identity && identity.maxReviewRounds !== undefined
+    ? identity.maxReviewRounds : job.reviewMaxRounds ?? 2;
   if (identity && (typeof identity.reviewer !== 'string' || !identity.reviewer.trim()
     || typeof identity.model !== 'string' || !identity.model.trim() || !REVIEW_POLICIES.has(identity.policy)
     || typeof identity.commit !== 'string' || !identity.commit.trim()
-    || (job.reviewHistory ?? []).length >= MAX_REVIEW_HISTORY
+    || !Number.isInteger(maxReviewRounds) || maxReviewRounds < 1 || maxReviewRounds > MAX_REVIEW_HISTORY
+    || (job.reviewHistory ?? []).length >= maxReviewRounds
     || (job.reviewHistory ?? []).some(entry => entry.status === 'running'))) {
     throw new TypeError('Independent review requires valid attempt identity and available history capacity');
   }
+  // A coordinator supplies the configured limit when it starts a review. Do
+  // not leave that budget implicit: recovery must use the same bound.
+  if (identity && identity.maxReviewRounds !== undefined) job.reviewMaxRounds = maxReviewRounds;
   job.reviewAttempts = (job.reviewAttempts ?? 0) + 1;
   const attempt = { number: job.reviewAttempts, startedAt: now() };
   if (identity) {
@@ -522,19 +532,27 @@ function recordReview(job, { reviewer, verdict, commit, policy, findings, attemp
   return job;
 }
 
-// Reviewer feedback has its own one-cycle budget.  It deliberately does not
-// share the CI counter: a green build can still need one code-review repair.
-function recordReviewCorrectiveCycle(job, { reviewCommit, reviewer, findings } = {}) {
-  if ((job.reviewCorrectiveCycles ?? 0) !== 0) {
-    throw new Error('Autopilot permits only one reviewer corrective cycle per issue');
+// Reviewer feedback has an independent, configurable budget. It deliberately
+// does not share the CI counter: a green build can still need code-review repair.
+function recordReviewCorrectiveCycle(job, { reviewCommit, reviewer, findings } = {}, { maxReviewRounds } = {}) {
+  const configuredRounds = maxReviewRounds ?? job.reviewMaxRounds ?? 2;
+  if (!Number.isInteger(configuredRounds) || configuredRounds < 1 || configuredRounds > MAX_REVIEW_HISTORY) {
+    throw new TypeError(`Reviewer corrective cycles require maxReviewRounds from 1 through ${MAX_REVIEW_HISTORY}`);
+  }
+  const completedCycles = job.reviewCorrectiveCycles ?? 0;
+  if (completedCycles >= configuredRounds - 1) {
+    throw new Error(`Autopilot permits at most ${configuredRounds - 1} reviewer corrective cycle(s) per issue`);
   }
   if (typeof reviewCommit !== 'string' || !reviewCommit || typeof reviewer !== 'string' || !reviewer.trim()
     || typeof findings !== 'string' || !findings.trim()) {
     throw new TypeError('A reviewer corrective cycle requires the reviewed commit, reviewer identity, and findings');
   }
-  job.reviewCorrectiveCycles = 1;
+  // Keep a non-default limit in the durable record so recovery preserves the
+  // original budget even if project configuration changes before the next run.
+  if (maxReviewRounds !== undefined || job.reviewMaxRounds !== undefined) job.reviewMaxRounds = configuredRounds;
+  job.reviewCorrectiveCycles = completedCycles + 1;
   job.reviewCorrection = {
-    cycle: 1, status: 'eligible', reviewCommit, reviewer: reviewer.trim(),
+    cycle: job.reviewCorrectiveCycles, status: 'eligible', reviewCommit, reviewer: reviewer.trim(),
     findings: truncate(findings), commit: null,
   };
   return job;
