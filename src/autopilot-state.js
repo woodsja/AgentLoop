@@ -17,6 +17,8 @@ const MAX_DIAGNOSTIC_LENGTH = 4000;
 // Red CI diagnostics include failed-step log tails, so they get more room
 // than a single failure message.
 const MAX_CI_DIAGNOSTIC_LENGTH = 16000;
+const MAX_CI_OBSERVATION_TEXT = 512;
+const CI_OBSERVATION_STATUSES = new Set(['not_observed', 'missing_required_run', 'queued_or_running', 'red', 'green']);
 const CORRECTION_STATUSES = new Set(['eligible', 'running', 'passed', 'delivered', 'failed']);
 const REVIEW_VERDICTS = new Set(['PASS', 'NEEDS_CHANGES']);
 const REVIEW_POLICIES = new Set(['risk', 'always']);
@@ -57,6 +59,67 @@ function validateIssueNumber(issueNumber) {
 function truncate(text, limit = MAX_DIAGNOSTIC_LENGTH) {
   const value = String(text ?? '');
   return value.length <= limit ? value : `…${value.slice(value.length - limit + 1)}`;
+}
+
+// This is intentionally a small operator-facing record, not an Actions log
+// mirror.  It is safe to expose from the R1 status endpoint and survives a
+// daemon restart without requiring another GitHub request.
+function safeCiObservationText(value, limit = MAX_CI_OBSERVATION_TEXT) {
+  return truncate(String(value ?? '')
+    .replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
+    .replace(/(?:[A-Za-z]:\\|\/)(?:[^\s"']+[\\/])*[^\s"']+/g, '[path]'), limit);
+}
+
+function safeCiObservationUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'https:' || url.username || url.password) return null;
+    // Drop fragments and query strings: Actions run identity is in the path,
+    // while query parameters can be signed or otherwise private.
+    return truncate(`${url.origin}${url.pathname}`, MAX_CI_OBSERVATION_TEXT);
+  } catch {
+    return null;
+  }
+}
+
+function ciObservation(source) {
+  const requiredWorkflow = typeof source.requiredWorkflow === 'string' && source.requiredWorkflow.trim()
+    ? safeCiObservationText(source.requiredWorkflow.trim()) : null;
+  const runs = Array.isArray(source.runs) ? source.runs : [];
+  const matching = requiredWorkflow && runs.filter(run => isPlainObject(run) && run.workflowName === requiredWorkflow)
+    .sort((left, right) => right.databaseId - left.databaseId)[0];
+  const status = !requiredWorkflow ? 'not_observed'
+    : !matching ? 'missing_required_run'
+      : source.state === 'green' ? 'green'
+        : source.state === 'red' ? 'red' : 'queued_or_running';
+  const reason = !requiredWorkflow ? 'No required CI workflow is configured; CI cannot be green.'
+    : !matching ? `Required CI workflow "${requiredWorkflow}" has not run for this head commit.`
+      : status === 'queued_or_running' ? `Required CI workflow "${requiredWorkflow}" is ${safeCiObservationText(matching.status)}.`
+        : status === 'red' && matching.conclusion !== 'success'
+          ? `Required CI workflow "${requiredWorkflow}" completed ${safeCiObservationText(matching.conclusion || 'without success')}.`
+          : status === 'red' ? `CI is red; required CI workflow "${requiredWorkflow}" succeeded but another observed workflow did not pass.`
+          : `Required CI workflow "${requiredWorkflow}" completed successfully.`;
+  const run = matching && {
+    id: matching.databaseId,
+    ...(safeCiObservationUrl(matching.url) ? { url: safeCiObservationUrl(matching.url) } : {}),
+    status: safeCiObservationText(matching.status),
+    ...(typeof matching.conclusion === 'string' && matching.conclusion ? { conclusion: safeCiObservationText(matching.conclusion) } : {}),
+    // Job/step fields are optional: the normal run-list query does not fetch
+    // them, but injected/pre-collected observations may safely provide them.
+    ...(Number.isSafeInteger(matching.jobId) ? { jobId: matching.jobId } : {}),
+    ...(typeof matching.jobName === 'string' && matching.jobName ? { jobName: safeCiObservationText(matching.jobName) } : {}),
+    ...(typeof matching.stepName === 'string' && matching.stepName ? { stepName: safeCiObservationText(matching.stepName) } : {}),
+    ...(typeof matching.stepStatus === 'string' && matching.stepStatus ? { stepStatus: safeCiObservationText(matching.stepStatus) } : {}),
+  };
+  return {
+    status,
+    requiredWorkflow,
+    ...(source.headCommit ? { headCommit: source.headCommit } : {}),
+    ...(source.prNumber ? { prNumber: source.prNumber } : {}),
+    observedAt: typeof source.observedAt === 'string' && source.observedAt ? source.observedAt : new Date().toISOString(),
+    reason: safeCiObservationText(reason),
+    ...(run ? { run } : {}),
+  };
 }
 
 function resolveStateDir(projectName, project = {}, stateRoot = DEFAULT_STATE_ROOT) {
@@ -186,6 +249,16 @@ function validateJob(job, filePath) {
     && (value.ci.prNumber === undefined || Number.isSafeInteger(value.ci.prNumber))
     && (value.ci.headCommit === undefined || typeof value.ci.headCommit === 'string')
     && (value.ci.runs === undefined || Array.isArray(value.ci.runs) && value.ci.runs.every(hasValidCiRun))
+    && (value.ci.observation === undefined || (isPlainObject(value.ci.observation)
+      && CI_OBSERVATION_STATUSES.has(value.ci.observation.status)
+      && (value.ci.observation.requiredWorkflow === null || typeof value.ci.observation.requiredWorkflow === 'string')
+      && typeof value.ci.observation.observedAt === 'string'
+      && typeof value.ci.observation.reason === 'string' && value.ci.observation.reason.length <= MAX_CI_OBSERVATION_TEXT
+      && (value.ci.observation.headCommit === undefined || typeof value.ci.observation.headCommit === 'string')
+      && (value.ci.observation.prNumber === undefined || Number.isSafeInteger(value.ci.observation.prNumber))
+      && (value.ci.observation.run === undefined || (isPlainObject(value.ci.observation.run)
+        && Number.isSafeInteger(value.ci.observation.run.id) && value.ci.observation.run.id > 0
+        && typeof value.ci.observation.run.status === 'string'))))
     && (value.ci.diagnostics === undefined || (typeof value.ci.diagnostics === 'string'
       && value.ci.diagnostics.length <= MAX_CI_DIAGNOSTIC_LENGTH)));
   const hasValidCorrection = value => value.correction === undefined || value.correction === null
@@ -361,6 +434,9 @@ function recordDelivery(job, { branch = job.branch, commit, pushed = true }) {
   if (job.delivery && job.delivery.commit && job.delivery.commit !== commit) {
     job.review = null;
     job.reviewSkip = null;
+    // A previous head's green observation cannot authorize or describe the
+    // newly delivered candidate while the next exact-head observation waits.
+    job.ci = null;
   }
   job.delivery = { branch, commit, pushed };
   // Bind the freshly checkpointed verifier result once. A later delivery
@@ -409,6 +485,10 @@ function recordCiState(job, observation, details = null) {
     ...(source.headCommit === undefined ? {} : { headCommit: source.headCommit }),
     ...(source.runs === undefined ? {} : { runs: source.runs }),
     ...(source.diagnostics === undefined ? {} : { diagnostics: truncate(source.diagnostics, MAX_CI_DIAGNOSTIC_LENGTH) }),
+    // Older embedders may still call the original state-only API.  Preserve
+    // that persisted shape; the CI producer supplies requiredWorkflow for all
+    // new R1 observations.
+    ...(Object.hasOwn(source, 'requiredWorkflow') ? { observation: ciObservation(source) } : {}),
   };
   return job;
 }

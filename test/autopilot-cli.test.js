@@ -484,9 +484,9 @@ test('an always-review project persists a matching independent PASS before becom
       assert.deepEqual(context.pullRequest, { number: 99, url: 'https://github.com/example/repo/pull/99', headCommit: 'abc123' });
       assert.equal(context.headCommit, 'abc123');
       assert.deepEqual(context.verification, verifiedEvidence('abc123'));
-      assert.deepEqual(context.ci, {
-        state: 'green', details: 'CI (#501): completed/success', prNumber: 99, headCommit: 'abc123', runs: [],
-      });
+      assert.equal(context.ci.state, 'green');
+      assert.equal(context.ci.observation.status, 'missing_required_run');
+      assert.equal(context.ci.observation.requiredWorkflow, reviewedProject.ciWorkflow);
       // The terminal transition must follow a durable review checkpoint.
       const duringReview = createJobStore(store.directory).load(230);
       assert.equal(duringReview.terminal, false);
@@ -1053,11 +1053,14 @@ test('a red persisted PR CI observation is recorded without starting corrective 
   assert.equal(saved.status, 'correction_eligible');
   assert.equal(saved.correctiveCycles, 1);
   assert.equal(saved.terminal, false);
-  assert.deepEqual(saved.ci, {
+  assert.deepEqual({ ...saved.ci, observation: undefined }, {
     state: 'red', details: 'CI (#601): completed/failure', prNumber: 99, headCommit: 'abc123',
     runs: [{ databaseId: 601, status: 'completed', conclusion: 'failure', name: 'test', workflowName: 'CI', url: 'https://example/run/601', startedAt: null, updatedAt: null }],
     diagnostics: 'diagnostics for abc123',
+    observation: undefined,
   });
+  assert.deepEqual(saved.ci.observation.run, { id: 601, url: 'https://example/run/601', status: 'completed', conclusion: 'failure' });
+  assert.equal(saved.ci.observation.status, 'red');
   assert.deepEqual(saved.correction, {
     cycle: 1, status: 'eligible', redCommit: 'abc123', diagnostics: 'diagnostics for abc123', commit: null,
   });

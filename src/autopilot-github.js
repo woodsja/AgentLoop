@@ -175,6 +175,8 @@ async function observePullRequestCi(project, { number, commit }, { execFile: exe
       details: `No required CI workflow (ciWorkflow) is configured for ${project.repo}; CI cannot be green.`,
       prNumber: number,
       headCommit: commit,
+      requiredWorkflow: null,
+      observedAt: new Date().toISOString(),
       runs: [],
     };
   }
@@ -201,6 +203,8 @@ async function observePullRequestCi(project, { number, commit }, { execFile: exe
     details: ciDetails(commit, runs, project.ciWorkflow),
     prNumber: number,
     headCommit: commit,
+    requiredWorkflow: project.ciWorkflow,
+    observedAt: new Date().toISOString(),
     runs,
   };
 }

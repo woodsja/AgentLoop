@@ -227,12 +227,14 @@ test('review history retains verdicts across delivered SHAs and sanitized failur
   const store = createJobStore(temporaryDirectory());
   const job = newJob(store, 18);
   recordDelivery(job, { commit: 'abc123' });
+  recordCiState(job, { state: 'green', requiredWorkflow: 'CI', headCommit: 'abc123', runs: [], observedAt: '2026-10-12T00:00:00.000Z' });
   const first = beginReviewAttempt(job, store.now, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: 'abc123' });
   recordReview(job, { reviewer: 'claude:opus', verdict: 'NEEDS_CHANGES', commit: 'abc123', policy: 'always', findings: 'Validate totals.', attempt: first }, store.now);
   store.save(job);
   const checkpoint = structuredClone(job.reviewHistory[0]);
   recordDelivery(job, { commit: 'def456' });
   assert.equal(job.review, null);
+  assert.equal(job.ci, null, 'a prior head CI result is not current evidence for a correction');
   assert.deepEqual(job.reviewHistory[0], checkpoint);
   const second = beginReviewAttempt(job, store.now, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: 'def456' });
   const failed = failReviewAttempt(job, second.number, new Error('malformed verdict JSON token=secret-value'), store.now);
@@ -308,6 +310,27 @@ test('persists normalized CI observations with workflow run identifiers', () => 
   assert.deepEqual(reloaded.ci, { state: 'red', details: 'CI (#77): completed/failure', prNumber: 31, headCommit: 'abc123', runs });
   assert.throws(() => recordCiState(job, { state: 'failure', runs: [] }), /pending, green, or red/);
   assert.throws(() => recordCiState(job, { state: 'green', runs: [{ databaseId: 0, status: 'completed' }] }), /normalized workflow runs/);
+});
+
+test('persists a bounded, exact-head CI status projection without Action logs', () => {
+  const directory = temporaryDirectory();
+  const store = createJobStore(directory);
+  const job = newJob(store);
+  recordCiState(job, {
+    state: 'pending', requiredWorkflow: 'CI', prNumber: 31, headCommit: 'abc123',
+    observedAt: '2026-10-12T12:00:00.000Z', details: 'untrusted details are not projected',
+    runs: [{ databaseId: 77, status: 'in_progress', conclusion: null, workflowName: 'CI',
+      url: 'https://github.com/example/repo/actions/runs/77?token=private',
+      name: null, startedAt: null, updatedAt: null,
+      jobId: 88, jobName: 'test', stepName: 'Test', stepStatus: 'in_progress' }],
+  });
+  store.save(job);
+  assert.deepEqual(createJobStore(directory).load(7).ci.observation, {
+    status: 'queued_or_running', requiredWorkflow: 'CI', prNumber: 31, headCommit: 'abc123',
+    observedAt: '2026-10-12T12:00:00.000Z', reason: 'Required CI workflow "CI" is in_progress.',
+    run: { id: 77, url: 'https://github.com/example/repo/actions/runs/77', status: 'in_progress',
+      jobId: 88, jobName: 'test', stepName: 'Test', stepStatus: 'in_progress' },
+  });
 });
 
 test('persists red CI diagnostics and the single corrective cycle before correction', () => {

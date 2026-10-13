@@ -64,6 +64,8 @@ test('observes the persisted PR head through GitHub Actions and normalizes workf
   assert.equal(green.state, 'green');
   assert.equal(green.prNumber, 42);
   assert.equal(green.headCommit, 'deadbeef');
+  assert.equal(green.requiredWorkflow, 'CI');
+  assert.match(green.observedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.deepEqual(green.runs.map(run => run.databaseId), [123, 124]);
   assert.match(green.details, /CI \(#123\): completed\/success/);
   assert.equal((await observe([{ ...base, status: 'in_progress', conclusion: null }])).state, 'pending');

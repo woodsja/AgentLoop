@@ -56,7 +56,13 @@ function evidence(job) {
     outcome: job.terminalState || job.status,
     commit: job.delivery && job.delivery.commit,
     verification: job.verification && { ...job.verification, command: safeText(job.verification.command, 4000), stdout: safeText(job.verification.stdout, 4000), stderr: safeText(job.verification.stderr, 4000) },
-    ci: job.ci && { state: job.ci.state, headCommit: job.ci.headCommit },
+    ci: job.ci && {
+      state: job.ci.state,
+      headCommit: job.ci.headCommit,
+      // This is the only Actions detail exposed at the status boundary.  Raw
+      // run lists and diagnostic/log material stay in the durable job record.
+      ...(job.ci.observation ? { observation: structuredClone(job.ci.observation) } : {}),
+    },
     review: review(job.review),
     reviewAttempts: job.reviewAttempts,
     reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: safeText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && safeText(entry.diagnostics) })),
@@ -393,6 +399,9 @@ function createR1Jobs(store, options = {}) {
         if (task.workflow !== 'r1') return null;
         return { id, status: task.status || stage, project: task.project,
           ...(task.failure ? { failure: task.failure } : {}),
+          // A transient provider failure is a wait condition, not CI red or a
+          // reason to discard the last exact-head observation.
+          ...(task.lastError ? { waitReason: safeText(task.lastError) } : {}),
           phase: task.phase, phases: task.phases || [], evidence: evidence(task.r1),
         };
       } catch (error) {

@@ -377,10 +377,15 @@ async function run(argv, dependencies = {}) {
       }
       phase = 'ci';
       const observeCi = dependencies.observePullRequestCi || observePullRequestCi;
-      const observation = await observeCi(project, {
+      const observed = await observeCi(project, {
         number: job.pr.number,
         commit: job.delivery.commit,
       }, { execFile: dependencies.execFile });
+      // Adapters written before the durable observation projection do not
+      // know the configured workflow name.  Bind it here from the existing
+      // project configuration; this does not change the CI decision.
+      const observation = { ...observed,
+        requiredWorkflow: observed.requiredWorkflow === undefined ? (project.ciWorkflow || null) : observed.requiredWorkflow };
       if ((observation.headCommit !== undefined && observation.headCommit !== job.delivery.commit)
         || (observation.prNumber !== undefined && observation.prNumber !== job.pr.number)) {
         throw new Error(`Autopilot CI observation for issue #${candidate.number} does not match PR #${job.pr.number} at ${job.delivery.commit}`);
@@ -476,7 +481,9 @@ async function run(argv, dependencies = {}) {
         // terminal so a permanently red check cannot loop.  Workflows are
         // never re-run here: only a new commit can produce a new CI result.
         const collectDiagnostics = dependencies.collectCiFailureDiagnostics || collectCiFailureDiagnostics;
-        const diagnostics = String(await collectDiagnostics(project, observation, { execFile: dependencies.execFile }) || '').trim()
+        // Diagnostics continue to receive the adapter's original observation;
+        // the status-only workflow annotation above is not part of that API.
+        const diagnostics = String(await collectDiagnostics(project, observed, { execFile: dependencies.execFile }) || '').trim()
           || `CI red for ${job.delivery.commit}: ${observation.details || 'no details'}`;
         recordCiState(job, { ...observation, diagnostics });
         // This is deliberately an equality check rather than a configurable
