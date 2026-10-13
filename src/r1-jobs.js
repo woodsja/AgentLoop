@@ -274,7 +274,10 @@ function createR1Jobs(store, options = {}) {
     if (task.autonomous && task.phase === 'ci') {
       const waiting = [...(task.phases || [])].reverse().find(entry => entry.phase === 'ci');
       if (waiting && Date.now() - Date.parse(waiting.at) > ciTimeoutMs) {
-        task.failure = `Required CI did not reach a final result within ${Math.round(ciTimeoutMs / 60000)} minutes.`;
+        const observation = saved && saved.ci && saved.ci.observation;
+        // Retain the actionable exact-head explanation, especially the
+        // missing-required-run reason, when the bounded CI wait expires.
+        task.failure = `Required CI did not reach a final result within ${Math.round(ciTimeoutMs / 60000)} minutes.${observation && observation.reason ? ` ${observation.reason}` : ''}`;
         return conclude(task, saved, project);
       }
     }

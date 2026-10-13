@@ -333,6 +333,30 @@ test('persists a bounded, exact-head CI status projection without Action logs', 
   });
 });
 
+test('matches slash-containing workflow names before sanitizing their status projection', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store);
+  recordCiState(job, {
+    state: 'green', requiredWorkflow: 'Build/Test', prNumber: 31, headCommit: 'abc123',
+    runs: [{ databaseId: 78, status: 'completed', conclusion: 'success', workflowName: 'Build/Test',
+      url: 'https://github.com/example/repo/actions/runs/78', name: null, startedAt: null, updatedAt: null }],
+  });
+  assert.equal(job.ci.observation.status, 'green');
+  assert.equal(job.ci.observation.requiredWorkflow, 'Build/Test');
+  assert.equal(job.ci.observation.run.id, 78);
+});
+
+test('rejects unbounded or unsafe persisted CI observation fields', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store);
+  recordCiState(job, { state: 'pending', requiredWorkflow: 'CI', runs: [] });
+  for (const observation of [
+    { ...job.ci.observation, requiredWorkflow: 'x'.repeat(513) },
+    { ...job.ci.observation, run: { id: 1, status: 'x'.repeat(513) } },
+    { ...job.ci.observation, run: { id: 1, status: 'completed', url: 'https://example.invalid/run?token=private' } },
+  ]) assert.throws(() => store.save({ ...job, ci: { ...job.ci, observation } }), /invalid CI state/);
+});
+
 test('persists red CI diagnostics and the single corrective cycle before correction', () => {
   const directory = temporaryDirectory();
   const store = createJobStore(directory, { now: () => '2026-10-03T00:00:00.000Z' });

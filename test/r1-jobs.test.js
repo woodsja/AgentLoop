@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn, execFileSync } = require('node:child_process');
+const { createR1Jobs } = require('../src/r1-jobs');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check) {
   const deadline = Date.now() + 20000;
@@ -20,6 +21,29 @@ function request(port, route, body) {
     req.on('error', reject); req.end(body ? JSON.stringify(body) : undefined);
   });
 }
+
+test('R1 status keeps the last exact-head CI observation during a provider outage', () => {
+  const task = {
+    id: 't-0000abcd', workflow: 'r1', status: 'running', project: 'demo', phase: 'ci',
+    lastError: 'GitHub unavailable token=private',
+    r1: { status: 'awaiting_ci', terminalState: null, delivery: { commit: 'abc123' },
+      ci: { state: 'pending', headCommit: 'abc123', observation: {
+        status: 'missing_required_run', requiredWorkflow: 'CI', headCommit: 'abc123',
+        observedAt: '2026-10-12T00:00:00.000Z', reason: 'Required CI workflow "CI" has not run for this head commit.',
+      } }, reviewHistory: [], failures: [] },
+  };
+  const store = {
+    readTask: (_id, stage) => {
+      if (stage === 'running') return task;
+      const error = new Error('missing'); error.code = 'ENOENT'; throw error;
+    },
+  };
+  const status = createR1Jobs(store).read(task.id);
+  assert.match(status.waitReason, /GitHub unavailable/);
+  assert.doesNotMatch(status.waitReason, /private/);
+  assert.equal(status.evidence.ci.observation.status, 'missing_required_run');
+  assert.equal(status.evidence.ci.observation.headCommit, 'abc123');
+});
 test('R1 submission is independent, serialized, checkpointed, fail closed and retrievable after restart', { timeout: 60000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-async-'));
   const checkout = path.join(root, 'repo'); fs.mkdirSync(checkout);

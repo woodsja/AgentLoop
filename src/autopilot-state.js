@@ -67,7 +67,9 @@ function truncate(text, limit = MAX_DIAGNOSTIC_LENGTH) {
 function safeCiObservationText(value, limit = MAX_CI_OBSERVATION_TEXT) {
   return truncate(String(value ?? '')
     .replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
-    .replace(/(?:[A-Za-z]:\\|\/)(?:[^\s"']+[\\/])*[^\s"']+/g, '[path]'), limit);
+    // A slash is valid in a workflow name (for example, "Build/Test").
+    // Only treat a slash-delimited value as a path at a token boundary.
+    .replace(/(^|[\s"'(=])(?:[A-Za-z]:\\|\/)(?:[^\s"']+[\\/])*[^\s"']+/g, '$1[path]'), limit);
 }
 
 function safeCiObservationUrl(value) {
@@ -83,10 +85,14 @@ function safeCiObservationUrl(value) {
 }
 
 function ciObservation(source) {
-  const requiredWorkflow = typeof source.requiredWorkflow === 'string' && source.requiredWorkflow.trim()
-    ? safeCiObservationText(source.requiredWorkflow.trim()) : null;
+  // Match the provider's identity before making an operator-safe copy.  In
+  // particular, sanitizing "Build/Test" must not make an exact-head run
+  // appear absent.
+  const requiredWorkflowRaw = typeof source.requiredWorkflow === 'string' && source.requiredWorkflow.trim()
+    ? source.requiredWorkflow.trim() : null;
+  const requiredWorkflow = requiredWorkflowRaw === null ? null : safeCiObservationText(requiredWorkflowRaw);
   const runs = Array.isArray(source.runs) ? source.runs : [];
-  const matching = requiredWorkflow && runs.filter(run => isPlainObject(run) && run.workflowName === requiredWorkflow)
+  const matching = requiredWorkflowRaw && runs.filter(run => isPlainObject(run) && run.workflowName === requiredWorkflowRaw)
     .sort((left, right) => right.databaseId - left.databaseId)[0];
   const status = !requiredWorkflow ? 'not_observed'
     : !matching ? 'missing_required_run'
@@ -240,6 +246,21 @@ function validateJob(job, filePath) {
     && (run.url === null || typeof run.url === 'string')
     && (run.startedAt === null || typeof run.startedAt === 'string')
     && (run.updatedAt === null || typeof run.updatedAt === 'string');
+  const hasSafeObservationText = text => typeof text === 'string' && text.length <= MAX_CI_OBSERVATION_TEXT
+    && text === safeCiObservationText(text);
+  const hasValidCiObservationRun = run => isPlainObject(run)
+    && Number.isSafeInteger(run.id) && run.id > 0
+    && hasSafeObservationText(run.status)
+    && (run.url === undefined || (typeof run.url === 'string' && run.url === safeCiObservationUrl(run.url)))
+    && ['conclusion', 'jobName', 'stepName', 'stepStatus'].every(field => run[field] === undefined || hasSafeObservationText(run[field]));
+  const hasValidCiObservation = observation => isPlainObject(observation)
+    && CI_OBSERVATION_STATUSES.has(observation.status)
+    && (observation.requiredWorkflow === null || hasSafeObservationText(observation.requiredWorkflow))
+    && typeof observation.observedAt === 'string'
+    && hasSafeObservationText(observation.reason)
+    && (observation.headCommit === undefined || typeof observation.headCommit === 'string')
+    && (observation.prNumber === undefined || Number.isSafeInteger(observation.prNumber))
+    && (observation.run === undefined || hasValidCiObservationRun(observation.run));
   const hasValidCi = value => value.ci === null || (isPlainObject(value.ci)
     // Earlier state files used provider conclusion strings such as
     // "failure". They remain readable; new observations are always one of
@@ -249,16 +270,7 @@ function validateJob(job, filePath) {
     && (value.ci.prNumber === undefined || Number.isSafeInteger(value.ci.prNumber))
     && (value.ci.headCommit === undefined || typeof value.ci.headCommit === 'string')
     && (value.ci.runs === undefined || Array.isArray(value.ci.runs) && value.ci.runs.every(hasValidCiRun))
-    && (value.ci.observation === undefined || (isPlainObject(value.ci.observation)
-      && CI_OBSERVATION_STATUSES.has(value.ci.observation.status)
-      && (value.ci.observation.requiredWorkflow === null || typeof value.ci.observation.requiredWorkflow === 'string')
-      && typeof value.ci.observation.observedAt === 'string'
-      && typeof value.ci.observation.reason === 'string' && value.ci.observation.reason.length <= MAX_CI_OBSERVATION_TEXT
-      && (value.ci.observation.headCommit === undefined || typeof value.ci.observation.headCommit === 'string')
-      && (value.ci.observation.prNumber === undefined || Number.isSafeInteger(value.ci.observation.prNumber))
-      && (value.ci.observation.run === undefined || (isPlainObject(value.ci.observation.run)
-        && Number.isSafeInteger(value.ci.observation.run.id) && value.ci.observation.run.id > 0
-        && typeof value.ci.observation.run.status === 'string'))))
+    && (value.ci.observation === undefined || hasValidCiObservation(value.ci.observation))
     && (value.ci.diagnostics === undefined || (typeof value.ci.diagnostics === 'string'
       && value.ci.diagnostics.length <= MAX_CI_DIAGNOSTIC_LENGTH)));
   const hasValidCorrection = value => value.correction === undefined || value.correction === null
