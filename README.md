@@ -10,7 +10,7 @@ Self-improving fresh-context loops for coding work you can watch.
 
 Plan a goal in Claude or ChatGPT, then let it rip. AgentLoop is a local orchestration daemon for coding agents: each cycle starts a fresh worker, work carries forward in project files, a fresh critic enforces your rubric, and the whole run is watchable on a local dashboard.
 
-Codex CLI and Claude Code both run as engines. Pick one per loop from the dashboard, or per task through the bridge.
+Codex CLI and Claude Code both run as engines. Pick a worker engine and a critic engine per loop from the dashboard or bridge, or one engine per one-shot task.
 
 AgentLoop is for solo developers who run long agent tasks across multiple projects and cannot supervise every session.
 
@@ -38,8 +38,8 @@ Claude or ChatGPT -> MCP bridge -> daemon -> worker/critic cycles -> dashboard
 - **Auto-checkpoint** is on by default for projects inside a git work tree: the daemon makes a local commit after each completed task, on the final pass, and when a task is blocked. The daemon composes every commit message itself and never touches remotes; a dirty tree at loop start is refused so checkpoints stay clean.
 - **Files are memory.** `PLAN.md`, `STATE.md`, and `GUIDELINES.md` carry the goal, progress, and rubric. A loop project needs `PLAN.md`; missing `STATE.md` and `GUIDELINES.md` files are seeded automatically.
 - **Messages narrate a run.** A connected chat client can post `info`, `question`, or `results` messages through the bridge. They appear in the dashboard Messages panel.
-- **Engines are pluggable.** `src/engines.js` holds one entry per engine: how to find its CLI, what arguments to run it with, and how to read its event stream. The daemon itself is engine-agnostic. Set `defaultEngine` in `config.json`, override it per loop in the dashboard, or per task through the bridge. An engine that is not installed is greyed out rather than offered.
-- **Workers start clean and constrained.** Codex sessions use workspace-write sandboxing, disable network access inside the sandbox, and route boundary requests through automatic approval review. Claude Code sessions run with `acceptEdits` so they never block on a prompt, `--safe-mode` so a worker ignores your personal `CLAUDE.md`, hooks, skills, and MCP servers, and web tools disabled. The two are not identical: Codex isolates the network at the sandbox boundary, so a shell command it runs cannot reach out, while a shell command run by Claude Code can.
+- **Engines are pluggable.** `src/engines.js` holds one entry per engine: how to find its CLI, what arguments to run it with, and how to read its event stream. The daemon itself is engine-agnostic. Set `defaultEngine` in `config.json`, override it independently for each loop role in the dashboard or bridge, or per one-shot task through the bridge. An engine that is not installed is greyed out rather than offered.
+- **Workers start clean and constrained.** Codex sessions use workspace-write sandboxing, disable network access inside the sandbox, and route boundary requests through automatic approval review. Claude Code workers run with `auto` permission mode so a classifier reviews development and test commands without routine approval prompts, `--safe-mode` so a worker ignores your personal `CLAUDE.md`, hooks, skills, and MCP servers, and web, scheduling (`RemoteTrigger`, `Cron*`, `ScheduleWakeup`), cross-session messaging, worktree, `PushNotification`, and `DesignSync` tools disabled. The two are not identical: Codex isolates the network at the sandbox boundary, so a shell command it runs cannot reach out, while a shell command run by Claude Code can.
 
 The daemon is plain Node with no package dependencies. Task state, results, transcripts, events, and messages are stored as JSON or NDJSON files. The dashboard is one local HTML file at `http://127.0.0.1:5757`.
 
@@ -78,7 +78,7 @@ A left rail navigates the page - waiting on you, active run, recent runs, queue,
 - **Task rail.** A loop with a parsed `PLAN.md` gets a chip per plan task: done chips show their checkpoint sha, the active chip shows its try count, blocked chips show the spent retry budget.
 - **Waiting on you.** Tasks blocked on an answer pin to the top of the page with a rail badge; the block stays hidden while nothing is blocked.
 - **End states.** Recent runs keep loop endings distinct: `passed`, `partial` (passed with blocked tasks), `incomplete` (cycle budget ran out mid-plan), and `maxed` (no passing verdict), plus counts of tasks done and blocked.
-- **Launcher.** The loop form takes a project folder, max cycles, task retries, an engine picker that preselects `defaultEngine` and disables engines that are not installed, an auto-checkpoint toggle (on by default), and polish mode.
+- **Launcher.** The loop form takes a project folder, max cycles, task retries, worker and critic engine pickers that preselect `defaultEngine` and disable engines that are not installed, an auto-checkpoint toggle (on by default), and polish mode.
 
 The page polls `GET /api/state`, a whitelisted read-only payload: optional metrics like cost and duration are omitted when unknown rather than zero-filled, and project paths are reduced to folder basenames, so absolute paths never leave the daemon.
 
@@ -86,7 +86,7 @@ The page polls `GET /api/state`, a whitelisted read-only payload: optional metri
 
 AgentLoop started as my own bottleneck. I was the relay between ChatGPT planning the architecture and Codex executing the tasks, shuttling plans and results back and forth across multiple projects, and quality slipped whenever I stepped away. A bare retry loop was not the answer: loops without standards rot their context and never improve. The fix was to move the human judgment into the system itself, so I designed the sequential fresh-context loop, the files-as-memory model, the strict critic verdict contract, and the rubric-as-GUIDELINES pattern to mimic a demanding human in the loop. Codex CLI with GPT-5.6 turned that design into working code: the daemon, filesystem store, loop engine, critic, bridge, and dashboard wiring, roughly one focused session per slice.
 
-The engine layer came later. Nothing in the daemon is tied to one CLI: `src/engines.js` takes one entry per engine, and Codex CLI and Claude Code both ship today, either one running as worker and critic. Codex is the default.
+The engine layer came later. Nothing in the daemon is tied to one CLI: `src/engines.js` takes one entry per engine, and Codex CLI and Claude Code both ship today, either one running as worker or critic. Codex is the default.
 
 ## Independent evaluation
 
@@ -100,7 +100,7 @@ Requirements:
 
 - Node.js 18 or newer
 - Git
-- At least one engine CLI installed and authenticated, found on `PATH` or through an `enginePaths` override. Codex CLI (`codex`) has no version floor; Claude Code (`claude`) needs 2.1.169 or newer, the release that added the `--safe-mode` flag it is launched with
+- At least one engine CLI installed and authenticated, found on `PATH` or through an `enginePaths` override. Claude Code (`claude`) needs 2.1.169 or newer, the release that added the `--safe-mode` flag it is launched with. Critics also use Claude Code's `--restricted`, `--tools`, and `dontAsk`, and Codex CLI's `--ignore-user-config` and `--ignore-rules`; these were verified with Claude Code 2.1.296 and Codex CLI 0.162.1. A CLI that rejects a critic flag fails the critic run, and the cycle is recorded as an invalid FAIL; AgentLoop never retries with broader permissions
 
 Windows:
 
@@ -110,7 +110,7 @@ cd AgentLoop
 node src\daemon.js
 ```
 
-Open `http://127.0.0.1:5757`. Select **+ New loop**, point **Project folder** at a folder containing `PLAN.md`, pick an **Engine**, then select **Start loop**. No dependency install is required.
+Open `http://127.0.0.1:5757`. Select **+ New loop**, point **Project folder** at a folder containing `PLAN.md`, pick a **Worker engine** and **Critic engine**, then select **Start loop**. No dependency install is required.
 
 ## Connect a chat client
 
@@ -139,7 +139,7 @@ Claude Code can connect to the local bridge directly, no tunnel needed:
 claude mcp add --transport http agentloop "http://127.0.0.1:5758/mcp?key=<token-from-Connector>"
 ```
 
-The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `dispatch_task`, `start_loop`, and `send_message`. `dispatch_task` and `start_loop` both take an optional `engine`.
+The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `dispatch_task`, `start_loop`, and `send_message`. `dispatch_task` and `start_loop` both take an optional `engine`. `start_loop` also takes optional `workerEngine` and `criticEngine` fields.
 
 ## Try the demo loop
 
@@ -147,7 +147,7 @@ With the daemon running, select **+ New loop**:
 
 - **Project folder:** `examples/starter`
 - **Max cycles:** `3`
-- **Engine:** whichever you have installed
+- **Worker engine** and **Critic engine:** whichever you have installed
 - Select **Start loop**
 
 Cycle 1 deliberately implements only the normal input path. The critic reads `GUIDELINES.md`, rejects the missing hardening and command-line requirements, and emits a FAIL verdict. A later cycle receives those fixes, completes the utility, and passes.
@@ -171,6 +171,55 @@ Watch the cycle timeline in **Active run** and critic verdicts in the **Event lo
 The shipped `config.json` includes every key above except the optional `enginePaths` key.
 
 A model named on the task or loop itself wins over `models`.
+
+`POST /api/loop` and the MCP `start_loop` tool accept `workerEngine` and `criticEngine` (`codex` or `claude`). Each omitted role falls back to `engine`, then `defaultEngine`; an existing request with only `engine` still uses that engine for both roles. Both resolved choices are persisted in the loop JSON and exposed in `/api/state`. Unknown, empty, or unavailable role selections are rejected before queueing. No separate role model settings are needed: each session uses `models` for its selected engine. When the two roles use different engines, the engine-agnostic `model` key and a loop-level `model` are ignored, since one model name cannot fit both CLIs; set `models.codex` and `models.claude` instead.
+
+For example, submit a Codex worker with a Claude critic:
+
+```json
+{
+  "project": "examples/starter",
+  "workerEngine": "codex",
+  "criticEngine": "claude",
+  "maxCycles": 3,
+  "taskRetries": 3,
+  "autoCommit": false
+}
+```
+
+Claude workers use session-local `--permission-mode auto`, retaining permission checks without broadly pre-approving Bash. The previous `acceptEdits` mode approved file edits but denied unattended `node --test` commands. Auto mode depends on a supported model, CLI, and account/policy availability; explicit ask/deny rules still apply, and AgentLoop does not retry with bypass permissions. It is classifier-based review, not filesystem or network isolation. Use a disposable checkout for unattended acceptance runs. See [Claude permission modes](https://code.claude.com/docs/en/permission-modes).
+
+The isolated reverse acceptance run with Claude Code 2.1.299 (subscription Opus) and Codex CLI 0.162.1 passed in one cycle: Claude executed `node --test acceptance.test.js` without permission denials, all four tests passed, and the unchanged read-only Codex critic returned PASS. An independent harness confirmed the four tests, unchanged fixed plan/guidelines/tests, and no project-file changes by the critic. This observation does not establish OS-level confinement of Claude workers.
+
+Critics run read-only, enforced by the CLIs as well as the prompt:
+
+- **Claude Code critics** add `--restricted` to the worker's `--safe-mode` and `--strict-mcp-config`, and run with `--permission-mode dontAsk` and a closed `--tools Read,Glob,Grep` list ([Claude CLI reference](https://code.claude.com/docs/en/cli-reference)). They have no write, edit, shell, web, or MCP tools.
+- **Codex critics** run with `--sandbox read-only` and `approval_policy="never"`, so a blocked action is never escalated ([Codex security documentation](https://developers.openai.com/codex/agent-approvals-security)), plus `--ignore-user-config` and `--ignore-rules`. Codex critics can still run shell commands and read files outside the project: the sandbox blocks their writes and network access, not their execution or reads.
+
+**Previously recorded real-CLI observations** from the opt-in suite (`test/cli-integration.test.js`) with Claude Code 2.1.296 and Codex CLI 0.162.1, subscription logins, in temporary folders. These cover project-level configuration, not user-level configuration. A critic was asked to edit project files, write outside the project, run a command that writes a marker, call a local HTTP listener, read a file outside the project, and use a planted MCP tool, while the project held worker-planted `.claude/settings.json` and `settings.local.json` (allow-all permissions, `bypassPermissions`, `additionalDirectories`, hooks, `apiKeyHelper`), `.mcp.json`, `.codex/config.toml`, and `.codex/rules`. Observed:
+
+- Both critics left every file unchanged, made no network request, activated none of the planted project settings, hooks, `apiKeyHelper`, MCP servers, or rules, and could still read `PLAN.md`. A worker control run could create and edit files.
+- The Claude critic was refused a read outside the project, and also refused reads through a project file symlink and a project directory symlink pointing outside it.
+- The Codex critic ran sandboxed shell commands and read the file outside the project.
+
+**No-cost symlink probe:** Claude Code 2.1.299 was also tested with the exact critic arguments, a temporary project inside this checkout, and a harmless file under `/tmp` outside the checkout. Its real `Read` tool successfully read the project control file and refused both a file symlink and a directory symlink to the outside file, explicitly reporting that `--restricted` confines file tools to the working directory. Responses requesting those tool calls came from a loopback-only scripted API with dummy credentials, not a paid model. This tests CLI file permissions, not model judgment or user-level configuration isolation. Reproduce with `AGENTLOOP_LOCAL_CLI_TEST=1 node --test --test-name-pattern='local scripted' test/cli-integration.test.js`; Claude must be installed, but authentication is unnecessary.
+
+**Documented by the CLIs but not tested here:**
+
+- That critics ignore *user-level* configuration: for Claude, `~/.claude` settings (via `--restricted`), user MCP servers (via `--strict-mcp-config`), and plugins (via `--safe-mode`); for Codex, `$CODEX_HOME/config.toml` MCP servers, hooks, profiles, and project trust (via `--ignore-user-config`) and user `.rules` files (via `--ignore-rules`). The suite has tests for this, but they need a temporary config home, so they run only with `ANTHROPIC_API_KEY` or `CODEX_API_KEY` set. They have not been run, and subscription logins are never copied into a temporary home.
+- The Codex project-config result above comes from an untrusted temporary folder. Codex records project trust in `config.toml`, which `--ignore-user-config` skips, so critics should always see projects as untrusted; that inference is not separately tested.
+
+`npm test` checks emitted permission/configuration flags and runs mock-engine regressions; passing it does not verify user-level configuration isolation. The dedicated user-config integration tests above remain unrun. Treat that isolation as CLI-documented behavior, not an experimentally verified AgentLoop guarantee.
+
+Limitations:
+
+- **Reading outside the project is an isolation limit, not a read-only breach.** Codex's read-only sandbox can read any file the operator's account can read, and that text can reach transcripts and the next worker prompt. Claude critics were confined to the project folder, including through symlinks, in the runs above.
+- **CLI bookkeeping still writes outside the project**, such as session transcripts under `~/.claude` or `~/.codex`. The agent does not control these writes.
+- This is CLI enforcement. AgentLoop adds no sandbox of its own, so these guarantees hold only for CLIs that support and correctly enforce the flags.
+
+To run the real-CLI suite, authenticate the CLIs and run `AGENTLOOP_CLI_INTEGRATION=1 node test/cli-integration.test.js`. It makes a few model calls per engine, never starts AgentLoop, and deletes its temporary folders. `AGENTLOOP_IT_CLAUDE_MODEL`, `AGENTLOOP_IT_CODEX_MODEL`, and `AGENTLOOP_IT_TIMEOUT_MS` (default 240000 per CLI run) override the models from `config.json` and the timeout. It is not part of `npm test`.
+
+To demonstrate manually, install and authenticate both CLIs, start a separate development daemon from this checkout using an unused dashboard port, and open its dashboard. Select `examples/starter`, Worker engine **Codex**, Critic engine **Claude Code**, and three cycles. Turn off auto-checkpoint for an uncommitted checkout, then start the loop. The starter plan is designed to produce an initial FAIL: inspect the transcript for a Codex worker, a Claude critic with concrete findings, and a fresh Codex correction worker. If checkpointing is desired, use a clean project Git tree and leave auto-checkpoint enabled. Results depend on the models' actual verdicts; the mock regression tests reproduce FAIL → correction deterministically.
 
 ## Supported platforms
 

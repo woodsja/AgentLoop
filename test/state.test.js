@@ -5,6 +5,14 @@ const state = require('../src/state');
 
 const NOW = Date.parse('2026-07-28T12:00:00.000Z');
 
+test('both role engines are exposed in pending, running, and recent loop views', () => {
+  const loop = { id: 'roles', type: 'loop', engine: 'codex', workerEngine: 'codex', criticEngine: 'claude' };
+  for (const view of [state.publicPending(loop, 'claude'), state.publicRunning(loop, null, 'claude'), state.publicRecent(loop, null, 'claude')]) {
+    assert.equal(view.workerEngine, 'codex');
+    assert.equal(view.criticEngine, 'claude');
+  }
+});
+
 test('absolute paths collapse to their last segment', () => {
   assert.equal(state.stripAbsPaths('Edit: C:\\Users\\someone\\repo\\src\\app.js'), 'Edit: app.js');
   assert.equal(state.stripAbsPaths('ran "C:\\Program Files\\PowerShell\\7\\pwsh.exe" -c x'), 'ran "pwsh.exe" -c x');

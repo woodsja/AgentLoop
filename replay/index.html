@@ -804,8 +804,13 @@ body.panel-open{overflow:hidden}
         </div>
       </div>
       <p class="fhint">Multi-task plans: set cycles to roughly tasks x retries</p>
-      <label for="lEngine">Engine</label>
-      <select id="lEngine">
+      <label for="lWorkerEngine">Worker engine</label>
+      <select id="lWorkerEngine">
+        <option value="claude">Claude Code</option>
+        <option value="codex" selected>Codex</option>
+      </select>
+      <label for="lCriticEngine">Critic engine</label>
+      <select id="lCriticEngine">
         <option value="claude">Claude Code</option>
         <option value="codex" selected>Codex</option>
       </select>
@@ -1364,7 +1369,7 @@ function mockPost(url, body){
   }
   if (url === '/api/loop'){
     const id = 't-' + Math.random().toString(16).slice(2, 10);
-    mock.tasks.pending.push({id, type: 'loop', title: 'loop: ' + body.project, project: body.project, engine: body.engine || 'codex', createdAt: new Date().toISOString()});
+    mock.tasks.pending.push({id, type: 'loop', title: 'loop: ' + body.project, project: body.project, engine: body.engine || 'codex', workerEngine: body.workerEngine || body.engine || 'codex', criticEngine: body.criticEngine || body.engine || 'codex', createdAt: new Date().toISOString()});
     mockEvent('queue', 'queued loop: ' + baseName(body.project), id);
     return {id};
   }
@@ -1500,7 +1505,7 @@ function renderStatusline(s){
   if (isFinite(started) && isFinite(ts)) runBase.set('@up', {ms: ts - started, at: Date.now()});
 }
 
-/* single engine picker: built-in list now, daemon-reported list (state.engines.available) when it lands */
+/* Engine pickers share availability, while retaining independent selections. */
 const ENGINES = [['claude', 'Claude Code'], ['codex', 'Codex']];
 let engineSig = '';
 function renderEngines(e){
@@ -1512,7 +1517,7 @@ function renderEngines(e){
   if (sig === engineSig) return; /* rebuilding every poll would fight the user's selection */
   const first = !engineSig;
   engineSig = sig;
-  for (const sel of [$('#lEngine'), $('#tEngine')]){
+  for (const sel of [$('#lWorkerEngine'), $('#lCriticEngine'), $('#tEngine')]){
     /* nothing to keep on the first paint, so defaultEngine wins there */
     const keep = first ? '' : sel.value;
     sel.innerHTML = list.map(x =>
@@ -1521,6 +1526,17 @@ function renderEngines(e){
       : list.some(x => x[0] === def && x[2]) ? def
       : (list.find(x => x[2]) || [''])[0];
   }
+  syncLoopStart();
+}
+
+/* a loop needs both role engines; an empty picker means nothing usable is installed */
+let loopSubmitting = false;
+function loopEnginesChosen(){
+  return Boolean($('#lWorkerEngine')?.value && $('#lCriticEngine')?.value);
+}
+function syncLoopStart(){
+  const submit = $('#loopForm button[type="submit"]');
+  if (submit) submit.disabled = loopSubmitting || !loopEnginesChosen();
 }
 
 /* ----- mcp connector ----- */
@@ -1632,13 +1648,18 @@ function followCycles(force){
   sc.scrollTo({left: target, behavior: instant ? 'auto' : 'smooth'});
 }
 
+function engineLabel(task){
+  if (task?.type !== 'loop') return task?.engine || '-';
+  return 'worker ' + (task.workerEngine || task.engine || '-') + ' · critic ' + (task.criticEngine || task.engine || '-');
+}
+
 /* ----- hero: active run ----- */
 function heroSig(hero){
   if (!hero) return 'idle';
   const cycles = Array.isArray(hero.cycles) ? hero.cycles : [];
   const plan = hero.plan && Array.isArray(hero.plan.tasks) ? hero.plan.tasks : null;
   return [
-    hero.id, hero.title, hero.project, hero.engine, hero.cycle, hero.maxCycles, hero.checkpoints, num(hero.toolCalls) !== null,
+    hero.id, hero.title, hero.project, engineLabel(hero), hero.cycle, hero.maxCycles, hero.checkpoints, num(hero.toolCalls) !== null,
     cycles.map(c => [c?.n, c?.status, c?.phase, c?.task, c?.summary, c?.costUsd, c?.durationMs].join(',')).join(';'),
     plan ? plan.map(t => [t?.n, t?.status, t?.tries, t?.budget, t?.checkpoint].join(',')).join(';') : 'noplan'
   ].join('|');
@@ -1758,7 +1779,7 @@ function renderHero(hero){
           '<button class="btn danger" data-cancel="' + id + '" data-lbl="Cancel run" aria-label="Cancel run ' + name + '">Cancel run</button>' +
         '</div></div>' +
         '<div class="runmeta">' +
-          '<span class="mchip">engine <b>' + clean(hero.engine || '-', 16) + '</b></span>' +
+          '<span class="mchip"><b>' + clean(engineLabel(hero), 60) + '</b></span>' +
           '<span class="mchip">elapsed <b data-el="' + id + '">-</b></span>' +
           '<span class="mchip">cycle <b>' + cur + '/' + max + '</b></span>' +
           (hasSpend ? '<span class="mchip">spend <b title="sum of completed cycles">' + fmtCost(spend) + '</b></span>' : '') +
@@ -1795,7 +1816,7 @@ function renderAlso(list, heroExists){
   $('#alsoCard').hidden = arr.length === 0;
   $('#cAlso').textContent = arr.length || '';
   $('#alsoLabel').textContent = heroExists ? 'Also running' : 'Running';
-  const sig = arr.map(t => [t?.id, t?.title, t?.type, t?.engine, t?.cycle, t?.maxCycles, num(t?.toolCalls) !== null].join('|')).join('~');
+  const sig = arr.map(t => [t?.id, t?.title, t?.type, engineLabel(t), t?.cycle, t?.maxCycles, num(t?.toolCalls) !== null].join('|')).join('~');
   if (changed('also', sig)) {
     $('#alsoList').innerHTML = arr.map(t => {
       const id = esc(t?.id ?? '');
@@ -1806,7 +1827,7 @@ function renderAlso(list, heroExists){
         '<span class="ttl">' + title + '</span>' +
         (isLoop && num(t?.cycle) !== null ? '<span class="am">cycle ' + t.cycle + (num(t?.maxCycles) ? '/' + t.maxCycles : '') + '</span>' : '') +
         '<span class="aact" id="act-' + id + '"></span>' +
-        '<span class="am"><span data-el="' + id + '">-</span>' + (num(t?.toolCalls) !== null ? ' · <span id="tc-' + id + '">' + t.toolCalls + '</span> tools' : '') + ' · ' + clean(t?.engine || '-', 12) + '</span>' +
+        '<span class="am"><span data-el="' + id + '">-</span>' + (num(t?.toolCalls) !== null ? ' · <span id="tc-' + id + '">' + t.toolCalls + '</span> tools' : '') + ' · ' + clean(engineLabel(t), 60) + '</span>' +
         '<button class="btn danger" data-cancel="' + id + '" data-lbl="Cancel" aria-label="Cancel ' + title + '">Cancel</button>' +
       '</div>';
     }).join('');
@@ -1861,7 +1882,7 @@ function renderQueue(list){
     '<div class="qrow">' +
       '<span class="pill ' + (t?.type === 'loop' ? 'p-blue' : 'p-cyan') + '"><i></i>' + (t?.type === 'loop' ? 'loop' : 'task') + '</span>' +
       '<span class="ttl">' + clean(t?.title || 'untitled', 80) + '</span>' +
-      '<span class="qe">' + clean(t?.engine || '', 12) + '</span>' +
+      '<span class="qe">' + clean(engineLabel(t), 60) + '</span>' +
       '<span class="qt">' + fmtRel(t?.createdAt) + '</span>' +
     '</div>'
   ).join('') : hush('Queue is clear.');
@@ -2277,7 +2298,7 @@ function init(){
   $('#loopForm').addEventListener('submit', async e => {
     e.preventDefault();
     const submit = e.currentTarget.querySelector('button[type="submit"]');
-    if (!submit || submit.disabled) return;
+    if (!submit || submit.disabled || !loopEnginesChosen()) return;
     const project = $('#lProject').value.trim();
     if (!project) return;
     const body = {project};
@@ -2285,18 +2306,22 @@ function init(){
     const tr = parseInt($('#lRetries').value, 10);
     if (mc >= 1) body.maxCycles = Math.min(50, mc);
     if (tr >= 1) body.taskRetries = Math.min(10, tr);
-    body.engine = $('#lEngine').value;
+    body.workerEngine = $('#lWorkerEngine').value;
+    body.criticEngine = $('#lCriticEngine').value;
     body.autoCommit = $('#lCkpt').checked;
     if ($('#lPolish').checked) body.polish = true;
-    submit.disabled = true;
+    loopSubmitting = true;
+    syncLoopStart();
     try {
       const j = await post('/api/loop', body);
       flash($('#loopMsg'), 'loop queued ' + (j?.id || ''));
       $('#lProject').value = '';
       poll();
     } catch (err) { flash($('#loopMsg'), err.message, true); }
-    finally { submit.disabled = false; }
+    finally { loopSubmitting = false; syncLoopStart(); }
   });
+  for (const id of ['#lWorkerEngine', '#lCriticEngine']) $(id).addEventListener('change', syncLoopStart);
+  syncLoopStart();
   document.addEventListener('keydown', e => {
     trapFocus(e);
     if (e.key !== 'Escape') return;

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { criticPrompt, loopWorkerPrompt, parseCriticVerdict, parsePlanTasks, parsePolishVerdict } = require('../src/prompts');
+const { criticPrompt, polishCriticPrompt, polishWorkerPrompt, loopWorkerPrompt, parseCriticVerdict, parsePlanTasks, parsePolishVerdict } = require('../src/prompts');
 
 test('canonical PASS and FAIL lines parse unchanged', () => {
   assert.deepEqual(parseCriticVerdict('VERDICT: PASS'), { verdict: 'PASS' });
@@ -97,6 +97,16 @@ test('critic prompt states the completeness policy and CONTINUE grammar', () => 
   assert.match(prompt, /VERDICT: PASS/);
   assert.match(prompt, /VERDICT: FAIL - <concrete fixes, one line>/);
   assert.doesNotMatch(prompt, /BLOCKED ITEMS/);
+});
+
+test('critic prompts state read-only access and worker prompts do not', () => {
+  for (const prompt of [criticPrompt('out'), polishCriticPrompt('out')]) {
+    assert.match(prompt, /You have read-only access: do not modify files\./);
+    assert.match(prompt, /A sandbox or permission denial is not a project failure\./);
+  }
+  for (const prompt of [loopWorkerPrompt({}), polishWorkerPrompt({}, 'tidy')]) {
+    assert.doesNotMatch(prompt, /read-only access/);
+  }
 });
 
 test('critic prompt injects blocked items as delimited data', () => {

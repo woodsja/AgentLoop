@@ -8,6 +8,74 @@ const { spawnSync } = require('node:child_process');
 const daemon = require('../src/daemon');
 const store = require('../src/store');
 
+test('loop roles inherit the legacy engine and independently override it', () => {
+  const saved = store.config.enginePaths;
+  store.config.enginePaths = { codex: process.execPath, claude: process.execPath };
+  try {
+    assert.deepEqual(daemon.loopEngines({ engine: 'claude' }), {
+      engine: 'claude', workerEngine: 'claude', criticEngine: 'claude',
+    });
+    assert.deepEqual(daemon.loopEngines({ workerEngine: 'claude', criticEngine: 'codex' }), {
+      engine: 'claude', workerEngine: 'claude', criticEngine: 'codex',
+    });
+    assert.equal(daemon.loopEngines({ engine: 'claude', workerEngine: 'codex' }).criticEngine, 'claude');
+    assert.equal(daemon.loopEngines({ engine: 'codex', criticEngine: 'claude' }).workerEngine, 'codex');
+    assert.equal(daemon.loopEngines({}).criticEngine, store.config.defaultEngine);
+  } finally {
+    store.config.enginePaths = saved;
+  }
+});
+
+test('invalid and unavailable role engines fail with clear errors', () => {
+  const saved = store.config.enginePaths;
+  store.config.enginePaths = { codex: process.execPath, claude: process.execPath };
+  try {
+    for (const field of ['engine', 'workerEngine', 'criticEngine']) {
+      for (const value of ['unknown', '', null, 12]) {
+        assert.throws(() => daemon.loopEngines({ [field]: value }), new RegExp(`Unsupported ${field}`));
+      }
+    }
+    const savedDefault = store.config.defaultEngine;
+    store.config.defaultEngine = 'bogus';
+    try {
+      assert.equal(daemon.loopEngines({ workerEngine: 'codex', criticEngine: 'claude' }).criticEngine, 'claude');
+      assert.throws(() => daemon.loopEngines({ workerEngine: 'codex' }), /Unsupported engine: bogus/);
+    } finally {
+      store.config.defaultEngine = savedDefault;
+    }
+    store.config.enginePaths.claude = path.join(__dirname, 'missing-cli');
+    assert.throws(() => daemon.loopEngines({ criticEngine: 'claude' }), /critic engine claude.*unavailable/);
+    assert.throws(() => daemon.loopEngines({ workerEngine: 'claude' }), /worker engine claude.*unavailable/);
+    store.config.enginePaths.claude = __dirname;
+    assert.throws(() => daemon.loopEngines({ engine: 'claude' }), /unavailable/);
+  } finally {
+    store.config.enginePaths = saved;
+  }
+});
+
+test('queued roles survive a fresh store load and changed default engine', () => {
+  const saved = { paths: store.config.enginePaths, defaultEngine: store.config.defaultEngine, pending: store.paths.pending };
+  store.config.enginePaths = { codex: process.execPath, claude: process.execPath };
+  // A temp queue keeps a daemon running on this checkout from picking the loop up.
+  store.paths.pending = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-pending-'));
+  try {
+    const loop = store.enqueueLoop({ project: 'test', ...daemon.loopEngines({ workerEngine: 'codex', criticEngine: 'claude' }) });
+    const loaded = spawnSync(process.execPath, ['-e',
+      'const store = require("./src/store"); store.paths.pending = process.argv[2]; process.stdout.write(JSON.stringify(store.readTask(process.argv[1], "pending")));', loop.id, store.paths.pending,
+    ], { cwd: store.paths.root, encoding: 'utf8' });
+    assert.equal(loaded.status, 0, loaded.stderr);
+    const persisted = JSON.parse(loaded.stdout);
+    store.config.defaultEngine = 'claude';
+    assert.equal(daemon.loopEngines(persisted).workerEngine, 'codex');
+    assert.equal(daemon.loopEngines(persisted).criticEngine, 'claude');
+  } finally {
+    fs.rmSync(store.paths.pending, { recursive: true, force: true });
+    store.paths.pending = saved.pending;
+    store.config.enginePaths = saved.paths;
+    store.config.defaultEngine = saved.defaultEngine;
+  }
+});
+
 const daemonSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'daemon.js'), 'utf8');
 
 function tempRepo() {
@@ -673,3 +741,85 @@ test('registerFailedCycle records checkpoint error into cycle checkpointError an
 });
 
 
+
+test('mixed role engines ignore a legacy top-level model and get their own engine models', () => {
+  const engines = require('../src/engines');
+  const codex = engines.get('codex');
+  const claude = engines.get('claude');
+  const saved = { model: store.config.model, models: store.config.models };
+  store.config.model = 'legacy-model';
+  store.config.models = { codex: 'codex-model', claude: 'claude-model' };
+  try {
+    const mixed = { engine: 'codex', workerEngine: 'codex', criticEngine: 'claude', model: 'loop-model' };
+    assert.equal(daemon.sessionModel(mixed, codex), 'codex-model');
+    assert.equal(daemon.sessionModel(mixed, claude), 'claude-model');
+    // A missing map entry falls back to that engine's default, never the other engine's name.
+    store.config.models = { codex: 'codex-model' };
+    assert.equal(daemon.sessionModel(mixed, claude), claude.defaultModel);
+    assert.notEqual(daemon.sessionModel(mixed, claude), 'legacy-model');
+    // Single-engine and legacy engine-only loops keep the existing override order.
+    assert.equal(daemon.sessionModel({ engine: 'claude', workerEngine: 'claude', criticEngine: 'claude' }, claude), 'legacy-model');
+    assert.equal(daemon.sessionModel({ engine: 'claude', model: 'loop-model' }, claude), 'loop-model');
+    assert.equal(daemon.sessionModel({ engine: 'codex' }, codex), 'codex-model');
+  } finally {
+    store.config.model = saved.model;
+    store.config.models = saved.models;
+  }
+  assert.match(daemonSource, /const model = sessionModel\(loop, engine\);/);
+});
+
+test('an engine that disappears after queueing fails the loop without substituting another engine', () => {
+  const tempStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-state-'));
+  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-project-'));
+  fs.writeFileSync(path.join(projectPath, 'PLAN.md'), '# Plan\n\n1. Create add.js\n');
+  const originalPaths = { ...store.paths };
+  const saved = { enginePaths: store.config.enginePaths, defaultEngine: store.config.defaultEngine };
+  Object.assign(store.paths, {
+    state: tempStateDir,
+    tasks: path.join(tempStateDir, 'tasks'),
+    pending: path.join(tempStateDir, 'tasks', 'pending'),
+    running: path.join(tempStateDir, 'tasks', 'running'),
+    done: path.join(tempStateDir, 'tasks', 'done'),
+    results: path.join(tempStateDir, 'results'),
+    logs: path.join(tempStateDir, 'logs'),
+    events: path.join(tempStateDir, 'events.ndjson'),
+    messages: path.join(tempStateDir, 'messages.ndjson'),
+  });
+  store.ensureDirs();
+  try {
+    for (const [role, missing, other] of [['critic', 'claude', 'codex'], ['worker', 'codex', 'claude']]) {
+      const cliPath = path.join(tempStateDir, `installed-${missing}`);
+      fs.writeFileSync(cliPath, '#!/bin/sh\nexit 99\n', { mode: 0o755 });
+      store.config.enginePaths = { codex: process.execPath, claude: process.execPath, [missing]: cliPath };
+      // The other engine stays installed and is the default, so a fallback would have something to use.
+      store.config.defaultEngine = other;
+      const roles = role === 'critic'
+        ? { workerEngine: other, criticEngine: missing }
+        : { workerEngine: missing, criticEngine: other };
+      const loop = store.enqueueLoop({
+        project: `unavailable-${role}`, projectPath, maxCycles: 2, taskRetries: 1, autoCommit: false, noGit: true,
+        ...daemon.loopEngines(roles),
+      });
+      fs.unlinkSync(cliPath);
+
+      daemon.fillSlots();
+
+      const done = store.readTask(loop.id, 'done');
+      assert.equal(done.status, 'failed');
+      assert.equal(done.reason, 'loop_start_failed');
+      assert.match(done.summary, new RegExp(`${role} engine ${missing}: .*unavailable`));
+      assert.equal(done.workerEngine, roles.workerEngine, 'worker engine was substituted');
+      assert.equal(done.criticEngine, roles.criticEngine, 'critic engine was substituted');
+      assert.deepEqual(done.cycles, [], 'a session was spawned despite the missing engine');
+      assert.equal(store.listTasks('running').length, 0);
+      assert.equal(store.listTasks('pending').length, 0);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(store.paths.results, `${loop.id}.json`), 'utf8')).status, 'failed');
+    }
+  } finally {
+    Object.assign(store.paths, originalPaths);
+    store.config.enginePaths = saved.enginePaths;
+    store.config.defaultEngine = saved.defaultEngine;
+    fs.rmSync(tempStateDir, { recursive: true, force: true });
+    fs.rmSync(projectPath, { recursive: true, force: true });
+  }
+});
