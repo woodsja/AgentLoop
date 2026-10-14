@@ -233,9 +233,11 @@ async function startDaemon(overridePort) {
     maxConcurrent: 1,
     taskTimeoutMin: 5,
     defaultEngine: 'codex',
+    // Deliberately incompatible with Claude: mixed loops must use the per-engine map.
+    model: 'legacy-codex-only-model',
     mcpBridge: { port: bridgePort },
-    models: { codex: 'gpt-5.6-terra' },
-    enginePaths: { codex: MOCK_EXECUTABLE },
+    models: { codex: 'gpt-5.6-terra', claude: 'opus' },
+    enginePaths: { codex: MOCK_EXECUTABLE, claude: MOCK_EXECUTABLE },
   };
 
   fs.writeFileSync(tempConfigPath, `${JSON.stringify(testConfig, null, 2)}\n`, 'utf8');
@@ -316,6 +318,9 @@ function collectActual(id, projectDir, mockState, waited, child) {
   const checkpointCommits = gitLog.stdout.split('\n').filter((line) => line.includes('wip(loop):'));
 
   return {
+    id,
+    invocations,
+    persisted: JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'state', 'tasks', 'done', `${id}.json`), 'utf8')),
     status: recent.status || null,
     summary: recent.summary || '',
     reason: recent.reason || null,
@@ -333,7 +338,7 @@ function collectActual(id, projectDir, mockState, waited, child) {
   };
 }
 
-async function runScenario(scenarioName, child) {
+async function runScenario(scenarioName, child, engines = {}) {
   const scenarioFile = path.join(SCENARIOS_DIR, `${scenarioName}.json`);
   const scenarioRaw = fs.readFileSync(scenarioFile, 'utf8');
   const scenario = JSON.parse(scenarioRaw.replace(/^\s*\/\/.*$/gm, ''));
@@ -356,6 +361,7 @@ async function runScenario(scenarioName, child) {
     maxCycles: scenario.maxCycles,
     taskRetries: scenario.taskRetries,
     engine: 'codex',
+    ...engines,
     autoCommit: scenario.autoCommit !== false,
   }, port);
 
@@ -378,6 +384,7 @@ module.exports = {
   stopDaemon,
   runScenario,
   cleanWorkspace,
+  request,
   get PORT() {
     return activePort();
   },

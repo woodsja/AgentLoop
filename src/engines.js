@@ -64,13 +64,16 @@ const codex = {
   // Codex writes its final message to a file rather than emitting it as an event.
   usesOutputFile: true,
 
-  args({ model, outputPath }) {
+  args({ model, outputPath, role = 'worker' }) {
+    const critic = role === 'critic';
     return [
       'exec',
       '--json',
-      '--sandbox', 'workspace-write',
-      '--config', 'approval_policy="on-request"',
-      '--config', 'approvals_reviewer="auto_review"',
+      '--sandbox', critic ? 'read-only' : 'workspace-write',
+      '--config', critic ? 'approval_policy="never"' : 'approval_policy="on-request"',
+      ...(critic ? [] : ['--config', 'approvals_reviewer="auto_review"']),
+      // A critic must not inherit MCP servers, hooks, profiles, or execpolicy allow rules.
+      ...(critic ? ['--ignore-user-config', '--ignore-rules'] : []),
       '--config', 'sandbox_workspace_write.network_access=false',
       '--skip-git-repo-check',
       '--output-last-message', outputPath,
@@ -109,6 +112,13 @@ const codex = {
   },
 };
 
+// Auto mode lets a classifier approve tools, so workers lose those that outlive or escape the loop.
+const workerDisallowedTools = [
+  'WebFetch', 'WebSearch', 'RemoteTrigger', 'CronCreate', 'CronDelete', 'CronList',
+  'ScheduleWakeup', 'SendMessage', 'ListAgents', 'EnterWorktree', 'ExitWorktree',
+  'PushNotification', 'DesignSync',
+].join(',');
+
 const claude = {
   id: 'claude',
   label: 'Claude Code',
@@ -117,16 +127,22 @@ const claude = {
   installHint: 'npm i -g @anthropic-ai/claude-code',
   usesOutputFile: false,
 
-  args({ model }) {
+  args({ model, role = 'worker' }) {
+    const critic = role === 'critic';
     return [
       '-p',
       '--output-format', 'stream-json',
       '--verbose',
-      // A worker must start fresh: safe-mode drops the operator's CLAUDE.md, hooks, skills, and MCP servers.
+      // Each role starts fresh, without operator customizations.
       '--safe-mode',
       '--strict-mcp-config',
-      '--permission-mode', 'acceptEdits',
-      '--disallowedTools', 'WebFetch,WebSearch',
+      // Restricted mode ignores user, project, and local settings files and confines file tools to the project.
+      ...(critic ? ['--restricted'] : []),
+      // Workers need classifier-reviewed shell execution; acceptEdits still prompts for test commands.
+      '--permission-mode', critic ? 'dontAsk' : 'auto',
+      // A closed tool list excludes shell execution, edits, and delegation.
+      ...(critic ? ['--tools', 'Read,Glob,Grep'] : []),
+      '--disallowedTools', critic ? 'WebFetch,WebSearch,mcp__*' : workerDisallowedTools,
       '--model', model,
     ];
   },
@@ -207,7 +223,8 @@ function binary(engine, enginePaths = {}) {
 }
 
 function available(engine, enginePaths) {
-  return Boolean(binary(engine, enginePaths));
+  const executable = binary(engine, enginePaths);
+  return Boolean(executable && executableFile(executable));
 }
 
 function modelFor(engine, config, override) {

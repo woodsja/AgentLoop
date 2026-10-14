@@ -120,7 +120,7 @@ function streamLines(stream, onLine) {
 function spawnEngine(engine, args, options) {
   const executable = engines.binary(engine, store.config.enginePaths);
 
-  if (!executable) {
+  if (!executable || !engines.available(engine, store.config.enginePaths)) {
     throw new Error(`${engine.label} CLI not found on PATH. Install it (${engine.installHint}) and restart the daemon.`);
   }
 
@@ -767,9 +767,45 @@ function finishLoopSession(loop, cycle, onFinish, details) {
   }
 }
 
+// Resolve once when queued (and for legacy queue files at start), then retain the roles.
+function loopEngines(input) {
+  function selection(field, fallback) {
+    const value = input[field] === undefined ? fallback : input[field];
+    if (typeof value !== 'string' || !knownEngines.has(value.trim())) {
+      throw new Error(`Unsupported ${field}: ${String(value)}.`);
+    }
+    return value.trim();
+  }
+  // With both roles explicit, engine is only a legacy label, so a stale defaultEngine cannot block the loop.
+  const engine = input.engine === undefined && input.workerEngine !== undefined && input.criticEngine !== undefined
+    ? selection('workerEngine')
+    : selection('engine', store.config.defaultEngine);
+  const workerEngine = selection('workerEngine', engine);
+  const criticEngine = selection('criticEngine', engine);
+  for (const [role, id] of [['worker', workerEngine], ['critic', criticEngine]]) {
+    const selected = engines.get(id);
+    if (!engines.available(selected, store.config.enginePaths)) {
+      throw new Error(`${role} engine ${id}: ${selected.label} CLI is unavailable. Install it (${selected.installHint}) or configure enginePaths.${id}.`);
+    }
+  }
+  return { engine, workerEngine, criticEngine };
+}
+
+// A single model name cannot fit two engines, so mixed loops use only the per-engine models map.
+function sessionModel(loop, engine) {
+  const mixed = (loop.workerEngine ?? loop.engine) !== (loop.criticEngine ?? loop.engine);
+  return mixed
+    ? engines.modelFor(engine, { models: store.config.models })
+    : engines.modelFor(engine, store.config, loop.model);
+}
+
 function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
-  const engine = engines.get(loop.engine) || engines.get(store.config.defaultEngine);
-  const model = engines.modelFor(engine, store.config, loop.model);
+  const id = loop[`${role}Engine`] ?? loop.engine ?? store.config.defaultEngine;
+  const engine = engines.get(id);
+  if (!engine) {
+    throw new Error(`Unsupported ${role} engine: ${id}.`);
+  }
+  const model = sessionModel(loop, engine);
   const cwd = loop.projectPath;
   const outputPath = engine.usesOutputFile
     ? path.join(
@@ -777,7 +813,7 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`,
     )
     : null;
-  const args = engine.args({ model, outputPath });
+  const args = engine.args({ model, outputPath, role });
   let child;
 
   appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
@@ -1549,12 +1585,13 @@ function startLoop(loop) {
   }
 
   try {
+    Object.assign(runningLoop, loopEngines(loop));
     store.writeTask(runningLoop, 'running');
     recordEvent('loop_started', { id: loop.id });
     runningActivity.set(loop.id, { ts: startedAt, text: 'Loop starting.', toolCalls: 0 });
     startLoopCycle(runningLoop);
   } catch (error) {
-    completeLoop(runningLoop, 'failed', 'Loop failed to start.', 'loop_start_failed');
+    completeLoop(runningLoop, 'failed', `Loop failed to start: ${error.message}`, 'loop_start_failed');
     console.error(`Failed to start ${loop.id}: ${error.message}`);
   }
 }
@@ -2328,15 +2365,14 @@ async function createLoop(req, res) {
     return;
   }
 
-  const engine = body && typeof body.engine === 'string' && body.engine.trim()
-    ? body.engine.trim()
-    : store.config.defaultEngine;
-  const polish = body && body.polish === true;
-
-  if (!knownEngines.has(engine)) {
-    sendJson(res, 400, { error: `Unsupported engine: ${engine}.` });
+  let selectedEngines;
+  try {
+    selectedEngines = loopEngines(body);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message });
     return;
   }
+  const polish = body && body.polish === true;
 
   const gitPresent = insideGitWorkTree(projectPath);
   const autoCommit = !(body && body.autoCommit === false) && gitPresent;
@@ -2369,7 +2405,7 @@ async function createLoop(req, res) {
     ...(gitAtQueue ? { gitAtQueue } : {}),
     ...(gitPresent ? {} : { noGit: true }),
     ...(polish ? { polish: true } : {}),
-    engine,
+    ...selectedEngines,
     title: `loop: ${project}`,
     source: taskSource(body),
   });
@@ -2875,4 +2911,6 @@ module.exports = {
   GitCheckpointError,
   shutdownGracePeriodMs,
   resetStopping: () => { stopping = false; },
+  loopEngines,
+  sessionModel,
 };
