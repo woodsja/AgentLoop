@@ -40,8 +40,8 @@ test('Dashboard sources compile and stay aligned', () => {
   assert.match(publicHtml, /<select id="tProject" required disabled>/);
   assert.match(publicHtml, /<select id="lWorkerEngine">/);
   assert.match(publicHtml, /<select id="lCriticEngine">/);
-  assert.match(publicHtml, /body\.workerEngine = \$('#lWorkerEngine'\)\.value/);
-  assert.match(publicHtml, /body\.criticEngine = \$('#lCriticEngine'\)\.value/);
+  assert.ok(publicHtml.includes("body.workerEngine = $('#lWorkerEngine').value"));
+  assert.ok(publicHtml.includes("body.criticEngine = $('#lCriticEngine').value"));
   assert.match(publicHtml, /fetch\('\/api\/projects', \{cache: 'no-store'\}\)/);
   assert.match(publicHtml, /body\.project = project/);
   assert.doesNotMatch(publicHtml, /body\.cwd = project/);
