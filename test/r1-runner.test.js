@@ -50,7 +50,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
         throw error;
       }
     }) : [];
-  }).filter(task => task.workflow === 'r1' && task.issue === number);
+  }).filter(task => task.workflow === 'r1' && task.issue === number)
+    .filter((task, index, tasks) => tasks.findLastIndex(other => other.id === task.id) === index);
   const commands = () => lines(path.join(root, 'commands'));
 
   let child; let output = ''; let port;
