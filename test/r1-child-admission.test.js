@@ -14,8 +14,8 @@ function fixture() {
   const store = { readTask: () => parent, listR1ChildLoops: () => [{ id: child.id, attempt: 1, stage: 'pending', task: child }],
     config: { allowedProjects: { demo: true } }, paths: { config: '/owner/config' } };
   const options = { store, resolveScope: () => ({ cwd: '/mock/issue-5', isolatedWorktree: true }),
-    loadProject: () => ({ enabled: true, worker: 'codex', reviewPolicy: 'always', checkout: '/checkout', worktreeRoot: '/mock' }),
-    resolveRoot: () => ({ cwd: '/checkout' }), derivePath: () => '/mock/issue-5' };
+    loadProject: () => ({ enabled: true, worker: 'codex', reviewPolicy: 'always', checkout: __dirname, worktreeRoot: '/mock' }),
+    resolveRoot: () => ({ cwd: __dirname }), derivePath: () => '/mock/issue-5' };
   return { options, parent, child };
 }
 test('only current reserved child of active R1 parent is admitted', () => {

@@ -32,7 +32,7 @@ function authorizeR1Child(child, {
     throw new Error('R1 project is not authorized for child execution.');
   }
   const ownerRoot = resolveRoot(store.config, parent.project, undefined, store.paths.config);
-  if (fs.existsSync(project.checkout) && fs.realpathSync(project.checkout) !== ownerRoot.cwd) {
+  if (fs.realpathSync(project.checkout) !== ownerRoot.cwd) {
     throw new Error('R1 project checkout differs from owner registry.');
   }
   const derived = derivePath(project, { number: parent.issue, title: job.issue.title });

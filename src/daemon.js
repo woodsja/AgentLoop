@@ -2546,7 +2546,7 @@ function readJob(id) {
   return null;
 }
 
-function cancelRunningLoop(id) {
+async function cancelRunningLoop(id) {
   const worker = activeWorkers.get(id);
   if (worker?.cancelled) return { status: 409, error: 'Task is already being cancelled.' };
   const loop = readRunningLoop(id);
@@ -2558,7 +2558,20 @@ function cancelRunningLoop(id) {
     worker.cancelled = true;
     clearTimeout(worker.timeout);
     worker.timeout = null;
-    terminateWorker(worker.child);
+    // Do not publish a terminal child record until its process has exited.
+    // R1's workspace cleanup guard relies on this ordering.
+    const child = worker.child;
+    const gone = child.exitCode !== null || child.signalCode !== null;
+    let timer;
+    const exited = gone || await new Promise(resolve => {
+      const finish = () => { clearTimeout(timer); resolve(true); };
+      child.once('close', finish);
+      child.once('exit', finish);
+      child.once('error', finish);
+      timer = setTimeout(() => resolve(false), shutdownGracePeriodMs);
+      terminateWorker(child);
+    });
+    if (!exited) return { status: 503, error: 'Worker exit is unconfirmed; workspace retained.' };
   }
   if (loop) {
     const cycle = currentCycle(loop, loop.cycle);
@@ -2595,7 +2608,10 @@ async function cancelTask(req, res) {
     }
     store.writeTask({ ...parent, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
     for (const child of attached) {
-      if (child.stage === 'running') cancelRunningLoop(child.id);
+      if (child.stage === 'running') {
+        const stopped = await cancelRunningLoop(child.id);
+        if (stopped.status !== 200) { sendJson(res, stopped.status, { error: stopped.error }); return; }
+      }
       else if (child.stage === 'pending') {
         const cancelled = { ...child.task, status: 'cancelled', reason: 'parent_cancelled', finishedAt: new Date().toISOString() };
         store.writeTask(cancelled, 'pending');
@@ -2606,7 +2622,7 @@ async function cancelTask(req, res) {
     sendJson(res, 200, { ok: true });
     return;
   }
-  const outcome = cancelRunningLoop(id);
+  const outcome = await cancelRunningLoop(id);
   sendJson(res, outcome.status, outcome.status === 200 ? { ok: true } : { error: outcome.error });
 }
 
