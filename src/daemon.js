@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 
 const store = require('./store');
 const { createR1Jobs } = require('./r1-jobs');
+const { startTime: r1ProcessStartTime, terminatePriorR1Worker } = require('./r1-process-claim');
 let r1Jobs = createR1Jobs(store);
 const engines = require('./engines');
 const { resolveProject, resolveWorkerScope } = require('./project-registry');
@@ -169,6 +170,14 @@ function terminateWorker(child) {
     child.kill('SIGKILL');
   } catch {
   }
+}
+
+function terminateLoopWorker(worker) {
+  if (worker.detachedGroup && worker.child?.pid && process.platform !== 'win32') {
+    try { process.kill(-worker.child.pid, 'SIGKILL'); return; }
+    catch { /* Fallback still targets the known direct child. */ }
+  }
+  terminateWorker(worker.child);
 }
 
 function stopWorker(child) {
@@ -886,9 +895,29 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   timeout = setTimeout(() => {
     timedOut = true;
     captureLine(`${role} timed out after ${timeoutMin} minutes.`);
-    terminateWorker(child);
+    terminateLoopWorker(worker);
   }, timeoutMin * 60 * 1000);
   worker.timeout = timeout;
+
+  if (loop.r1Child) {
+    // The CLI receives its prompt only AFTER we persist the identity of its
+    // process group. If we die before the claim, it cannot act on the issue.
+    try {
+      if (process.platform !== 'linux') throw new Error('R1 detached child recovery currently requires Linux.');
+      const identity = r1ProcessStartTime(child.pid);
+      if (!identity) throw new Error('Unable to identify the R1 child process before prompt.');
+      const current = readRunningLoop(loop.id);
+      if (!current || current.r1Child?.parentJobId !== loop.r1Child.parentJobId) {
+        throw new Error('R1 child no longer owns its running task record.');
+      }
+      store.writeTask({ ...current, workerPid: child.pid, workerStartTime: identity }, 'running');
+    } catch (error) {
+      inputFailed = true;
+      captureLine(`R1 process identity checkpoint failed: ${error.message}`);
+      terminateLoopWorker(worker);
+      return;
+    }
+  }
 
   try {
     child.stdin.end(prompt);
@@ -1675,7 +1704,7 @@ function spawnWorker(task) {
   timeout = setTimeout(() => {
     timedOut = true;
     captureLine(`Worker timed out after ${timeoutMin} minutes.`);
-    terminateWorker(child);
+    terminateLoopWorker(worker);
   }, timeoutMin * 60 * 1000);
   worker.timeout = timeout;
 
@@ -1754,6 +1783,7 @@ function fillSlots() {
     }
     return;
   }
+  if (running.some(task => task.r1Child)) return;
   r1Jobs.admit();
   const runningCount = running.length;
   const slots = Math.max(0, maxConcurrent - runningCount);
@@ -2563,10 +2593,7 @@ function cancelRunningLoop(id) {
     // The worker's existing `close` handler is the ONLY owner of the terminal
     // state: it runs after stdio closes, not when a kill signal is requested.
     // R1 child agents own a POSIX process group so grandchildren die too.
-    if (worker.detachedGroup && worker.child.pid) {
-      try { process.kill(-worker.child.pid, 'SIGKILL'); }
-      catch { terminateWorker(worker.child); }
-    } else terminateWorker(worker.child);
+    terminateLoopWorker(worker);
     return { status: 200, ok: true };
   }
   // No process was ever spawned, or it already settled: safe to finalize.
@@ -2744,6 +2771,10 @@ function recoverRunningTasks() {
       continue;
     }
 
+    if (task.r1Child && !terminatePriorR1Worker(task)) {
+      console.error(`R1 child ${task.id} may still have an active process group; retained as running.`);
+      continue;
+    }
     const finishedAt = new Date().toISOString();
     const isLoop = task.type === 'loop';
     const passed = isLoop && hasPassedCycle(task);
@@ -2858,6 +2889,7 @@ async function stop(exitFn = process.exit) {
 
   for (const task of runningTasks) {
     if (task.workflow === 'r1') continue;
+    if (task.r1Child && activeWorkers.has(task.id)) continue;
     if (terminalTaskStatuses.has(task.status)) {
       try {
         store.moveTask(task.id, 'running', 'done');

@@ -99,7 +99,9 @@ test('daemon restart marks interrupted child terminal and recovers its R1 parent
     store.moveTask(parent.id, 'pending', 'running');
     const child = store.enqueueLoop({ source: 'r1', project: 'demo', projectPath: root,
       workerEngine: 'codex', criticEngine: 'claude', engine: 'codex', status: 'running',
-      cycles: [{ n: 1, status: 'running', phase: 'worker' }], r1Child: { parentJobId: parent.id, attempt: 1, issue: 5 } });
+      cycles: [{ n: 1, status: 'running', phase: 'worker' }],
+      workerPid: 99999999, workerStartTime: '12345',
+      r1Child: { parentJobId: parent.id, attempt: 1, issue: 5 } });
     store.moveTask(child.id, 'pending', 'running');
     const waitingParent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 6, status: 'running' });
     store.moveTask(waitingParent.id, 'pending', 'running');
