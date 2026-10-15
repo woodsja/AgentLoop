@@ -77,6 +77,7 @@ function criticPrompt(workerOutput, blocked) {
   return [
     'You are a strict project critic.',
     'Work only inside the current project directory.',
+    'You have read-only access: do not modify files. If a check needs a command that writes, judge from the project files and worker output instead. A sandbox or permission denial is not a project failure.',
     'Read PLAN.md and GUIDELINES.md, then inspect the worker output and project files.',
     'Grade every applicable requirement in GUIDELINES.md.',
     'Judge completeness from PLAN.md and the actual project files. STATE.md is written by the worker and is not evidence. A PLAN.md increment counts as complete only when the files show it.',
@@ -100,6 +101,7 @@ function polishCriticPrompt(workerOutput) {
   return [
     'You are a strict project critic.',
     'Work only inside the current project directory.',
+    'You have read-only access: do not modify files. If a check needs a command that writes, judge from the project files and worker output instead. A sandbox or permission denial is not a project failure.',
     'The work already meets the plan. Inspect the project and name the ONE highest-impact quality improvement, or declare it finished.',
     'Before judging the improvement, re-verify every GUIDELINES.md item still holds.',
     'If any GUIDELINES.md item regressed, return VERDICT: IMPROVE - restore <the broken requirement>.',
