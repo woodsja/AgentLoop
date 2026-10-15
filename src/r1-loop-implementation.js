@@ -46,7 +46,7 @@ function approvedCriticPass(loop) {
 
 function createR1LoopImplementation({
   ensureChild, childState, cancelChild = async () => {}, isCancelled = () => false,
-  onChildQueued = () => {}, pollMs = 250, maxWaitMs = 45 * 60 * 1000,
+  onChildQueued = () => {}, recordBaseline = sha => sha, pollMs = 250, maxWaitMs = 45 * 60 * 1000,
   cancelWaitMs = 20 * 1000, verify = verifyTask,
 } = {}) {
   if (typeof ensureChild !== 'function' || typeof childState !== 'function') {
@@ -56,7 +56,10 @@ function createR1LoopImplementation({
     async run(cwd, inputTask) {
       const task = normalizeTaskContract(inputTask);
       const files = syntheticPlan(task);
-      const original = git(cwd, 'rev-parse', 'HEAD');
+      const original = await recordBaseline(git(cwd, 'rev-parse', 'HEAD'));
+      if (!/^[a-f0-9]{40}$/.test(original)) throw new Error('R1 baseline SHA checkpoint is invalid.');
+      try { git(cwd, 'merge-base', '--is-ancestor', original, 'HEAD'); }
+      catch { throw new Error('R1 baseline SHA is not an ancestor of the current implementation.'); }
       const hasOld = FILES.some(name => fs.existsSync(path.join(cwd, name)));
       // Recovery may encounter an interrupted earlier invocation. Existing
       // synthetic files are adopted only when their owner-authored content

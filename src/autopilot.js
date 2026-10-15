@@ -564,10 +564,16 @@ async function run(argv, dependencies = {}) {
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(project, candidate, instructions);
-      const service = createService({ config: storeConfig, ...dependencies.ralphOptions });
+      const service = createService({ config: storeConfig, ...dependencies.ralphOptions,
+        recordBaseline: sha => {
+          if (!job.ralph.baselineSha) { job.ralph.baselineSha = sha; store.save(job); }
+          return job.ralph.baselineSha;
+        },
+      });
       phase = 'running';
       job.status = 'running';
-      job.ralph = { status: 'running', attempts: 0, taskId: task && task.id ? task.id : null };
+      job.ralph = { status: 'running', attempts: 0, taskId: task && task.id ? task.id : null,
+        ...(job.ralph?.baselineSha ? { baselineSha: job.ralph.baselineSha } : {}) };
       job.verification = null;
       if (correction) correction.status = 'running';
       store.save(job);

@@ -86,3 +86,17 @@ test('a resumed invocation reattaches to matching synthetic files', async t => {
   assert.equal((await impl.run(f.cwd, f.task)).status, 'passed');
   assert.equal(f.git('status', '--porcelain'), '');
 });
+
+test('persisted initial baseline catches a prior commit that added and then removed generated instructions', async t => {
+  const f = fixture(t);
+  const first = f.git('rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(f.cwd, 'PLAN.md'), 'bad');
+  f.git('add', 'PLAN.md'); f.git('commit', '-m', 'bad synthetic');
+  fs.rmSync(path.join(f.cwd, 'PLAN.md'));
+  f.git('add', '-u'); f.git('commit', '-m', 'hide synthetic');
+  const impl = createR1LoopImplementation({
+    ensureChild: () => ({ id: 't-123' }), childState: () => f.child,
+    recordBaseline: () => first,
+  });
+  await assert.rejects(impl.run(f.cwd, f.task), /entered Git history/);
+});

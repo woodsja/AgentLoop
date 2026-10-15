@@ -306,31 +306,29 @@ function createR1Jobs(store, options = {}) {
     };
     const reviewer = dependencies.reviewPullRequest || createClaudeReviewAdapter({ spawn: trackedSpawn });
     try {
-      const implementation = project.implementationStrategy === 'worker-critic-loop'
-        ? createR1LoopImplementation({
-          ensureChild: () => ensureChildLoop(task.id),
-          childState: id => {
-            const child = store.listR1ChildLoops(task.id).find(item => item.id === id);
-            return child || null;
-          },
-          cancelChild: async id => {
-            if (typeof options.cancelChild !== 'function') throw new Error('R1 child cancellation is unavailable; workspace retained.');
-            const outcome = options.cancelChild(id);
-            if (outcome.status !== 200) throw new Error(`R1 child cancellation failed: ${outcome.error || outcome.status}`);
-          },
-          isCancelled: () => {
-            const current = store.readTask(task.id, 'running');
-            return current.cancelRequested === true;
-          },
-          onChildQueued: id => {
-            const current = store.readTask(task.id, 'running');
-            if (current.childLoopId !== id) throw new Error('R1 child association changed before implementation.');
-          },
-        }) : null;
+      const optionsCancelChild = options.cancelChild;
+      const mixedEnabled = project.implementationStrategy === 'worker-critic-loop';
       await run(['--project', task.project], {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
-        ...(implementation ? { createRalphTaskService: () => implementation } : {}),
+        ...(mixedEnabled ? { createRalphTaskService: options => {
+          const mixed = createR1LoopImplementation({
+            ensureChild: () => ensureChildLoop(task.id),
+            childState: id => store.listR1ChildLoops(task.id).find(item => item.id === id) || null,
+            cancelChild: async id => {
+              if (typeof optionsCancelChild !== 'function') throw new Error('Child cancellation unavailable; workspace retained.');
+              const outcome = optionsCancelChild(id);
+              if (outcome.status !== 200) throw new Error(`R1 child cancellation failed: ${outcome.error || outcome.status}`);
+            },
+            isCancelled: () => store.readTask(task.id, 'running').cancelRequested === true,
+            onChildQueued: id => {
+              const current = store.readTask(task.id, 'running');
+              if (current.childLoopId !== id) throw new Error('R1 child association changed before implementation.');
+            },
+            recordBaseline: options.recordBaseline,
+          });
+          return mixed;
+        } } : {}),
         cleanupIssueWorkspace: async (...args) => {
           const attached = store.listR1ChildLoops ? store.listR1ChildLoops(task.id) : [];
           if (attached.some(child => child.stage !== 'done'
