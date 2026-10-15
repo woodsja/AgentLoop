@@ -64,7 +64,8 @@ const codex = {
   // Codex writes its final message to a file rather than emitting it as an event.
   usesOutputFile: true,
 
-  args({ model, outputPath, workspaceRoot = null }) {
+  args({ model, outputPath, workspaceRoot = null, role = 'one-shot' }) {
+    const critic = role === 'critic';
     return [
       // Global flags: must precede the exec subcommand. Turns off the apps and
       // plugins features so host-injected app tools never reach the worker.
@@ -72,15 +73,24 @@ const codex = {
       '--disable', 'plugins',
       'exec',
       '--json',
-      ...(workspaceRoot ? [
+      ...(critic ? [
+        '--sandbox', 'read-only',
+        '--ignore-user-config', '--ignore-rules',
+        '--config', 'approval_policy="never"',
+        '--config', 'sandbox_workspace_write.network_access=false',
+      ] : workspaceRoot ? [
         '--ignore-user-config',
         '--cd', workspaceRoot,
         '--config', 'default_permissions="ralph_worktree"',
         '--config', 'permissions.ralph_worktree={extends=":workspace",filesystem={":slash_tmp"="read",":tmpdir"="read"},network={enabled=false}}',
         '--config', `projects.${JSON.stringify(workspaceRoot)}.trust_level="untrusted"`,
-      ] : ['--sandbox', 'workspace-write', '--config', 'sandbox_workspace_write.network_access=false']),
-      '--config', workspaceRoot ? 'approval_policy="never"' : 'approval_policy="on-request"',
-      ...(workspaceRoot ? [] : ['--config', 'approvals_reviewer="auto_review"']),
+        '--config', 'approval_policy="never"',
+      ] : [
+        '--sandbox', 'workspace-write',
+        '--config', 'sandbox_workspace_write.network_access=false',
+        '--config', 'approval_policy="on-request"',
+        '--config', 'approvals_reviewer="auto_review"',
+      ]),
       '--skip-git-repo-check',
       '--output-last-message', outputPath,
       '--model', model,
@@ -126,16 +136,22 @@ const claude = {
   installHint: 'npm i -g @anthropic-ai/claude-code',
   usesOutputFile: false,
 
-  args({ model }) {
+  args({ model, role = 'one-shot' }) {
+    const critic = role === 'critic';
+    const loopWorker = role === 'worker';
     return [
       '-p',
       '--output-format', 'stream-json',
       '--verbose',
-      // A worker must start fresh: safe-mode drops the operator's CLAUDE.md, hooks, skills, and MCP servers.
       '--safe-mode',
       '--strict-mcp-config',
-      '--permission-mode', 'acceptEdits',
-      '--disallowedTools', 'WebFetch,WebSearch',
+      ...(critic ? ['--restricted'] : []),
+      // Existing one-shot dispatch retains acceptEdits; loop workers use auto.
+      '--permission-mode', critic ? 'dontAsk' : loopWorker ? 'auto' : 'acceptEdits',
+      ...(critic ? ['--tools', 'Read,Glob,Grep'] : []),
+      '--disallowedTools', critic ? 'WebFetch,WebSearch,mcp__*'
+        : loopWorker ? 'WebFetch,WebSearch,RemoteTrigger,CronCreate,CronDelete,CronList,ScheduleWakeup,SendMessage,ListAgents,EnterWorktree,ExitWorktree,PushNotification,DesignSync'
+          : 'WebFetch,WebSearch',
       '--model', model,
     ];
   },
