@@ -1718,33 +1718,61 @@ function startTask(task) {
   }
 }
 
+function failUnauthorizedR1Child(child, error) {
+  const failed = {
+    ...child, status: 'failed', finishedAt: new Date().toISOString(),
+    reason: 'r1_child_unauthorized', summary: `R1 child admission refused: ${String(error.message).slice(0, 300)}`,
+  };
+  store.writeTask(failed, 'pending');
+  store.moveTask(child.id, 'pending', 'done');
+  store.writeResult({ id: child.id, status: 'failed', reason: failed.reason,
+    finishedAt: failed.finishedAt, summary: failed.summary });
+  recordEvent('loop_ended', { id: child.id, status: 'failed', reason: failed.reason });
+}
+
 function fillSlots() {
   const maxConcurrent = Math.max(1, Number(store.config.maxConcurrent) || 2);
   const running = store.listTasks('running');
   const r1 = running.find(task => task.workflow === 'r1');
-  if (r1) { r1Jobs.advance(r1); return; }
+  if (r1) {
+    r1Jobs.advance(r1);
+    // R1 owns the coordination slot. While its child is executing, no other
+    // project can use a worker slot. This avoids maxConcurrent=1 deadlock.
+    const childRunning = running.some(task => task.r1Child?.parentJobId === r1.id);
+    if (childRunning) return;
+    const pendingChildren = store.listTasks('pending').filter(task => task.r1Child?.parentJobId === r1.id);
+    if (pendingChildren.length === 0) return;
+    const candidate = sortPending(pendingChildren)[0];
+    try {
+      r1Jobs.authorizeChild(candidate);
+      if (running.some(task => task.id !== r1.id)) return;
+      startLoop(candidate);
+    } catch (error) {
+      failUnauthorizedR1Child(candidate, error);
+    }
+    return;
+  }
   r1Jobs.admit();
   const runningCount = running.length;
   const slots = Math.max(0, maxConcurrent - runningCount);
-
-  if (!slots) {
-    return;
-  }
+  if (!slots) return;
 
   const pending = sortPending(store.listTasks('pending'));
-
   for (const task of pending.slice(0, slots)) {
+    // An orphan child never becomes an ordinary unprivileged loop simply
+    // because its parent moved to done/recovery before queue admission.
+    if (task.r1Child) {
+      failUnauthorizedR1Child(task, new Error('Parent R1 job is not executing.'));
+      continue;
+    }
     if (task.workflow === 'r1') {
       if (store.listTasks('running').length) return;
       store.moveTask(task.id, 'pending', 'running');
       r1Jobs.advance(task);
       return;
     }
-    if (task.type === 'loop') {
-      startLoop(task);
-    } else {
-      startTask(task);
-    }
+    if (task.type === 'loop') startLoop(task);
+    else startTask(task);
   }
 }
 
@@ -2518,81 +2546,68 @@ function readJob(id) {
   return null;
 }
 
-async function cancelTask(req, res) {
-  let body;
-
-  try {
-    body = await readJsonBody(req);
-  } catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-
-  const id = body && typeof body.id === 'string' ? body.id : '';
-
-  if (!id) {
-    sendJson(res, 400, { error: 'id is required.' });
-    return;
-  }
-
+function cancelRunningLoop(id) {
   const worker = activeWorkers.get(id);
-
-  if (!worker) {
-    const loop = readRunningLoop(id);
-
-    if (loop) {
-      const cycle = currentCycle(loop, loop.cycle);
-      const cancelled = cycle && cycle.status === 'running'
-        ? updateCycle(loop, loop.cycle, {
-          status: 'cancelled',
-          finishedAt: new Date().toISOString(),
-        })
-        : loop;
-      completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
-      sendJson(res, 200, { ok: true });
-      return;
-    }
-
-    sendJson(res, 404, { error: 'Task is not running.' });
-    return;
+  if (worker?.cancelled) return { status: 409, error: 'Task is already being cancelled.' };
+  const loop = readRunningLoop(id);
+  if (!worker && !loop) return { status: 404, error: 'Task is not running.' };
+  if (worker?.type === 'loop' && loop) {
+    store.writeTask({ ...loop, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
   }
-
-  if (worker.cancelled) {
-    sendJson(res, 409, { error: 'Task is already being cancelled.' });
-    return;
+  if (worker) {
+    worker.cancelled = true;
+    clearTimeout(worker.timeout);
+    worker.timeout = null;
+    terminateWorker(worker.child);
   }
-
-  let loop;
-
-  if (worker.type === 'loop') {
-    loop = readRunningLoop(id);
-
-    if (loop) {
-      try {
-        store.writeTask({ ...loop, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
-      } catch (error) {
-        console.error(`Failed to mark ${id} as cancelled: ${error.message}`);
-      }
-    }
-  }
-
-  worker.cancelled = true;
-  clearTimeout(worker.timeout);
-  worker.timeout = null;
-  terminateWorker(worker.child);
-
   if (loop) {
     const cycle = currentCycle(loop, loop.cycle);
     const cancelled = cycle && cycle.status === 'running'
-      ? updateCycle(loop, loop.cycle, {
-        status: 'cancelled',
-        finishedAt: new Date().toISOString(),
-      })
-      : loop;
+      ? updateCycle(loop, loop.cycle, { status: 'cancelled', finishedAt: new Date().toISOString() }) : loop;
     completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
   }
+  return { status: 200, ok: true };
+}
 
-  sendJson(res, 200, { ok: true });
+async function cancelTask(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (error) { sendJson(res, 400, { error: error.message }); return; }
+  const id = body && typeof body.id === 'string' ? body.id : '';
+  if (!id) { sendJson(res, 400, { error: 'id is required.' }); return; }
+
+  // A waiting R1 parent has no engine process itself. Propagate cancellation
+  // to its one owned child before it can be scheduled or before further edits.
+  let parent = null;
+  try {
+    const task = store.readTask(id, 'running');
+    if (task.workflow === 'r1') parent = task;
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (parent) {
+    const attached = store.listR1ChildLoops(id);
+    if (!attached.length) {
+      sendJson(res, 404, { error: 'R1 parent has no attached loop to cancel.' });
+      return;
+    }
+    if (parent.cancelRequested) {
+      sendJson(res, 409, { error: 'R1 cancellation already requested.' });
+      return;
+    }
+    store.writeTask({ ...parent, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
+    for (const child of attached) {
+      if (child.stage === 'running') cancelRunningLoop(child.id);
+      else if (child.stage === 'pending') {
+        const cancelled = { ...child.task, status: 'cancelled', reason: 'parent_cancelled', finishedAt: new Date().toISOString() };
+        store.writeTask(cancelled, 'pending');
+        store.moveTask(child.id, 'pending', 'done');
+        store.writeResult({ id: child.id, status: 'cancelled', reason: 'parent_cancelled', finishedAt: cancelled.finishedAt });
+      }
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  const outcome = cancelRunningLoop(id);
+  sendJson(res, outcome.status, outcome.status === 200 ? { ok: true } : { error: outcome.error });
 }
 
 async function handleRequest(req, res) {

@@ -5,11 +5,12 @@ const { spawn, execFile } = require('node:child_process');
 const { run } = require('./autopilot');
 const { loadProjectConfig } = require('./autopilot-config');
 const { discoverReadyIssues, selectReadyIssue } = require('./autopilot-github');
-const { deriveWorktreePath } = require('./autopilot-workspace');
+const { deriveWorktreePath, cleanupIssueWorkspace } = require('./autopilot-workspace');
 const { createClaudeReviewAdapter } = require('./autopilot-review');
 const { createJobStore, resolveStateDir, hasPassingVerification, selectIssueForJobs, recordFailure, markTerminal } = require('./autopilot-state');
 const { managesWorktree, resolveProject } = require('./project-registry');
 const { createR1ChildHandoff } = require('./r1-child-handoff');
+const { authorizeR1Child } = require('./r1-child-admission');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -113,6 +114,14 @@ function createR1Jobs(store, options = {}) {
   }
 
   function checkpoint(task, phase) {
+    // A cancellation can arrive while R1 awaits a child. Never overwrite it
+    // with an older in-memory task snapshot or advance delivery after it.
+    try {
+      if (store.readTask(task.id, 'running').cancelRequested) task.cancelRequested = true;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (task.cancelRequested && !['blocked', 'failed', 'cancelled', 'completed', 'merged', 'passed'].includes(phase)) {
+      throw new Error('R1 job cancellation requested.');
+    }
     if (phase !== task.phase) {
       task.phases = [...(task.phases || []), { phase, at: now() }].slice(-50);
       task.phase = phase;
@@ -173,6 +182,7 @@ function createR1Jobs(store, options = {}) {
         && hasPassingVerification(job.verification, job.delivery.commit);
       task.status = approved ? 'passed' : 'blocked';
     }
+    if (task.cancelRequested) task.status = task.autonomous ? 'failed' : 'blocked';
     task.finishedAt = now();
     const terminal = task.status;
     logTransition(task, `terminal:${terminal}`, `terminal outcome: ${terminal}.`);
@@ -298,6 +308,14 @@ function createR1Jobs(store, options = {}) {
       await run(['--project', task.project], {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
+        cleanupIssueWorkspace: async (...args) => {
+          const attached = store.listR1ChildLoops ? store.listR1ChildLoops(task.id) : [];
+          if (attached.some(child => child.stage !== 'done'
+            || !['passed', 'failed', 'cancelled', 'maxed', 'partial', 'incomplete'].includes(child.task?.status))) {
+            throw new Error('R1 workspace cleanup refused while a child loop remains active or ambiguous.');
+          }
+          return (dependencies.cleanupIssueWorkspace || cleanupIssueWorkspace)(...args);
+        },
         discoverReadyIssues: async value => (await discover(value)).filter(issue => issue.number === task.issue),
         reviewPullRequest: reviewer,
         ralphOptions: { ...dependencies.ralphOptions, config: store.config, spawnImpl: trackedSpawn,
@@ -413,7 +431,8 @@ function createR1Jobs(store, options = {}) {
   // Construct lazily: legacy R1 consumers that never invoke the new internal
   // handoff do not need to implement its optional durable-store interface.
   const ensureChildLoop = id => createR1ChildHandoff({ store, loadProject: load }).ensure(id);
-  return { submit, advance, admit, recover, read, stop, ensureChildLoop };
+  const authorizeChild = task => authorizeR1Child(task, { store, loadProject: load });
+  return { submit, advance, admit, recover, read, stop, ensureChildLoop, authorizeChild };
 }
 
 module.exports = { createR1Jobs };
