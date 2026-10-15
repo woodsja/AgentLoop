@@ -372,3 +372,11 @@ test('dispatch_task requires and forwards a registered project name', async () =
     body: { project: 'demo', title: 'Legacy task', prompt: 'Do it', engine: undefined, source: 'mcp' },
   });
 });
+
+test('start_loop exposes independently selectable worker and critic engines', () => {
+  const schema = tools.tools.find(tool => tool.name === 'start_loop').inputSchema;
+  assert.deepEqual(schema.properties.workerEngine.enum, ['claude', 'codex']);
+  assert.deepEqual(schema.properties.criticEngine.enum, ['claude', 'codex']);
+  assert.ok(!schema.required.includes('workerEngine'));
+  assert.ok(!schema.required.includes('criticEngine'));
+});

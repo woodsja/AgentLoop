@@ -228,6 +228,9 @@ const invocation = {
   model,
   outputPath,
   argv: process.argv.slice(2),
+  prompt,
+  pid: process.pid,
+  engine: outputPath ? 'codex' : 'claude',
   scenario: scenarioFile,
 };
 
@@ -266,10 +269,10 @@ try {
     fs.writeFileSync(outputPath, lastMessage, 'utf8');
   }
 
-  emitJsonl({
+  emitJsonl(outputPath ? {
     type: 'item.completed',
     item: { type: 'agent_message', text: lastMessage.split('\n')[0] },
-  });
+  } : { type: 'result', result: lastMessage });
 
   invocation.ok = true;
   appendNdjson(path.join(stateDir, 'invocations.ndjson'), invocation);

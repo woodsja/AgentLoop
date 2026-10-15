@@ -792,8 +792,13 @@ body.panel-open{overflow:hidden}
         </div>
       </div>
       <p class="fhint">Multi-task plans: set cycles to roughly tasks x retries</p>
-      <label for="lEngine">Engine</label>
-      <select id="lEngine">
+      <label for="lWorkerEngine">Worker engine</label>
+      <select id="lWorkerEngine">
+        <option value="claude">Claude Code</option>
+        <option value="codex" selected>Codex</option>
+      </select>
+      <label for="lCriticEngine">Critic engine</label>
+      <select id="lCriticEngine">
         <option value="claude">Claude Code</option>
         <option value="codex" selected>Codex</option>
       </select>
@@ -1522,7 +1527,7 @@ function renderEngines(e){
   if (sig === engineSig) return; /* rebuilding every poll would fight the user's selection */
   const first = !engineSig;
   engineSig = sig;
-  for (const sel of [$('#lEngine'), $('#tEngine')]){
+  for (const sel of [$('#lWorkerEngine'), $('#lCriticEngine'), $('#tEngine')]){
     /* nothing to keep on the first paint, so defaultEngine wins there */
     const keep = first ? '' : sel.value;
     sel.innerHTML = list.map(x =>
@@ -2296,7 +2301,8 @@ function init(){
     const tr = parseInt($('#lRetries').value, 10);
     if (mc >= 1) body.maxCycles = Math.min(50, mc);
     if (tr >= 1) body.taskRetries = Math.min(10, tr);
-    body.engine = $('#lEngine').value;
+    body.workerEngine = $('#lWorkerEngine').value;
+    body.criticEngine = $('#lCriticEngine').value;
     body.autoCommit = $('#lCkpt').checked;
     if ($('#lPolish').checked) body.polish = true;
     submit.disabled = true;

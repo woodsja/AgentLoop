@@ -272,8 +272,8 @@ async function startDaemon(overridePort) {
     taskTimeoutMin: 5,
     defaultEngine: 'codex',
     mcpBridge: { port: bridgePort },
-    models: { codex: 'gpt-5.6-terra' },
-    enginePaths: { codex: MOCK_EXECUTABLE },
+    models: { codex: 'gpt-5.6-terra', claude: 'opus' },
+    enginePaths: { codex: MOCK_EXECUTABLE, claude: MOCK_EXECUTABLE },
     allowedProjects: SCENARIO_PROJECTS,
   };
 
@@ -357,6 +357,9 @@ function collectActual(id, projectDir, mockState, waited, child) {
   const checkpointCommits = gitLog.stdout.split('\n').filter((line) => line.includes('wip(loop):'));
 
   return {
+    id,
+    invocations,
+    persisted: JSON.parse(fs.readFileSync(path.join(stateDir, 'tasks', 'done', `${id}.json`), 'utf8')),
     status: recent.status || null,
     summary: recent.summary || '',
     reason: recent.reason || null,
@@ -374,7 +377,7 @@ function collectActual(id, projectDir, mockState, waited, child) {
   };
 }
 
-async function runScenario(scenarioName, child) {
+async function runScenario(scenarioName, child, roles = {}) {
   const scenarioFile = path.join(SCENARIOS_DIR, `${scenarioName}.json`);
   const scenario = loadScenario(scenarioName);
   const name = scenario.name || scenarioName;
@@ -395,7 +398,9 @@ async function runScenario(scenarioName, child) {
     project: name,
     maxCycles: scenario.maxCycles,
     taskRetries: scenario.taskRetries,
-    engine: 'codex',
+    engine: roles.engine ?? 'codex',
+    ...(roles.workerEngine ? { workerEngine: roles.workerEngine } : {}),
+    ...(roles.criticEngine ? { criticEngine: roles.criticEngine } : {}),
     autoCommit: scenario.autoCommit !== false,
   }, port);
 

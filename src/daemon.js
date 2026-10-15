@@ -770,24 +770,52 @@ function finishLoopSession(loop, cycle, onFinish, details) {
   }
 }
 
-function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
-  const engine = engines.get(loop.engine) || engines.get(store.config.defaultEngine);
-  const model = engines.modelFor(engine, store.config, loop.model);
-  const cwd = loop.projectPath;
-  const outputPath = engine.usesOutputFile
-    ? path.join(
-      store.paths.results,
-      `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`,
-    )
-    : null;
-  let child;
+// Persist explicit engine roles; pre-existing loops fall back to their original engine.
+function loopEngines(input = {}) {
+  input = input && typeof input === 'object' ? input : {};
+  function selected(field, fallback) {
+    const value = input[field] === undefined ? fallback : input[field];
+    if (typeof value !== 'string' || !knownEngines.has(value.trim())) {
+      throw new Error(`Unsupported ${field}: ${String(value)}.`);
+    }
+    return value.trim();
+  }
+  const engine = input.engine === undefined && input.workerEngine !== undefined && input.criticEngine !== undefined
+    ? selected('workerEngine') : selected('engine', store.config.defaultEngine);
+  return {
+    engine,
+    workerEngine: selected('workerEngine', engine),
+    criticEngine: selected('criticEngine', engine),
+  };
+}
 
-  appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
+function sessionModel(loop, engine) {
+  const mixed = (loop.workerEngine ?? loop.engine) !== (loop.criticEngine ?? loop.engine);
+  return mixed ? engines.modelFor(engine, { models: store.config.models })
+    : engines.modelFor(engine, store.config, loop.model);
+}
+
+function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
+  const id = loop[`${role}Engine`] ?? loop.engine ?? store.config.defaultEngine;
+  const cwd = loop.projectPath;
+  let child;
+  let engine;
+  let model;
+  let outputPath;
 
   try {
+    engine = engines.get(id);
+    if (!engine) throw new Error(`Unsupported ${role} engine: ${id}.`);
+    model = sessionModel(loop, engine);
+    outputPath = engine.usesOutputFile
+      ? path.join(store.paths.results, `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`)
+      : null;
+    appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
     const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
-    if (scope.isolatedWorktree && engine.id !== 'codex') throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
-    const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
+    if (scope.isolatedWorktree && role === 'worker' && engine.id !== 'codex') {
+      throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
+    }
+    const args = engine.args({ model, outputPath, role, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
     child = spawnEngine(engine, args, {
       cwd: scope.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -2384,15 +2412,13 @@ async function createLoop(req, res) {
     return;
   }
 
-  const engine = body && typeof body.engine === 'string' && body.engine.trim()
-    ? body.engine.trim()
-    : store.config.defaultEngine;
-  const polish = body && body.polish === true;
-
-  if (!knownEngines.has(engine)) {
-    sendJson(res, 400, { error: `Unsupported engine: ${engine}.` });
+  let selectedEngines;
+  try { selectedEngines = loopEngines(body); }
+  catch (error) {
+    sendJson(res, 400, { error: error.message });
     return;
   }
+  const polish = body && body.polish === true;
 
   const gitPresent = insideGitWorkTree(projectPath);
   const autoCommit = !(body && body.autoCommit === false) && gitPresent;
@@ -2425,7 +2451,7 @@ async function createLoop(req, res) {
     ...(gitAtQueue ? { gitAtQueue } : {}),
     ...(gitPresent ? {} : { noGit: true }),
     ...(polish ? { polish: true } : {}),
-    engine,
+    ...selectedEngines,
     title: `loop: ${project}`,
     source: taskSource(body),
   });
@@ -3005,6 +3031,8 @@ module.exports = {
   finishLoopCritic,
   finishLoopWorker,
   registerFailedCycle,
+  loopEngines,
+  sessionModel,
   GitCheckpointError,
   shutdownGracePeriodMs,
   resetStopping: () => { stopping = false; },
