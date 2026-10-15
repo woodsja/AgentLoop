@@ -86,6 +86,13 @@ function displayTitle(task) {
   return typeof task.title === 'string' && task.title ? task.title : 'untitled';
 }
 
+function roleEngines(task) {
+  return task.type === 'loop' ? {
+    ...(task.workerEngine ? { workerEngine: task.workerEngine } : {}),
+    ...(task.criticEngine ? { criticEngine: task.criticEngine } : {}),
+  } : {};
+}
+
 function publicPending(task, defaultEngine) {
   return {
     id: task.id,
@@ -93,6 +100,7 @@ function publicPending(task, defaultEngine) {
     title: displayTitle(task),
     ...(task.type === 'loop' ? { project: projectName(task) } : {}),
     engine: task.engine || defaultEngine,
+    ...roleEngines(task),
     createdAt: task.createdAt,
   };
 }
@@ -219,6 +227,7 @@ function publicRunning(task, activity, defaultEngine, now = Date.now()) {
     title: displayTitle(task),
     ...(task.type === 'loop' ? { project: projectName(task) } : {}),
     engine: task.engine || defaultEngine,
+    ...roleEngines(task),
     startedAt: task.startedAt,
     elapsedMs: Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : 0,
     ...(activity && activity.text ? { lastActivity: activity.text } : {}),
@@ -268,6 +277,7 @@ function publicRecent(task, result, defaultEngine) {
     type: task.type,
     title: displayTitle(task),
     engine: task.engine || defaultEngine,
+    ...roleEngines(task),
     status: merged.status,
     summary: typeof merged.summary === 'string' ? merged.summary : '',
     ...(costUsd !== null ? { costUsd } : {}),
