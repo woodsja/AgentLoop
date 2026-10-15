@@ -62,3 +62,17 @@ test('every engine passes the selected model through', () => {
     assert.equal(pairFollowing(argsFor(id), '--model'), 'test-model', `${id} drops the model`);
   }
 });
+
+test('independent critics are read-only while one-shot Claude keeps existing permissions', () => {
+  const critic = engines.get('codex').args({ model: 'test-model', outputPath: 'out.tmp', workspaceRoot: '/some/worktree', role: 'critic' });
+  assert.equal(pairFollowing(critic, '--sandbox'), 'read-only');
+  assert.ok(critic.includes('--ignore-user-config'));
+  assert.ok(critic.includes('--ignore-rules'));
+  assert.ok(!critic.some(value => value.includes('default_permissions="ralph_worktree"')));
+  const claudeCritic = engines.get('claude').args({ model: 'test-model', role: 'critic' });
+  assert.equal(pairFollowing(claudeCritic, '--permission-mode'), 'dontAsk');
+  assert.equal(pairFollowing(claudeCritic, '--tools'), 'Read,Glob,Grep');
+  assert.ok(claudeCritic.includes('--restricted'));
+  assert.equal(pairFollowing(engines.get('claude').args({ model: 'test-model', role: 'worker' }), '--permission-mode'), 'auto');
+  assert.equal(pairFollowing(argsFor('claude'), '--permission-mode'), 'acceptEdits');
+});
