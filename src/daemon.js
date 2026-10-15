@@ -820,6 +820,7 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       cwd: scope.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      ...(loop.r1Child && process.platform !== 'win32' ? { detached: true } : {}),
     });
   } catch (error) {
     finishLoopSession(loop, cycle, onFinish, {
@@ -838,7 +839,8 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   let timedOut = false;
   let settled = false;
   let timeout;
-  const worker = { child, timeout: null, cancelled: false, type: 'loop', role };
+  const worker = { child, timeout: null, cancelled: false, type: 'loop', role,
+    detachedGroup: Boolean(loop.r1Child && process.platform !== 'win32') };
   activeWorkers.set(loop.id, worker);
   const captureLine = (line) => {
     appendSessionLog(loop, cycle, role, line);
@@ -2546,11 +2548,11 @@ function readJob(id) {
   return null;
 }
 
-async function cancelRunningLoop(id) {
+function cancelRunningLoop(id) {
   const worker = activeWorkers.get(id);
-  if (worker?.cancelled) return { status: 409, error: 'Task is already being cancelled.' };
   const loop = readRunningLoop(id);
   if (!worker && !loop) return { status: 404, error: 'Task is not running.' };
+  if (worker?.cancelled) return { status: 200, ok: true };
   if (worker?.type === 'loop' && loop) {
     store.writeTask({ ...loop, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
   }
@@ -2558,27 +2560,20 @@ async function cancelRunningLoop(id) {
     worker.cancelled = true;
     clearTimeout(worker.timeout);
     worker.timeout = null;
-    // Do not publish a terminal child record until its process has exited.
-    // R1's workspace cleanup guard relies on this ordering.
-    const child = worker.child;
-    const gone = child.exitCode !== null || child.signalCode !== null;
-    let timer;
-    const exited = gone || await new Promise(resolve => {
-      const finish = () => { clearTimeout(timer); resolve(true); };
-      child.once('close', finish);
-      child.once('exit', finish);
-      child.once('error', finish);
-      timer = setTimeout(() => resolve(false), shutdownGracePeriodMs);
-      terminateWorker(child);
-    });
-    if (!exited) return { status: 503, error: 'Worker exit is unconfirmed; workspace retained.' };
+    // The worker's existing `close` handler is the ONLY owner of the terminal
+    // state: it runs after stdio closes, not when a kill signal is requested.
+    // R1 child agents own a POSIX process group so grandchildren die too.
+    if (worker.detachedGroup && worker.child.pid) {
+      try { process.kill(-worker.child.pid, 'SIGKILL'); }
+      catch { terminateWorker(worker.child); }
+    } else terminateWorker(worker.child);
+    return { status: 200, ok: true };
   }
-  if (loop) {
-    const cycle = currentCycle(loop, loop.cycle);
-    const cancelled = cycle && cycle.status === 'running'
-      ? updateCycle(loop, loop.cycle, { status: 'cancelled', finishedAt: new Date().toISOString() }) : loop;
-    completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
-  }
+  // No process was ever spawned, or it already settled: safe to finalize.
+  const cycle = currentCycle(loop, loop.cycle);
+  const cancelled = cycle && cycle.status === 'running'
+    ? updateCycle(loop, loop.cycle, { status: 'cancelled', finishedAt: new Date().toISOString() }) : loop;
+  completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
   return { status: 200, ok: true };
 }
 
@@ -2602,14 +2597,13 @@ async function cancelTask(req, res) {
       sendJson(res, 404, { error: 'R1 parent has no attached loop to cancel.' });
       return;
     }
-    if (parent.cancelRequested) {
-      sendJson(res, 409, { error: 'R1 cancellation already requested.' });
-      return;
+    // Cancellation retries complete any work left by a partial first request.
+    if (!parent.cancelRequested) {
+      store.writeTask({ ...parent, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
     }
-    store.writeTask({ ...parent, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
     for (const child of attached) {
       if (child.stage === 'running') {
-        const stopped = await cancelRunningLoop(child.id);
+        const stopped = cancelRunningLoop(child.id);
         if (stopped.status !== 200) { sendJson(res, stopped.status, { error: stopped.error }); return; }
       }
       else if (child.stage === 'pending') {
@@ -2622,7 +2616,7 @@ async function cancelTask(req, res) {
     sendJson(res, 200, { ok: true });
     return;
   }
-  const outcome = await cancelRunningLoop(id);
+  const outcome = cancelRunningLoop(id);
   sendJson(res, outcome.status, outcome.status === 200 ? { ok: true } : { error: outcome.error });
 }
 
@@ -2931,7 +2925,8 @@ async function stop(exitFn = process.exit) {
     for (const worker of workers) {
       if (worker.child && worker.child.pid) {
         try {
-          worker.child.kill('SIGTERM');
+          if (worker.detachedGroup && process.platform !== 'win32') process.kill(-worker.child.pid, 'SIGTERM');
+          else worker.child.kill('SIGTERM');
         } catch {
         }
       }

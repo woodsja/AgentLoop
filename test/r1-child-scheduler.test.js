@@ -149,7 +149,7 @@ test('cancelling an R1 parent cancels its pending reserved child before any work
     assert.equal(store.readTask(parent.id, 'running').cancelRequested, true);
     assert.equal(store.readTask(loop.id, 'done').status, 'cancelled');
     assert.equal(store.listR1ChildLoops(parent.id)[0].stage, 'done');
-    assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: parent.id }) })).status, 409);
+    assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: parent.id }) })).status, 200);
   } finally {
     await new Promise(resolve => server.close(resolve));
     if (old.config === undefined) delete process.env.AGENTLOOP_CONFIG_PATH;
