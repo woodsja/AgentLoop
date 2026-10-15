@@ -1,12 +1,17 @@
 'use strict';
 
+const fs = require('node:fs');
+const { hasLiveClaim } = require('./r1-process-claim');
+
 // Explicit offline operator recovery for an R1 child whose old process group
 // cannot be proven stopped. Never expose this override through HTTP or MCP.
 function recoverBlockedChild(store, id, confirmStopped) {
   if (!/^t-[a-f0-9]{24}$/.test(id || '')) throw new Error('A valid R1 child ID is required.');
   if (confirmStopped !== true) throw new Error('Explicit --confirm-stopped is required.');
   if (store.isAlive()) throw new Error('Stop the AgentLoop daemon before offline R1 child recovery.');
-
+  const lock = { pid: process.pid, port: 0, startedAt: new Date().toISOString() };
+  if (!store.acquireHeartbeat(lock)) throw new Error('Unable to acquire exclusive offline daemon ownership.');
+  try {
   const child = store.readTask(id, 'running');
   if (child.id !== id || child.type !== 'loop' || child.source !== 'r1'
     || !child.r1Child?.parentJobId || child.recoveryBlocked !== true) {
@@ -16,6 +21,7 @@ function recoverBlockedChild(store, id, confirmStopped) {
     .filter(entry => entry.id === id && entry.stage === 'running');
   if (reservation.length !== 1) throw new Error('R1 child reservation does not match the blocked queue record.');
 
+  if (hasLiveClaim(child)) throw new Error('Old R1 child process group is still alive; recovery refused.');
   const now = new Date().toISOString();
   const recovered = { ...child, status: 'failed', finishedAt: now,
     reason: 'operator_confirmed_child_stopped', recoveryBlocked: false,
@@ -30,6 +36,14 @@ function recoverBlockedChild(store, id, confirmStopped) {
   store.moveTask(id, 'running', 'done');
   store.writeResult({ id, status: 'failed', reason: recovered.reason, finishedAt: now, summary: recovered.summary });
   return { id, status: 'failed', reason: recovered.reason };
+  } finally {
+    // We hold the daemon heartbeat as an exclusive lock for the entire write.
+    // Never delete a heartbeat belonging to a different owner.
+    const current = store.readHeartbeat();
+    if (current?.pid === process.pid && current.startedAt === lock.startedAt) {
+      fs.rmSync(store.paths.daemon, { force: true });
+    }
+  }
 }
 
 if (require.main === module) {

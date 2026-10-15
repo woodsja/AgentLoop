@@ -46,4 +46,11 @@ function terminatePriorR1Worker(task) {
   } catch { return false; }
 }
 
-module.exports = { startTime, terminatePriorR1Worker };
+function hasLiveClaim(task) {
+  if (!Number.isSafeInteger(task.workerPid) || task.workerPid <= 0) return false;
+  const observed = startTime(task.workerPid);
+  if (observed && observed !== task.workerStartTime) return false;
+  return processGroupExists(task.workerPid);
+}
+
+module.exports = { startTime, terminatePriorR1Worker, hasLiveClaim };

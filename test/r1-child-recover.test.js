@@ -9,6 +9,9 @@ function fixture() {
   const called = [];
   const store = { isAlive: () => false, readTask: () => ({ ...child }),
     listR1ChildLoops: () => [{ id, stage: 'running', task: child }],
+    acquireHeartbeat: () => true,
+    readHeartbeat: () => ({ pid: -1 }),
+    paths: { daemon: '/tmp/nonexistent-r1-operator-lock-fixture' },
     appendEvent: (...args) => called.push(['event', ...args]),
     appendLogLine: (...args) => called.push(['log', ...args]),
     writeTask: (...args) => called.push(['write', ...args]),
