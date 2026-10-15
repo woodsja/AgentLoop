@@ -46,6 +46,7 @@ function fixture(t) {
     config: { allowedProjects: configuredProjects({ demo: { root: checkout, worktreeRoot } }, configPath) },
     readTask: (id, stage) => { if (id !== parent.id || stage !== 'running') throw new Error('not found'); return structuredClone(parent); },
     ...{ enqueueR1ChildLoopOnce: durable.ensureLoop, listR1ChildLoops: durable.listChildren },
+    writeTask: (task, stage) => { if (stage === 'running') Object.assign(parent, structuredClone(task)); },
   };
   const create = () => createR1ChildHandoff({ store, loadProject: () => project });
   return { root, checkout, issuePath, project, parent, tasks, store, create };
@@ -58,14 +59,16 @@ test('one authorized parent creates one durable child and repeated calls reuse i
   assert.deepEqual(handoff.ensure(f.parent.id), { id: first.id, created: false });
   assert.equal(f.tasks.length, 1);
   assert.deepEqual(f.tasks[0].r1Child, { parentJobId: f.parent.id, attempt: 1, issue: 65 });
-  assert.equal(f.parent.childLoopId, undefined, 'the handoff never overwrites the parent record');
+  assert.equal(f.parent.childLoopId, first.id, 'the parent checkpoints the unique child reference');
 });
 
 test('child survives failed parent checkpoint and a reconstructed handoff', t => {
   const f = fixture(t);
-  const first = f.create().ensure(f.parent.id);
+  f.store.writeTask = () => { throw new Error('simulated interrupted parent checkpoint'); };
+  assert.throws(() => f.create().ensure(f.parent.id), /interrupted parent checkpoint/);
   assert.equal(f.tasks.length, 1);
-  assert.deepEqual(f.create().ensure(f.parent.id), { id: first.id, created: false });
+  f.store.writeTask = (task) => Object.assign(f.parent, structuredClone(task));
+  assert.deepEqual(f.create().ensure(f.parent.id), { id: f.tasks[0].id, created: false });
 });
 
 test('rejects missing, completed, mismatched and unauthorized parent without creating a child', t => {

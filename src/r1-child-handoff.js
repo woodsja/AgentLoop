@@ -72,19 +72,31 @@ function createR1ChildHandoff({ store, loadProject, configPath = store?.paths?.c
       && !fs.statSync(path.join(expected, 'PLAN.md'), { throwIfNoEntry: false })?.isFile()) {
       throw new Error('R1 child requires prepared PLAN.md; no loop queued.');
     }
-    // A cancelled or advanced parent must not be authorized by a stale read.
-    // This handoff does NOT write back a parent snapshot; R1 remains its owner.
+    // This internal handoff is synchronous under the daemon's single-writer
+    // ownership. Nothing can change parent state between this check and the
+    // durable queue write in the same call. #67 must revalidate immediately
+    // before a queued child is executed, since cancellation can happen later.
     const latest = readEligibleParent(parentJobId);
     if (latest.project !== parent.project || latest.issue !== parent.issue || latest.r1.runs !== attempt
       || latest.r1.worktreePath !== expected || latest.childLoopId !== parent.childLoopId) {
       throw new Error('R1 parent changed while requesting its child loop.');
     }
 
-    return store.enqueueR1ChildLoopOnce(parentJobId, attempt, {
+    const child = store.enqueueR1ChildLoopOnce(parentJobId, attempt, {
       project: parent.project, projectPath: expected, source: 'r1', title: `R1 issue #${parent.issue} implementation`,
       engine: 'codex', workerEngine: 'codex', criticEngine: 'claude', autoCommit: true,
       maxCycles: 3, taskRetries: 2, r1Child: { parentJobId, attempt, issue: parent.issue },
     });
+    // Re-read the parent rather than writing back the earlier eligibility
+    // snapshot. The durable child index remains authoritative if this last
+    // checkpoint fails or power is lost: a retry will find the same child.
+    const current = readEligibleParent(parentJobId);
+    if (current.r1.runs !== attempt || current.r1.worktreePath !== expected
+      || (current.childAttempt === attempt && current.childLoopId && current.childLoopId !== child.id)) {
+      throw new Error('R1 parent changed before its child checkpoint.');
+    }
+    store.writeTask({ ...current, childLoopId: child.id, childAttempt: attempt }, 'running');
+    return child;
   }
 
   return { ensure };
