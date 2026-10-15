@@ -849,3 +849,15 @@ test('registerFailedCycle records checkpoint error into cycle checkpointError an
     try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
   }
 });
+
+test('loop roles can be independently selected and old engine-only requests remain valid', () => {
+  assert.deepEqual(daemon.loopEngines({ workerEngine: 'codex', criticEngine: 'claude' }), {
+    engine: 'codex', workerEngine: 'codex', criticEngine: 'claude',
+  });
+  assert.deepEqual(daemon.loopEngines({ engine: 'claude' }), {
+    engine: 'claude', workerEngine: 'claude', criticEngine: 'claude',
+  });
+  assert.equal(daemon.loopEngines({ engine: 'claude', criticEngine: 'codex' }).workerEngine, 'claude');
+  assert.throws(() => daemon.loopEngines({ engine: 'unknown' }), /Unsupported engine/);
+  assert.throws(() => daemon.loopEngines({ workerEngine: 'unknown', criticEngine: 'claude' }), /Unsupported workerEngine/);
+});
