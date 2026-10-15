@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { configuredProjects } = require('./project-registry');
+const { createR1ChildStore } = require('./r1-child-store');
 
 const root = path.resolve(__dirname, '..');
 function resolveConfigPath() {
@@ -453,7 +454,11 @@ function isAlive(heartbeat = readHeartbeat()) {
   }
 }
 
+const childStore = createR1ChildStore({ stateRoot: paths.state, writeTask });
+
 module.exports = {
+  enqueueR1ChildLoopOnce: childStore.ensureLoop,
+  listR1ChildLoops: childStore.listChildren,
   config,
   paths,
   ensureDirs,

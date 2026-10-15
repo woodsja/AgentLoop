@@ -9,6 +9,7 @@ const { deriveWorktreePath } = require('./autopilot-workspace');
 const { createClaudeReviewAdapter } = require('./autopilot-review');
 const { createJobStore, resolveStateDir, hasPassingVerification, selectIssueForJobs, recordFailure, markTerminal } = require('./autopilot-state');
 const { managesWorktree, resolveProject } = require('./project-registry');
+const { createR1ChildHandoff } = require('./r1-child-handoff');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -408,7 +409,11 @@ function createR1Jobs(store, options = {}) {
     return Promise.allSettled([...active.values()]);
   }
 
-  return { submit, advance, admit, recover, read, stop };
+  // Internal-only handoff, deliberately absent from the public R1 submission route.
+  // Construct lazily: legacy R1 consumers that never invoke the new internal
+  // handoff do not need to implement its optional durable-store interface.
+  const ensureChildLoop = id => createR1ChildHandoff({ store, loadProject: load }).ensure(id);
+  return { submit, advance, admit, recover, read, stop, ensureChildLoop };
 }
 
 module.exports = { createR1Jobs };
