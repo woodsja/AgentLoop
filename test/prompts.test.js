@@ -172,3 +172,6 @@ test('polish verdict parsing is unchanged', () => {
     improvement: 'tighten error copy',
   });
 });
+
+// Temporary CI sentinel: prove a deliberately failing test makes CI red.
+test('CI red-gate sentinel (intentionally fails)', () => { assert.fail('CI_NEGATIVE_TEST_SENTINEL'); });
