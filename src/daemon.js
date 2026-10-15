@@ -772,6 +772,7 @@ function finishLoopSession(loop, cycle, onFinish, details) {
 
 // Persist explicit engine roles; pre-existing loops fall back to their original engine.
 function loopEngines(input = {}) {
+  input = input && typeof input === 'object' ? input : {};
   function selected(field, fallback) {
     const value = input[field] === undefined ? fallback : input[field];
     if (typeof value !== 'string' || !knownEngines.has(value.trim())) {
@@ -796,21 +797,20 @@ function sessionModel(loop, engine) {
 
 function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   const id = loop[`${role}Engine`] ?? loop.engine ?? store.config.defaultEngine;
-  const engine = engines.get(id);
-  if (!engine) throw new Error(`Unsupported ${role} engine: ${id}.`);
-  const model = sessionModel(loop, engine);
   const cwd = loop.projectPath;
-  const outputPath = engine.usesOutputFile
-    ? path.join(
-      store.paths.results,
-      `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`,
-    )
-    : null;
   let child;
-
-  appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
+  let engine;
+  let model;
+  let outputPath;
 
   try {
+    engine = engines.get(id);
+    if (!engine) throw new Error(`Unsupported ${role} engine: ${id}.`);
+    model = sessionModel(loop, engine);
+    outputPath = engine.usesOutputFile
+      ? path.join(store.paths.results, `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`)
+      : null;
+    appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
     const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
     if (scope.isolatedWorktree && role === 'worker' && engine.id !== 'codex') {
       throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');

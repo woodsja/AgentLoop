@@ -146,8 +146,8 @@ const claude = {
       '--safe-mode',
       '--strict-mcp-config',
       ...(critic ? ['--restricted'] : []),
-      // Existing one-shot dispatch retains acceptEdits; loop workers use auto.
-      '--permission-mode', critic ? 'dontAsk' : loopWorker ? 'auto' : 'acceptEdits',
+      // Preserve existing acceptEdits for loop and one-shot workers.
+      '--permission-mode', critic ? 'dontAsk' : 'acceptEdits',
       ...(critic ? ['--tools', 'Read,Glob,Grep'] : []),
       '--disallowedTools', critic ? 'WebFetch,WebSearch,mcp__*'
         : loopWorker ? 'WebFetch,WebSearch,RemoteTrigger,CronCreate,CronDelete,CronList,ScheduleWakeup,SendMessage,ListAgents,EnterWorktree,ExitWorktree,PushNotification,DesignSync'

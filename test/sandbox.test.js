@@ -73,6 +73,6 @@ test('independent critics are read-only while one-shot Claude keeps existing per
   assert.equal(pairFollowing(claudeCritic, '--permission-mode'), 'dontAsk');
   assert.equal(pairFollowing(claudeCritic, '--tools'), 'Read,Glob,Grep');
   assert.ok(claudeCritic.includes('--restricted'));
-  assert.equal(pairFollowing(engines.get('claude').args({ model: 'test-model', role: 'worker' }), '--permission-mode'), 'auto');
+  assert.equal(pairFollowing(engines.get('claude').args({ model: 'test-model', role: 'worker' }), '--permission-mode'), 'acceptEdits');
   assert.equal(pairFollowing(argsFor('claude'), '--permission-mode'), 'acceptEdits');
 });

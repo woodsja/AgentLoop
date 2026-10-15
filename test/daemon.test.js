@@ -861,3 +861,7 @@ test('loop roles can be independently selected and old engine-only requests rema
   assert.throws(() => daemon.loopEngines({ engine: 'unknown' }), /Unsupported engine/);
   assert.throws(() => daemon.loopEngines({ workerEngine: 'unknown', criticEngine: 'claude' }), /Unsupported workerEngine/);
 });
+
+test('null loop requests preserve default engine fallback', () => {
+  assert.equal(daemon.loopEngines(null).workerEngine, 'codex');
+});
