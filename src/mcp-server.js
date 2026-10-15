@@ -4,7 +4,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const store = require('./store');
-const { tools, callTool } = require('./tools');
+const { tools, runBashTool, callTool } = require('./tools');
+const runBash = require('./run-bash');
+
+// run_bash executes arbitrary commands, so a deployment must opt in on the server command line.
+const runBashEnabled = process.argv.includes('--enable-run-bash');
+const listedTools = runBashEnabled ? [...tools, runBashTool] : tools;
 
 const protocolVersion = '2025-06-18';
 const supportedVersions = new Set(['2024-11-05', '2025-03-26', protocolVersion]);
@@ -42,9 +47,9 @@ async function handleMessage(message) {
     } else if (message.method === 'notifications/initialized' || message.method === 'ping') {
       result = {};
     } else if (message.method === 'tools/list') {
-      result = { tools };
+      result = { tools: listedTools };
     } else if (message.method === 'tools/call') {
-      result = await callTool(message.params);
+      result = await callTool(message.params, { runBash: runBashEnabled });
     } else if (message.method === 'resources/list') {
       result = { resources: [] };
     } else if (message.method === 'prompts/list') {
@@ -102,7 +107,31 @@ process.stdin.on('data', (chunk) => {
     });
   }
 });
-process.stdin.on('end', () => process.exit(0));
+
+let stopping = false;
+
+// run_bash commands run in detached process groups, so exiting without stopping them would
+// leave them running with no timeout. Shutdown is bounded by runBash.shutdown's limit.
+async function shutdown(reason, code) {
+  if (stopping) {
+    return;
+  }
+
+  stopping = true;
+  log(`stopping: ${reason}`);
+
+  try {
+    await runBash.shutdown();
+  } catch (error) {
+    log(`run_bash shutdown failed: ${error.stack || error.message}`);
+  }
+
+  process.exit(code);
+}
+
+process.stdin.on('end', () => shutdown('stdin closed', 0));
+process.on('SIGTERM', () => shutdown('SIGTERM', 143));
+process.on('SIGINT', () => shutdown('SIGINT', 130));
 process.stdout.on('error', (error) => log(`stdout: ${error.message}`));
 process.on('uncaughtException', (error) => log(`uncaught: ${error.stack || error.message}`));
 log('started');
