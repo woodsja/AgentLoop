@@ -34,6 +34,39 @@ test('scenario: clean-pass completes and checkpoints', async () => {
   }
 });
 
+test('mixed Codex worker and Claude critic persist role selection and model choice', async () => {
+  const { actual } = await runScenario('clean-pass', daemon, { workerEngine: 'codex', criticEngine: 'claude' });
+  assert.equal(actual.status, 'passed');
+  assert.deepEqual(actual.invocations.map(row => [row.engine, row.role, row.model]), [
+    ['codex', 'worker', 'gpt-5.6-terra'], ['claude', 'critic', 'opus'],
+  ]);
+  const critic = actual.invocations[1];
+  assert.ok(critic.argv.includes('Read,Glob,Grep'));
+  assert.ok(critic.argv.includes('dontAsk'));
+  assert.equal(actual.persisted.workerEngine, 'codex');
+  assert.equal(actual.persisted.criticEngine, 'claude');
+  assert.equal(new Set(actual.invocations.map(row => row.pid)).size, 2);
+});
+
+test('a Claude failure sends concrete corrections to a fresh Codex worker', async () => {
+  const { actual } = await runScenario('task-retry', daemon, { workerEngine: 'codex', criticEngine: 'claude' });
+  assert.equal(actual.status, 'passed');
+  assert.deepEqual(actual.verdicts, ['FAIL', 'PASS']);
+  assert.deepEqual(actual.invocations.map(row => [row.engine, row.role]), [
+    ['codex', 'worker'], ['claude', 'critic'], ['codex', 'worker'], ['claude', 'critic'],
+  ]);
+  assert.match(actual.invocations[2].prompt, /syntax error in add.js/);
+  assert.equal(actual.checkpoints, 1);
+});
+
+test('legacy engine-only loops retain the same worker and critic engine', async () => {
+  const { actual } = await runScenario('clean-pass', daemon, { engine: 'claude' });
+  assert.equal(actual.status, 'passed');
+  assert.deepEqual(actual.invocations.map(row => [row.engine, row.role]), [
+    ['claude', 'worker'], ['claude', 'critic'],
+  ]);
+});
+
 // Multi-task plan: walks 3 tasks with CONTINUE, CONTINUE, PASS and checkpoints each task.
 test('scenario: multi-task plan walk checkpoints each task', async () => {
   const { actual, expect } = await runScenario('plan-walk', daemon);
