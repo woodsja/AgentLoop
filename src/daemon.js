@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 
 const store = require('./store');
 const { createR1Jobs } = require('./r1-jobs');
+const { startTime: r1ProcessStartTime, terminatePriorR1Worker } = require('./r1-process-claim');
 let r1Jobs = createR1Jobs(store);
 const engines = require('./engines');
 const { resolveProject, resolveWorkerScope } = require('./project-registry');
@@ -169,6 +170,14 @@ function terminateWorker(child) {
     child.kill('SIGKILL');
   } catch {
   }
+}
+
+function terminateLoopWorker(worker) {
+  if (worker.detachedGroup && worker.child?.pid && process.platform !== 'win32') {
+    try { process.kill(-worker.child.pid, 'SIGKILL'); return; }
+    catch { /* Fallback still targets the known direct child. */ }
+  }
+  terminateWorker(worker.child);
 }
 
 function stopWorker(child) {
@@ -820,6 +829,7 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       cwd: scope.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      ...(loop.r1Child && process.platform !== 'win32' ? { detached: true } : {}),
     });
   } catch (error) {
     finishLoopSession(loop, cycle, onFinish, {
@@ -838,7 +848,8 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   let timedOut = false;
   let settled = false;
   let timeout;
-  const worker = { child, timeout: null, cancelled: false, type: 'loop', role };
+  const worker = { child, timeout: null, cancelled: false, type: 'loop', role,
+    detachedGroup: Boolean(loop.r1Child && process.platform !== 'win32') };
   activeWorkers.set(loop.id, worker);
   const captureLine = (line) => {
     appendSessionLog(loop, cycle, role, line);
@@ -884,9 +895,29 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   timeout = setTimeout(() => {
     timedOut = true;
     captureLine(`${role} timed out after ${timeoutMin} minutes.`);
-    terminateWorker(child);
+    terminateLoopWorker(worker);
   }, timeoutMin * 60 * 1000);
   worker.timeout = timeout;
+
+  if (loop.r1Child) {
+    // The CLI receives its prompt only AFTER we persist the identity of its
+    // process group. If we die before the claim, it cannot act on the issue.
+    try {
+      if (process.platform !== 'linux') throw new Error('R1 detached child recovery currently requires Linux.');
+      const identity = r1ProcessStartTime(child.pid);
+      if (!identity) throw new Error('Unable to identify the R1 child process before prompt.');
+      const current = readRunningLoop(loop.id);
+      if (!current || current.r1Child?.parentJobId !== loop.r1Child.parentJobId) {
+        throw new Error('R1 child no longer owns its running task record.');
+      }
+      store.writeTask({ ...current, workerPid: child.pid, workerStartTime: identity }, 'running');
+    } catch (error) {
+      inputFailed = true;
+      captureLine(`R1 process identity checkpoint failed: ${error.message}`);
+      terminateLoopWorker(worker);
+      return;
+    }
+  }
 
   try {
     child.stdin.end(prompt);
@@ -1673,7 +1704,7 @@ function spawnWorker(task) {
   timeout = setTimeout(() => {
     timedOut = true;
     captureLine(`Worker timed out after ${timeoutMin} minutes.`);
-    terminateWorker(child);
+    terminateLoopWorker(worker);
   }, timeoutMin * 60 * 1000);
   worker.timeout = timeout;
 
@@ -1718,33 +1749,62 @@ function startTask(task) {
   }
 }
 
+function failUnauthorizedR1Child(child, error) {
+  const failed = {
+    ...child, status: 'failed', finishedAt: new Date().toISOString(),
+    reason: 'r1_child_unauthorized', summary: `R1 child admission refused: ${String(error.message).slice(0, 300)}`,
+  };
+  store.writeTask(failed, 'pending');
+  store.moveTask(child.id, 'pending', 'done');
+  store.writeResult({ id: child.id, status: 'failed', reason: failed.reason,
+    finishedAt: failed.finishedAt, summary: failed.summary });
+  recordEvent('loop_ended', { id: child.id, status: 'failed', reason: failed.reason });
+}
+
 function fillSlots() {
   const maxConcurrent = Math.max(1, Number(store.config.maxConcurrent) || 2);
   const running = store.listTasks('running');
   const r1 = running.find(task => task.workflow === 'r1');
-  if (r1) { r1Jobs.advance(r1); return; }
+  if (r1) {
+    r1Jobs.advance(r1);
+    // R1 owns the coordination slot. While its child is executing, no other
+    // project can use a worker slot. This avoids maxConcurrent=1 deadlock.
+    const childRunning = running.some(task => task.r1Child?.parentJobId === r1.id);
+    if (childRunning) return;
+    const pendingChildren = store.listTasks('pending').filter(task => task.r1Child?.parentJobId === r1.id);
+    if (pendingChildren.length === 0) return;
+    const candidate = sortPending(pendingChildren)[0];
+    try {
+      r1Jobs.authorizeChild(candidate);
+      if (running.some(task => task.id !== r1.id)) return;
+      startLoop(candidate);
+    } catch (error) {
+      failUnauthorizedR1Child(candidate, error);
+    }
+    return;
+  }
+  if (running.some(task => task.r1Child)) return;
   r1Jobs.admit();
   const runningCount = running.length;
   const slots = Math.max(0, maxConcurrent - runningCount);
-
-  if (!slots) {
-    return;
-  }
+  if (!slots) return;
 
   const pending = sortPending(store.listTasks('pending'));
-
   for (const task of pending.slice(0, slots)) {
+    // An orphan child never becomes an ordinary unprivileged loop simply
+    // because its parent moved to done/recovery before queue admission.
+    if (task.r1Child) {
+      failUnauthorizedR1Child(task, new Error('Parent R1 job is not executing.'));
+      continue;
+    }
     if (task.workflow === 'r1') {
       if (store.listTasks('running').length) return;
       store.moveTask(task.id, 'pending', 'running');
       r1Jobs.advance(task);
       return;
     }
-    if (task.type === 'loop') {
-      startLoop(task);
-    } else {
-      startTask(task);
-    }
+    if (task.type === 'loop') startLoop(task);
+    else startTask(task);
   }
 }
 
@@ -2518,81 +2578,78 @@ function readJob(id) {
   return null;
 }
 
+function cancelRunningLoop(id) {
+  const worker = activeWorkers.get(id);
+  const loop = readRunningLoop(id);
+  if (!worker && !loop) return { status: 404, error: 'Task is not running.' };
+  if (worker?.cancelled) return { status: 200, ok: true };
+  if (worker?.type === 'loop' && loop) {
+    store.writeTask({ ...loop, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
+  }
+  if (worker) {
+    worker.cancelled = true;
+    clearTimeout(worker.timeout);
+    worker.timeout = null;
+    // The worker's existing `close` handler is the ONLY owner of the terminal
+    // state: it runs after stdio closes, not when a kill signal is requested.
+    // R1 child agents own a POSIX process group so grandchildren die too.
+    terminateLoopWorker(worker);
+    return { status: 200, ok: true };
+  }
+  // On restart a retained R1 loop can have no in-memory worker handle even
+  // while its old detached agent is alive. Never clear it without proving
+  // the previous process group has stopped. Repeated cancel is a safe escape.
+  if (loop.r1Child && !terminatePriorR1Worker(loop)) {
+    return { status: 503, error: 'Previous R1 agent process has not been confirmed stopped; workspace retained.' };
+  }
+  const cycle = currentCycle(loop, loop.cycle);
+  const cancelled = cycle && cycle.status === 'running'
+    ? updateCycle(loop, loop.cycle, { status: 'cancelled', finishedAt: new Date().toISOString() }) : loop;
+  completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
+  return { status: 200, ok: true };
+}
+
 async function cancelTask(req, res) {
   let body;
-
-  try {
-    body = await readJsonBody(req);
-  } catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-
+  try { body = await readJsonBody(req); }
+  catch (error) { sendJson(res, 400, { error: error.message }); return; }
   const id = body && typeof body.id === 'string' ? body.id : '';
+  if (!id) { sendJson(res, 400, { error: 'id is required.' }); return; }
 
-  if (!id) {
-    sendJson(res, 400, { error: 'id is required.' });
-    return;
-  }
-
-  const worker = activeWorkers.get(id);
-
-  if (!worker) {
-    const loop = readRunningLoop(id);
-
-    if (loop) {
-      const cycle = currentCycle(loop, loop.cycle);
-      const cancelled = cycle && cycle.status === 'running'
-        ? updateCycle(loop, loop.cycle, {
-          status: 'cancelled',
-          finishedAt: new Date().toISOString(),
-        })
-        : loop;
-      completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
-      sendJson(res, 200, { ok: true });
+  // A waiting R1 parent has no engine process itself. Propagate cancellation
+  // to its one owned child before it can be scheduled or before further edits.
+  let parent = null;
+  try {
+    const task = store.readTask(id, 'running');
+    if (task.workflow === 'r1') parent = task;
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (parent) {
+    const attached = store.listR1ChildLoops(id);
+    if (!attached.length) {
+      sendJson(res, 404, { error: 'R1 parent has no attached loop to cancel.' });
       return;
     }
-
-    sendJson(res, 404, { error: 'Task is not running.' });
-    return;
-  }
-
-  if (worker.cancelled) {
-    sendJson(res, 409, { error: 'Task is already being cancelled.' });
-    return;
-  }
-
-  let loop;
-
-  if (worker.type === 'loop') {
-    loop = readRunningLoop(id);
-
-    if (loop) {
-      try {
-        store.writeTask({ ...loop, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
-      } catch (error) {
-        console.error(`Failed to mark ${id} as cancelled: ${error.message}`);
+    // Cancellation retries complete any work left by a partial first request.
+    if (!parent.cancelRequested) {
+      store.writeTask({ ...parent, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
+    }
+    for (const child of attached) {
+      if (child.stage === 'running') {
+        const stopped = cancelRunningLoop(child.id);
+        if (stopped.status !== 200) { sendJson(res, stopped.status, { error: stopped.error }); return; }
+      }
+      else if (child.stage === 'pending') {
+        const cancelled = { ...child.task, status: 'cancelled', reason: 'parent_cancelled', finishedAt: new Date().toISOString() };
+        store.writeTask(cancelled, 'pending');
+        store.moveTask(child.id, 'pending', 'done');
+        store.writeResult({ id: child.id, status: 'cancelled', reason: 'parent_cancelled', finishedAt: cancelled.finishedAt });
       }
     }
+    sendJson(res, 200, { ok: true });
+    return;
   }
-
-  worker.cancelled = true;
-  clearTimeout(worker.timeout);
-  worker.timeout = null;
-  terminateWorker(worker.child);
-
-  if (loop) {
-    const cycle = currentCycle(loop, loop.cycle);
-    const cancelled = cycle && cycle.status === 'running'
-      ? updateCycle(loop, loop.cycle, {
-        status: 'cancelled',
-        finishedAt: new Date().toISOString(),
-      })
-      : loop;
-    completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
-  }
-
-  sendJson(res, 200, { ok: true });
+  const outcome = cancelRunningLoop(id);
+  sendJson(res, outcome.status, outcome.status === 200 ? { ok: true } : { error: outcome.error });
 }
 
 async function handleRequest(req, res) {
@@ -2719,6 +2776,14 @@ function recoverRunningTasks() {
       continue;
     }
 
+    if (task.r1Child && !terminatePriorR1Worker(task)) {
+      const note = 'R1 child process termination unconfirmed; worktree retained. Retry cancel after verifying the old process group has ended.';
+      console.error(`R1 child ${task.id}: ${note}`);
+      store.writeTask({ ...task, recoveryBlocked: true, lastActivity: note }, 'running');
+      store.appendLogLine(task.id, note);
+      recordEvent('r1_child_recovery_blocked', { id: task.id, reason: 'process_unconfirmed' });
+      continue;
+    }
     const finishedAt = new Date().toISOString();
     const isLoop = task.type === 'loop';
     const passed = isLoop && hasPassedCycle(task);
@@ -2773,6 +2838,19 @@ function recoverRunningTasks() {
       console.error(`Failed to recover ${task.id}: ${error.message}`);
     }
   }
+  // A child queued just before a crash must not remain pending after its
+  // parent was moved back to the recovery queue. Otherwise attempt N+1
+  // cannot proceed, and an old attempt might later execute unexpectedly.
+  for (const child of store.listTasks('pending')) {
+    if (!child.r1Child) continue;
+    let activeParent = false;
+    try {
+      const parent = store.readTask(child.r1Child.parentJobId, 'running');
+      activeParent = parent.workflow === 'r1' && parent.status === 'running'
+        && parent.r1?.runs === child.r1Child.attempt && !parent.cancelRequested;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (!activeParent) failUnauthorizedR1Child(child, new Error('Pending R1 child orphaned by daemon restart.'));
+  }
 }
 
 // On Windows, a scripted SIGTERM (TerminateProcess) kills immediately and never reaches this handler.
@@ -2820,6 +2898,7 @@ async function stop(exitFn = process.exit) {
 
   for (const task of runningTasks) {
     if (task.workflow === 'r1') continue;
+    if (task.r1Child && activeWorkers.has(task.id)) continue;
     if (terminalTaskStatuses.has(task.status)) {
       try {
         store.moveTask(task.id, 'running', 'done');
@@ -2900,7 +2979,8 @@ async function stop(exitFn = process.exit) {
     for (const worker of workers) {
       if (worker.child && worker.child.pid) {
         try {
-          worker.child.kill('SIGTERM');
+          if (worker.detachedGroup && process.platform !== 'win32') process.kill(-worker.child.pid, 'SIGTERM');
+          else worker.child.kill('SIGTERM');
         } catch {
         }
       }
