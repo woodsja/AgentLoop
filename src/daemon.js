@@ -2596,7 +2596,12 @@ function cancelRunningLoop(id) {
     terminateLoopWorker(worker);
     return { status: 200, ok: true };
   }
-  // No process was ever spawned, or it already settled: safe to finalize.
+  // On restart a retained R1 loop can have no in-memory worker handle even
+  // while its old detached agent is alive. Never clear it without proving
+  // the previous process group has stopped. Repeated cancel is a safe escape.
+  if (loop.r1Child && !terminatePriorR1Worker(loop)) {
+    return { status: 503, error: 'Previous R1 agent process has not been confirmed stopped; workspace retained.' };
+  }
   const cycle = currentCycle(loop, loop.cycle);
   const cancelled = cycle && cycle.status === 'running'
     ? updateCycle(loop, loop.cycle, { status: 'cancelled', finishedAt: new Date().toISOString() }) : loop;
@@ -2772,7 +2777,11 @@ function recoverRunningTasks() {
     }
 
     if (task.r1Child && !terminatePriorR1Worker(task)) {
-      console.error(`R1 child ${task.id} may still have an active process group; retained as running.`);
+      const note = 'R1 child process termination unconfirmed; worktree retained. Retry cancel after verifying the old process group has ended.';
+      console.error(`R1 child ${task.id}: ${note}`);
+      store.writeTask({ ...task, recoveryBlocked: true, lastActivity: note }, 'running');
+      store.appendLogLine(task.id, note);
+      recordEvent('r1_child_recovery_blocked', { id: task.id, reason: 'process_unconfirmed' });
       continue;
     }
     const finishedAt = new Date().toISOString();

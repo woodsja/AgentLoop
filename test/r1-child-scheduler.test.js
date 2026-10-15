@@ -107,7 +107,15 @@ test('daemon restart marks interrupted child terminal and recovers its R1 parent
     store.moveTask(waitingParent.id, 'pending', 'running');
     const orphan = store.enqueueLoop({ source: 'r1', project: 'demo', type: 'loop', status: 'queued',
       r1Child: { parentJobId: waitingParent.id, attempt: 1, issue: 6 } });
+    const retainedParent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 7, status: 'running' });
+    store.moveTask(retainedParent.id, 'pending', 'running');
+    const ambiguous = store.enqueueLoop({ source: 'r1', project: 'demo', type: 'loop', status: 'running',
+      r1Child: { parentJobId: retainedParent.id, attempt: 1, issue: 7 } });
+    store.moveTask(ambiguous.id, 'pending', 'running');
     daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+    assert.equal(store.readTask(ambiguous.id, 'running').recoveryBlocked, true,
+      'an unclaimed former agent is never guessed to be dead');
+    assert.equal(store.readTask(retainedParent.id, 'pending').phase, 'recovering');
     const recovered = store.readTask(child.id, 'done');
     assert.equal(recovered.status, 'failed');
     assert.equal(recovered.reason, 'daemon_restarted');
