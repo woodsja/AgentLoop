@@ -121,3 +121,15 @@ test('representative invalid project field values are rejected', () => {
     assert.throws(() => loadProjectConfig('demo', { configPath }), new RegExp(field));
   }
 });
+
+
+test('mixed-engine implementation is explicit and validates its owner policy', () => {
+  const project = validProject();
+  const good = { ...project, implementationStrategy: 'worker-critic-loop' };
+  assert.equal(loadProjectConfig('demo', { configPath: writeConfig({ demo: good }) }).implementationStrategy, 'worker-critic-loop');
+  for (const bad of ['invalid', true, 2]) {
+    assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...project, implementationStrategy: bad } }) }), /implementationStrategy/);
+  }
+  assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...good, worker: 'claude' } }) }), /Codex worker/);
+  assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...good, reviewPolicy: 'none' } }) }), /independent review/);
+});

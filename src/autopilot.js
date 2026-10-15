@@ -564,16 +564,23 @@ async function run(argv, dependencies = {}) {
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(project, candidate, instructions);
-      const service = createService({ config: storeConfig, ...dependencies.ralphOptions });
+      const service = createService({ config: storeConfig, ...dependencies.ralphOptions,
+        recordBaseline: sha => {
+          if (!job.ralph.baselineSha) { job.ralph.baselineSha = sha; store.save(job); }
+          return job.ralph.baselineSha;
+        },
+      });
       phase = 'running';
       job.status = 'running';
-      job.ralph = { status: 'running', attempts: 0, taskId: task && task.id ? task.id : null };
+      job.ralph = { status: 'running', attempts: 0, taskId: task && task.id ? task.id : null,
+        ...(job.ralph?.baselineSha ? { baselineSha: job.ralph.baselineSha } : {}) };
       job.verification = null;
       if (correction) correction.status = 'running';
       store.save(job);
       result = await service.run(workspace.worktreePath, task);
       const attempts = result && Array.isArray(result.attempts) ? result.attempts : [];
-      job.ralph = { ...job.ralph, status: result ? result.status ?? null : null, attempts: attempts.length };
+      job.ralph = { ...job.ralph, status: result ? result.status ?? null : null, attempts: attempts.length,
+        ...(result?.childLoopId ? { childLoopId: result.childLoopId } : {}) };
       outcome = classifyRalphResult(result);
       const lastAttempt = attempts[attempts.length - 1];
       if (outcome.deliverable && lastAttempt && lastAttempt.status === 'passed' && lastAttempt.verification) {

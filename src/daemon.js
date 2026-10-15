@@ -8,7 +8,7 @@ const crypto = require('node:crypto');
 const store = require('./store');
 const { createR1Jobs } = require('./r1-jobs');
 const { startTime: r1ProcessStartTime, terminatePriorR1Worker } = require('./r1-process-claim');
-let r1Jobs = createR1Jobs(store);
+let r1Jobs = createR1Jobs(store, { cancelChild: cancelOwnedR1Child });
 const engines = require('./engines');
 const { resolveProject, resolveWorkerScope } = require('./project-registry');
 const state = require('./state');
@@ -2578,6 +2578,24 @@ function readJob(id) {
   return null;
 }
 
+function cancelOwnedR1Child(id) {
+  for (const stage of ['pending', 'running']) {
+    let child;
+    try { child = store.readTask(id, stage); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    if (!child.r1Child || child.type !== 'loop') throw new Error('Cannot cancel a non-R1 implementation child.');
+    if (stage === 'running') return cancelRunningLoop(id);
+    const stopped = { ...child, status: 'cancelled', reason: 'parent_implementation_aborted', finishedAt: new Date().toISOString() };
+    store.writeTask(stopped, 'pending');
+    store.moveTask(id, 'pending', 'done');
+    store.writeResult({ id, status: stopped.status, reason: stopped.reason, finishedAt: stopped.finishedAt });
+    return { status: 200, ok: true };
+  }
+  try { const done = store.readTask(id, 'done'); if (done.r1Child) return { status: 200, ok: true }; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  return { status: 404, error: 'R1 implementation child not found.' };
+}
+
 function cancelRunningLoop(id) {
   const worker = activeWorkers.get(id);
   const loop = readRunningLoop(id);
@@ -3035,7 +3053,7 @@ async function stop(exitFn = process.exit) {
 }
 
 function start(options = {}) {
-  r1Jobs = createR1Jobs(store, options.r1);
+  r1Jobs = createR1Jobs(store, { ...options.r1, cancelChild: cancelOwnedR1Child });
   store.ensureDirs();
 
   daemonInfo = {

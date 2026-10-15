@@ -11,6 +11,7 @@ const { createJobStore, resolveStateDir, hasPassingVerification, selectIssueForJ
 const { managesWorktree, resolveProject } = require('./project-registry');
 const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
+const { createR1LoopImplementation } = require('./r1-loop-implementation');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -305,9 +306,29 @@ function createR1Jobs(store, options = {}) {
     };
     const reviewer = dependencies.reviewPullRequest || createClaudeReviewAdapter({ spawn: trackedSpawn });
     try {
+      const optionsCancelChild = options.cancelChild;
+      const mixedEnabled = project.implementationStrategy === 'worker-critic-loop';
       await run(['--project', task.project], {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
+        ...(mixedEnabled ? { createRalphTaskService: options => {
+          const mixed = createR1LoopImplementation({
+            ensureChild: () => ensureChildLoop(task.id),
+            childState: id => store.listR1ChildLoops(task.id).find(item => item.id === id) || null,
+            cancelChild: async id => {
+              if (typeof optionsCancelChild !== 'function') throw new Error('Child cancellation unavailable; workspace retained.');
+              const outcome = optionsCancelChild(id);
+              if (outcome.status !== 200) throw new Error(`R1 child cancellation failed: ${outcome.error || outcome.status}`);
+            },
+            isCancelled: () => store.readTask(task.id, 'running').cancelRequested === true,
+            onChildQueued: id => {
+              const current = store.readTask(task.id, 'running');
+              if (current.childLoopId !== id) throw new Error('R1 child association changed before implementation.');
+            },
+            recordBaseline: options.recordBaseline,
+          });
+          return mixed;
+        } } : {}),
         cleanupIssueWorkspace: async (...args) => {
           const attached = store.listR1ChildLoops ? store.listR1ChildLoops(task.id) : [];
           if (attached.some(child => child.stage !== 'done'

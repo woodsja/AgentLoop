@@ -84,7 +84,7 @@ function createR1ChildHandoff({ store, loadProject, configPath = store?.paths?.c
 
     const child = store.enqueueR1ChildLoopOnce(parentJobId, attempt, {
       project: parent.project, projectPath: expected, source: 'r1', title: `R1 issue #${parent.issue} implementation`,
-      engine: 'codex', workerEngine: 'codex', criticEngine: 'claude', autoCommit: true,
+      engine: 'codex', workerEngine: 'codex', criticEngine: 'claude', autoCommit: false,
       maxCycles: 3, taskRetries: 2, r1Child: { parentJobId, attempt, issue: parent.issue },
     });
     // Re-read the parent rather than writing back the earlier eligibility
