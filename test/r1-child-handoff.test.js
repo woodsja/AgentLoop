@@ -147,3 +147,30 @@ test('a parent cancelled during authorization does not enqueue a child', t => {
   assert.throws(() => f.create().ensure(f.parent.id), /not eligible/);
   assert.equal(f.tasks.length, 0);
 });
+
+test('a different child recorded after reservation is never overwritten', t => {
+  const f = fixture(t);
+  const original = f.store.enqueueR1ChildLoopOnce;
+  f.store.enqueueR1ChildLoopOnce = (...args) => {
+    const child = original(...args);
+    f.parent.childAttempt = 1;
+    f.parent.childLoopId = 't-other-child';
+    return child;
+  };
+  assert.throws(() => f.create().ensure(f.parent.id), /changed before its child checkpoint/);
+  assert.equal(f.parent.childLoopId, 't-other-child');
+  assert.equal(f.tasks.length, 1);
+});
+
+test('parent attempt changing after reservation blocks stale checkpoint', t => {
+  const f = fixture(t);
+  const original = f.store.enqueueR1ChildLoopOnce;
+  f.store.enqueueR1ChildLoopOnce = (...args) => {
+    const child = original(...args);
+    f.parent.r1.runs = 2;
+    return child;
+  };
+  assert.throws(() => f.create().ensure(f.parent.id), /changed before its child checkpoint/);
+  assert.equal(f.parent.r1.runs, 2);
+  assert.equal(f.tasks.length, 1);
+});
