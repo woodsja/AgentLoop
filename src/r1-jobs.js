@@ -313,6 +313,15 @@ function createR1Jobs(store, options = {}) {
             const child = store.listR1ChildLoops(task.id).find(item => item.id === id);
             return child || null;
           },
+          cancelChild: async id => {
+            if (typeof options.cancelChild !== 'function') throw new Error('R1 child cancellation is unavailable; workspace retained.');
+            const outcome = options.cancelChild(id);
+            if (outcome.status !== 200) throw new Error(`R1 child cancellation failed: ${outcome.error || outcome.status}`);
+          },
+          isCancelled: () => {
+            const current = store.readTask(task.id, 'running');
+            return current.cancelRequested === true;
+          },
           onChildQueued: id => {
             const current = store.readTask(task.id, 'running');
             if (current.childLoopId !== id) throw new Error('R1 child association changed before implementation.');
