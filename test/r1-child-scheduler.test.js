@@ -101,12 +101,18 @@ test('daemon restart marks interrupted child terminal and recovers its R1 parent
       workerEngine: 'codex', criticEngine: 'claude', engine: 'codex', status: 'running',
       cycles: [{ n: 1, status: 'running', phase: 'worker' }], r1Child: { parentJobId: parent.id, attempt: 1, issue: 5 } });
     store.moveTask(child.id, 'pending', 'running');
+    const waitingParent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 6, status: 'running' });
+    store.moveTask(waitingParent.id, 'pending', 'running');
+    const orphan = store.enqueueLoop({ source: 'r1', project: 'demo', type: 'loop', status: 'queued',
+      r1Child: { parentJobId: waitingParent.id, attempt: 1, issue: 6 } });
     daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
     const recovered = store.readTask(child.id, 'done');
     assert.equal(recovered.status, 'failed');
     assert.equal(recovered.reason, 'daemon_restarted');
     assert.equal(store.readTask(parent.id, 'pending').phase, 'recovering');
     assert.equal(fs.readdirSync(store.paths.pending).filter(name => name.startsWith(child.id)).length, 0);
+    assert.equal(store.readTask(orphan.id, 'done').reason, 'r1_child_unauthorized');
+    assert.equal(store.readTask(waitingParent.id, 'pending').phase, 'recovering');
   } finally {
     await daemon.stop(() => {});
     if (old.config === undefined) delete process.env.AGENTLOOP_CONFIG_PATH;

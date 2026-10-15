@@ -2798,6 +2798,19 @@ function recoverRunningTasks() {
       console.error(`Failed to recover ${task.id}: ${error.message}`);
     }
   }
+  // A child queued just before a crash must not remain pending after its
+  // parent was moved back to the recovery queue. Otherwise attempt N+1
+  // cannot proceed, and an old attempt might later execute unexpectedly.
+  for (const child of store.listTasks('pending')) {
+    if (!child.r1Child) continue;
+    let activeParent = false;
+    try {
+      const parent = store.readTask(child.r1Child.parentJobId, 'running');
+      activeParent = parent.workflow === 'r1' && parent.status === 'running'
+        && parent.r1?.runs === child.r1Child.attempt && !parent.cancelRequested;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (!activeParent) failUnauthorizedR1Child(child, new Error('Pending R1 child orphaned by daemon restart.'));
+  }
 }
 
 // On Windows, a scripted SIGTERM (TerminateProcess) kills immediately and never reaches this handler.
