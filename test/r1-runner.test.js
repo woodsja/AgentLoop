@@ -43,7 +43,13 @@ test('the continuous runner admits ready issues itself and drives each to exactl
   const queue = path.join(root, 'queue');
   const tasksFor = number => ['pending', 'running', 'done'].flatMap(stage => {
     const directory = path.join(queue, 'tasks', stage);
-    return fs.existsSync(directory) ? fs.readdirSync(directory).map(name => JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'))) : [];
+    return fs.existsSync(directory) ? fs.readdirSync(directory).filter(name => name.endsWith('.json')).flatMap(name => {
+      try { return [JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'))]; }
+      catch (error) {
+        if (error.code === 'ENOENT') return []; // A task moved after listing; polling will retry.
+        throw error;
+      }
+    }) : [];
   }).filter(task => task.workflow === 'r1' && task.issue === number);
   const commands = () => lines(path.join(root, 'commands'));
 
