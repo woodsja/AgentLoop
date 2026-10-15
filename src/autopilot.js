@@ -573,7 +573,8 @@ async function run(argv, dependencies = {}) {
       store.save(job);
       result = await service.run(workspace.worktreePath, task);
       const attempts = result && Array.isArray(result.attempts) ? result.attempts : [];
-      job.ralph = { ...job.ralph, status: result ? result.status ?? null : null, attempts: attempts.length };
+      job.ralph = { ...job.ralph, status: result ? result.status ?? null : null, attempts: attempts.length,
+        ...(result?.childLoopId ? { childLoopId: result.childLoopId } : {}) };
       outcome = classifyRalphResult(result);
       const lastAttempt = attempts[attempts.length - 1];
       if (outcome.deliverable && lastAttempt && lastAttempt.status === 'passed' && lastAttempt.verification) {

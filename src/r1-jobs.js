@@ -11,6 +11,7 @@ const { createJobStore, resolveStateDir, hasPassingVerification, selectIssueForJ
 const { managesWorktree, resolveProject } = require('./project-registry');
 const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
+const { createR1LoopImplementation } = require('./r1-loop-implementation');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -305,9 +306,22 @@ function createR1Jobs(store, options = {}) {
     };
     const reviewer = dependencies.reviewPullRequest || createClaudeReviewAdapter({ spawn: trackedSpawn });
     try {
+      const implementation = project.implementationStrategy === 'worker-critic-loop'
+        ? createR1LoopImplementation({
+          ensureChild: () => ensureChildLoop(task.id),
+          childState: id => {
+            const child = store.listR1ChildLoops(task.id).find(item => item.id === id);
+            return child || null;
+          },
+          onChildQueued: id => {
+            const current = store.readTask(task.id, 'running');
+            if (current.childLoopId !== id) throw new Error('R1 child association changed before implementation.');
+          },
+        }) : null;
       await run(['--project', task.project], {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
+        ...(implementation ? { createRalphTaskService: () => implementation } : {}),
         cleanupIssueWorkspace: async (...args) => {
           const attached = store.listR1ChildLoops ? store.listR1ChildLoops(task.id) : [];
           if (attached.some(child => child.stage !== 'done'
