@@ -89,11 +89,24 @@ function createR1ChildStore({ stateRoot, writeTask }) {
       .sort((left, right) => left.attempt - right.attempt);
   }
 
+  // Persist directory entries before publishing an irreversible child identity.
+  // A leaf-directory fsync does not make its own parent directory entry durable.
+  function ensureDurableIndexDirectory(parentJobId) {
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    const parentDir = path.join(indexRoot, parentJobId);
+    for (const dir of [indexRoot, parentDir]) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const parent = path.dirname(dir);
+      const fd = fs.openSync(parent, 'r');
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    }
+  }
+
   // The hard link is an exclusive, atomic publication of a fully written file.
   // If we crash after publication but before writing the pending task, future
   // callers fail closed on the reservation rather than creating another child.
   function publishReservation(filePath, record) {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    ensureDurableIndexDirectory(path.basename(path.dirname(filePath)));
     const tempPath = path.join(path.dirname(filePath), `.${crypto.randomBytes(12).toString('hex')}.tmp`);
     let linked = false;
     try {
