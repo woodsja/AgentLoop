@@ -1,10 +1,12 @@
 // MCP tool definitions and dispatch, shared by both transports (bridge.js http, mcp-server.js stdio).
 const http = require('node:http');
 const fs = require('node:fs');
+const path = require('node:path');
 
 const store = require('./store');
 const { createRalphTaskService } = require('./ralph-task-service');
 const { resolveProject } = require('./project-registry');
+const { runBash, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS } = require('./run-bash');
 
 let defaultRalphTaskService;
 
@@ -300,6 +302,36 @@ const tools = [
   },
 ];
 
+// Opt-in only: mcp-server.js lists and dispatches this tool when started with --enable-run-bash.
+// It is deliberately absent from `tools`, which the HTTP bridge also serves.
+const runBashTool = {
+  name: 'run_bash',
+  description: [
+    'Run a Bash command directly on the Ralph host as its unprivileged service user, without Codex or Claude.',
+    'Commands can create, modify, or delete anything that user can, and can reach the network.',
+    'The optional registered project or worktree only sets the starting directory; it does not restrict filesystem access.',
+    `One command runs at a time. Timeout defaults to ${DEFAULT_TIMEOUT_SECONDS}s (max ${MAX_TIMEOUT_SECONDS}s); stdin is closed; output is truncated to the most recent 32 KiB per stream.`,
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      command: { type: 'string', minLength: 1, maxLength: 16384, description: 'Bash command, run with bash -c.' },
+      project: { type: 'string', description: 'Registered project name; sets the starting directory.' },
+      worktree: { type: 'string', description: 'Owner-authorized worktree name of the project.' },
+      timeoutSeconds: { type: 'integer', minimum: 1, maximum: MAX_TIMEOUT_SECONDS, default: DEFAULT_TIMEOUT_SECONDS },
+    },
+    required: ['command'],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+};
+
+function resolveRunBashCwd(project, worktree) {
+  return worktree === undefined
+    ? resolveRegisteredProject(project)
+    : resolveProject(store.config, project, worktree, store.paths.config).cwd;
+}
+
 function daemonError(response) {
   return response.value && typeof response.value.error === 'string'
     ? response.value.error
@@ -457,11 +489,25 @@ async function callTool(params, options = {}) {
     }
   }
 
+  if (name === 'run_bash' && options.runBash === true) {
+    try {
+      return toolResult(await runBash(args, {
+        resolveCwd: options.resolveRunBashCwd ?? resolveRunBashCwd,
+        lockPath: options.runBashLockPath ?? path.join(store.paths.state, 'run-bash.lock'),
+        auditPath: options.runBashAuditPath ?? path.join(store.paths.logs, 'run-bash.ndjson'),
+        ...(options.runBashDefaultCwd ? { defaultCwd: options.runBashDefaultCwd } : {}),
+      }));
+    } catch (error) {
+      return toolFailure(error.message);
+    }
+  }
+
   return toolFailure(`Unknown tool: ${name}.`);
 }
 
 module.exports = {
   tools,
+  runBashTool,
   callTool,
   structuredValue,
   compactJobStatus,
