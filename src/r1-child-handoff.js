@@ -1,20 +1,23 @@
 'use strict';
 
-// Internal R1-only seam. No HTTP or MCP route accepts a filesystem path here.
+// Internal R1-only seam. Owner configuration selects the working directory;
+// callers cannot supply a project, path, or other filesystem authority.
 const fs = require('node:fs');
 const path = require('node:path');
 const { resolveWorkerScope, resolveProject, managesWorktree } = require('./project-registry');
 const { deriveWorktreePath } = require('./autopilot-workspace');
 
 const VALID_ID = /^t-[a-f0-9]{8}$/;
+const TERMINAL_CHILD_STATUSES = new Set(['passed', 'failed', 'cancelled', 'maxed', 'partial', 'incomplete', 'plan_complete']);
 
 function createR1ChildHandoff({ store, loadProject, configPath = store?.paths?.config }) {
-  if (!store || typeof loadProject !== 'function' || !configPath) throw new TypeError('R1 child handoff requires an owner store, project loader and config path.');
+  if (!store || typeof loadProject !== 'function' || !configPath
+    || typeof store.enqueueR1ChildLoopOnce !== 'function'
+    || typeof store.listR1ChildLoops !== 'function') {
+    throw new TypeError('R1 child handoff requires a durable child store, project loader and owner registry.');
+  }
 
-  function ensure(parentJobId) {
-    if (typeof parentJobId !== 'string' || !VALID_ID.test(parentJobId)) throw new Error('Invalid R1 parent job ID.');
-    // Parent must be actively executing. A caller cannot manufacture a new
-    // authorized path by providing an arbitrary project or worktree string.
+  function readEligibleParent(parentJobId) {
     const parent = store.readTask(parentJobId, 'running');
     if (parent.id !== parentJobId || parent.workflow !== 'r1' || parent.status !== 'running'
       || !Number.isSafeInteger(parent.issue) || parent.issue < 1) throw new Error('R1 parent job is not eligible.');
@@ -22,6 +25,14 @@ function createR1ChildHandoff({ store, loadProject, configPath = store?.paths?.c
     if (!job || job.terminal || job.project !== parent.project || job.issue?.number !== parent.issue
       || job.status !== 'running' || job.workspaceState !== 'prepared'
       || !Number.isSafeInteger(job.runs) || job.runs < 1) throw new Error('R1 implementation attempt is not active.');
+    return parent;
+  }
+
+  function ensure(parentJobId) {
+    if (typeof parentJobId !== 'string' || !VALID_ID.test(parentJobId)) throw new Error('Invalid R1 parent job ID.');
+    const parent = readEligibleParent(parentJobId);
+    const job = parent.r1;
+    const attempt = job.runs;
 
     const project = loadProject(parent.project);
     if (!project.enabled || project.worker !== 'codex' || !['always', 'risk'].includes(project.reviewPolicy)) {
@@ -36,42 +47,44 @@ function createR1ChildHandoff({ store, loadProject, configPath = store?.paths?.c
     }
     const scope = resolveWorkerScope(store.config, expected, configPath);
     if (!scope.isolatedWorktree || scope.cwd !== expected) throw new Error('R1 child requires an isolated owned Git worktree.');
-    const attempt = job.runs;
-    if (parent.childAttempt !== undefined && parent.childAttempt !== attempt) {
-      throw new Error('R1 parent child checkpoint belongs to another attempt.');
-    }
 
-    // Scan the authoritative queue before writing anything. If enqueue
-    // succeeded but a subsequent parent checkpoint failed, this discovers the
-    // already durable child. Reject competing children rather than guessing.
-    const children = ['pending', 'running', 'done'].flatMap(stage =>
-      store.listTasks(stage).filter(task => task.type === 'loop' && task.r1Child?.parentJobId === parentJobId
-        && task.r1Child?.attempt === attempt));
-    if (children.length > 1) throw new Error('Duplicate R1 child loops detected; refusing further execution.');
-    if (parent.childLoopId && (!children.length || children[0].id !== parent.childLoopId)) {
-      throw new Error('R1 parent child checkpoint does not match durable loop state.');
-    }
-    if (children.length) {
-      const child = children[0];
-      if (child.project !== parent.project || child.projectPath !== expected || child.workerEngine !== 'codex'
-        || child.criticEngine !== 'claude' || child.r1Child.issue !== parent.issue) {
+    const existing = store.listR1ChildLoops(parentJobId);
+    for (const child of existing) {
+      if (!child.task) throw new Error('R1 child reservation has no queue record; manual recovery required.');
+      if (child.attempt !== attempt && !(child.stage === 'done' && TERMINAL_CHILD_STATUSES.has(child.task.status))) {
+        throw new Error('An earlier R1 implementation child is still active; refusing overlapping attempt.');
+      }
+      if (child.attempt === attempt && (child.task.project !== parent.project || child.task.projectPath !== expected
+        || child.task.r1Child?.issue !== parent.issue || child.task.workerEngine !== 'codex'
+        || child.task.criticEngine !== 'claude')) {
         throw new Error('Persisted R1 child does not match authorized parent.');
       }
-      return { id: child.id, created: false };
+    }
+    if (parent.childAttempt !== undefined && parent.childAttempt > attempt) {
+      throw new Error('R1 parent child checkpoint belongs to a future attempt.');
+    }
+    if (parent.childAttempt === attempt && parent.childLoopId
+      && !existing.some(child => child.attempt === attempt && child.id === parent.childLoopId)) {
+      throw new Error('R1 parent child checkpoint does not match durable loop state.');
     }
 
-    if (!fs.statSync(path.join(expected, 'PLAN.md'), { throwIfNoEntry: false })?.isFile()) {
+    if (!existing.some(child => child.attempt === attempt)
+      && !fs.statSync(path.join(expected, 'PLAN.md'), { throwIfNoEntry: false })?.isFile()) {
       throw new Error('R1 child requires prepared PLAN.md; no loop queued.');
     }
-    const child = store.enqueueLoop({
+    // A cancelled or advanced parent must not be authorized by a stale read.
+    // This handoff does NOT write back a parent snapshot; R1 remains its owner.
+    const latest = readEligibleParent(parentJobId);
+    if (latest.project !== parent.project || latest.issue !== parent.issue || latest.r1.runs !== attempt
+      || latest.r1.worktreePath !== expected || latest.childLoopId !== parent.childLoopId) {
+      throw new Error('R1 parent changed while requesting its child loop.');
+    }
+
+    return store.enqueueR1ChildLoopOnce(parentJobId, attempt, {
       project: parent.project, projectPath: expected, source: 'r1', title: `R1 issue #${parent.issue} implementation`,
       engine: 'codex', workerEngine: 'codex', criticEngine: 'claude', autoCommit: true,
       maxCycles: 3, taskRetries: 2, r1Child: { parentJobId, attempt, issue: parent.issue },
     });
-    // This is a helpful checkpoint, not the authority: child records remain
-    // discoverable after a crash before this update is written.
-    store.writeTask({ ...parent, childLoopId: child.id, childAttempt: attempt }, 'running');
-    return { id: child.id, created: true };
   }
 
   return { ensure };

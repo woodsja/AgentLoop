@@ -7,6 +7,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { configuredProjects } = require('../src/project-registry');
 const { createR1ChildHandoff } = require('../src/r1-child-handoff');
+const { createR1ChildStore } = require('../src/r1-child-store');
 
 function git(cwd, ...args) { return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim(); }
 function fixture(t) {
@@ -34,13 +35,17 @@ function fixture(t) {
       workspaceState: 'prepared', status: 'running', runs: 1, terminal: false },
   };
   const tasks = [];
+  const durable = createR1ChildStore({ stateRoot: root, writeTask: (child, stage) => {
+    const folder = path.join(root, 'tasks', stage);
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, `${child.id}.json`), JSON.stringify(child), { flag: 'wx' });
+    tasks.push({ ...child, stage });
+  } });
   const store = {
     paths: { config: configPath },
     config: { allowedProjects: configuredProjects({ demo: { root: checkout, worktreeRoot } }, configPath) },
-    readTask: (id, stage) => { if (id !== parent.id || stage !== 'running') throw new Error('not found'); return parent; },
-    listTasks: stage => tasks.filter(task => task.stage === stage),
-    enqueueLoop: partial => { const child = { ...partial, type: 'loop', id: `t-${String(tasks.length + 1).padStart(8, '0')}`, stage: 'pending' }; tasks.push(child); return child; },
-    writeTask: (task, stage) => { if (stage === 'running') Object.assign(parent, task); },
+    readTask: (id, stage) => { if (id !== parent.id || stage !== 'running') throw new Error('not found'); return structuredClone(parent); },
+    ...{ enqueueR1ChildLoopOnce: durable.ensureLoop, listR1ChildLoops: durable.listChildren },
   };
   const create = () => createR1ChildHandoff({ store, loadProject: () => project });
   return { root, checkout, issuePath, project, parent, tasks, store, create };
@@ -48,19 +53,19 @@ function fixture(t) {
 
 test('one authorized parent creates one durable child and repeated calls reuse it', t => {
   const f = fixture(t), handoff = f.create();
-  assert.deepEqual(handoff.ensure(f.parent.id), { id: 't-00000001', created: true });
-  assert.deepEqual(handoff.ensure(f.parent.id), { id: 't-00000001', created: false });
+  const first = handoff.ensure(f.parent.id);
+  assert.equal(first.created, true);
+  assert.deepEqual(handoff.ensure(f.parent.id), { id: first.id, created: false });
   assert.equal(f.tasks.length, 1);
   assert.deepEqual(f.tasks[0].r1Child, { parentJobId: f.parent.id, attempt: 1, issue: 65 });
-  assert.equal(f.parent.childLoopId, 't-00000001');
+  assert.equal(f.parent.childLoopId, undefined, 'the handoff never overwrites the parent record');
 });
 
 test('child survives failed parent checkpoint and a reconstructed handoff', t => {
   const f = fixture(t);
-  f.store.writeTask = () => { throw new Error('checkpoint interrupted'); };
-  assert.throws(() => f.create().ensure(f.parent.id), /checkpoint interrupted/);
+  const first = f.create().ensure(f.parent.id);
   assert.equal(f.tasks.length, 1);
-  assert.deepEqual(f.create().ensure(f.parent.id), { id: 't-00000001', created: false });
+  assert.deepEqual(f.create().ensure(f.parent.id), { id: first.id, created: false });
 });
 
 test('rejects missing, completed, mismatched and unauthorized parent without creating a child', t => {
@@ -97,11 +102,11 @@ test('rejects a similarly named worktree from a different Git repository', t => 
 test('rejects duplicate or mismatched durable child association', t => {
   const f = fixture(t);
   f.create().ensure(f.parent.id);
-  f.tasks.push({ ...f.tasks[0], id: 't-99999999' });
-  assert.throws(() => f.create().ensure(f.parent.id), /Duplicate R1 child/);
-  f.tasks.pop();
-  f.tasks[0].projectPath = '/tmp/wrong';
-  assert.throws(() => f.create().ensure(f.parent.id), /does not match authorized parent/);
+  const child = f.store.listR1ChildLoops(f.parent.id)[0];
+  const file = path.join(f.root, 'tasks', 'pending', `${child.id}.json`);
+  const altered = { ...JSON.parse(fs.readFileSync(file, 'utf8')), projectPath: '/tmp/wrong' };
+  fs.writeFileSync(file, JSON.stringify(altered));
+  assert.throws(() => f.create().ensure(f.parent.id), /does not match its durable reservation/);
 });
 
 test('refuses to replace a missing checkpointed child with a fresh loop', t => {
@@ -115,6 +120,27 @@ test('refuses to replace a missing checkpointed child with a fresh loop', t => {
 test('refuses parent child checkpoints from a different attempt', t => {
   const f = fixture(t);
   f.parent.childAttempt = 2;
-  assert.throws(() => f.create().ensure(f.parent.id), /another attempt/);
+  assert.throws(() => f.create().ensure(f.parent.id), /future attempt/);
+  assert.equal(f.tasks.length, 0);
+});
+
+test('an active prior-attempt child blocks a new attempt on the same worktree', t => {
+  const f = fixture(t);
+  f.create().ensure(f.parent.id);
+  f.parent.r1.runs = 2;
+  assert.throws(() => f.create().ensure(f.parent.id), /earlier R1 implementation child is still active/);
+  assert.equal(f.tasks.length, 1);
+});
+
+test('a parent cancelled during authorization does not enqueue a child', t => {
+  const f = fixture(t);
+  const original = f.store.readTask;
+  let reads = 0;
+  f.store.readTask = (...args) => {
+    reads++;
+    if (reads === 2) f.parent.status = 'cancelled';
+    return original(...args);
+  };
+  assert.throws(() => f.create().ensure(f.parent.id), /not eligible/);
   assert.equal(f.tasks.length, 0);
 });

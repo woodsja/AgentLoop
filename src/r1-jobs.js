@@ -410,8 +410,10 @@ function createR1Jobs(store, options = {}) {
   }
 
   // Internal-only handoff, deliberately absent from the public R1 submission route.
-  const childHandoff = createR1ChildHandoff({ store, loadProject: load });
-  return { submit, advance, admit, recover, read, stop, ensureChildLoop: childHandoff.ensure };
+  // Construct lazily: legacy R1 consumers that never invoke the new internal
+  // handoff do not need to implement its optional durable-store interface.
+  const ensureChildLoop = id => createR1ChildHandoff({ store, loadProject: load }).ensure(id);
+  return { submit, advance, admit, recover, read, stop, ensureChildLoop };
 }
 
 module.exports = { createR1Jobs };
