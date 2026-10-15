@@ -92,12 +92,15 @@ function createR1ChildStore({ stateRoot, writeTask }) {
   // Persist directory entries before publishing an irreversible child identity.
   // A leaf-directory fsync does not make its own parent directory entry durable.
   function ensureDurableIndexDirectory(parentJobId) {
-    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-    const parentDir = path.join(indexRoot, parentJobId);
-    for (const dir of [indexRoot, parentDir]) {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const parent = path.dirname(dir);
-      const fd = fs.openSync(parent, 'r');
+    // Create one directory level at a time and persist each name in its
+    // parent. This covers first-run state directories as well as the index.
+    const target = path.join(indexRoot, parentJobId);
+    const pieces = [];
+    for (let dir = target; dir !== path.dirname(dir); dir = path.dirname(dir)) pieces.push(dir);
+    for (const dir of pieces.reverse()) {
+      try { fs.mkdirSync(dir, { recursive: false, mode: 0o700 }); }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      const fd = fs.openSync(path.dirname(dir), 'r');
       try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     }
   }
