@@ -12,6 +12,7 @@ const { managesWorktree, resolveProject } = require('./project-registry');
 const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
 const { createR1LoopImplementation } = require('./r1-loop-implementation');
+const { captureFailedWork } = require('./r1-failed-work');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -329,6 +330,27 @@ function createR1Jobs(store, options = {}) {
           });
           return mixed;
         } } : {}),
+        captureFailedWork: ({ job, workspace, store: jobState }) => {
+          if (!mixedEnabled || !job || (job.delivery && job.delivery.pushed)
+            || job.ralph?.status === 'passed') return null;
+          const childId = job.ralph?.childLoopId || store.listR1ChildLoops(task.id).at(-1)?.id;
+          const child = store.listR1ChildLoops(task.id).find(item => item.id === childId);
+          // Never discard the implementation workspace unless a known child
+          // has conclusively terminated and ownership matches this attempt.
+          if (!child || child.stage !== 'done' || !child.task || !job.ralph?.baselineSha) {
+            throw new Error('R1 failed-work preservation refused: child terminal evidence or baseline absent.');
+          }
+          if (child.task.status === 'passed') return null;
+          const receipt = captureFailedWork({ project, job, workspace,
+            stateRoot: jobState.directory,
+            owner: { parentJobId: task.id, childLoopId: child.id, attempt: job.runs,
+              childTerminal: child.stage === 'done', childStatus: child.task.status } });
+          if (receipt && JSON.stringify(job.recovery) !== JSON.stringify(receipt)) {
+            job.recovery = receipt;
+            jobState.save(job);
+          }
+          return receipt;
+        },
         cleanupIssueWorkspace: async (...args) => {
           const attached = store.listR1ChildLoops ? store.listR1ChildLoops(task.id) : [];
           if (attached.some(child => child.stage !== 'done'

@@ -153,7 +153,7 @@ function plannedWorktreePath(project, issue) {
 // checkout and any worktree not on this issue's ralph branch.  A job whose
 // lock is held by a live process is skipped so running Ralph work is never
 // touched.
-async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write) {
+async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, captureFailedWork) {
   const cleaned = [];
   for (const listed of store.list()) {
     if (!listed.terminal || listed.workspaceState !== 'prepared' || !listed.worktreePath) continue;
@@ -168,6 +168,9 @@ async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write
       const job = store.load(listed.issue.number);
       if (!job || !job.terminal || job.workspaceState !== 'prepared' || !job.worktreePath) continue;
       try {
+        if (typeof captureFailedWork === 'function') {
+          await captureFailedWork({ job, workspace: { worktreePath: job.worktreePath, branch: job.branch }, store });
+        }
         await cleanupWorkspace(project, { worktreePath: job.worktreePath, branch: job.branch }, {
           preserveBranch: shouldPreserveBranch(job),
         });
@@ -201,7 +204,7 @@ async function run(argv, dependencies = {}) {
     write(`Autopilot: project ${projectName} is disabled; nothing to do.`);
     return null;
   }
-  if (!dryRun) await cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write);
+  if (!dryRun) await cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, dependencies.captureFailedWork);
   const selection = selectIssueForJobs(await discover(project), store.list(), choose);
 
   if (!selection) {
@@ -724,6 +727,9 @@ async function run(argv, dependencies = {}) {
     try {
       if (workspace) {
         try {
+          if (typeof dependencies.captureFailedWork === 'function') {
+            await dependencies.captureFailedWork({ job, workspace, store });
+          }
           await cleanupWorkspace(project, workspace, { preserveBranch: shouldPreserveBranch(job) });
           if (job) job.workspaceState = 'removed';
         } catch (error) {
