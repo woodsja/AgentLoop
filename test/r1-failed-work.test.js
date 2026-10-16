@@ -110,6 +110,14 @@ test('repository-defined Git filters or attributes cannot run during owner snaps
   assert.throws(() => capture(f), /configuration|filter/);
   assert.equal(fs.existsSync(marker), false);
   f.git(f.repo, 'config', '--unset', 'filter.sneaky.clean');
+  f.git(f.repo, 'config', 'diff.external', injected);
+  assert.throws(() => capture(f), /configuration/);
+  assert.equal(fs.existsSync(marker), false);
+  f.git(f.repo, 'config', '--unset', 'diff.external');
+  f.git(f.repo, 'config', 'diff.custom.textconv', injected);
+  assert.throws(() => capture(f), /configuration/);
+  assert.equal(fs.existsSync(marker), false);
+  f.git(f.repo, 'config', '--unset', 'diff.custom.textconv');
   const info = f.git(f.workspace, 'rev-parse', '--git-path', 'info/attributes');
   fs.mkdirSync(path.dirname(info), { recursive: true });
   fs.writeFileSync(info, '*.py filter=sneaky\n');

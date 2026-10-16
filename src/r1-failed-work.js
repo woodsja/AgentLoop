@@ -17,10 +17,11 @@ const PARENT_ID = /^t-[a-f0-9]{8}$/;
 const CHILD_ID = /^t-[a-f0-9]{24}$/;
 
 function git(cwd, args, { asBuffer = false } = {}) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   return execFileSync('git', ['-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false',
     '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null', ...args], {
     cwd, encoding: asBuffer ? 'buffer' : 'utf8', timeout: 15000,
-    maxBuffer: MAX_PATCH_BYTES * 4, env: { ...process.env, GIT_TERMINAL_PROMPT: '0',
+    maxBuffer: MAX_PATCH_BYTES * 4, env: { ...env, GIT_TERMINAL_PROMPT: '0',
       GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '0',
       GIT_CONFIG_PARAMETERS: '' },
   });
@@ -39,7 +40,7 @@ function rejectActiveGitConfig(dir) {
   // Git's read-only configuration introspection does not run filters, hooks,
   // or fsmonitor. Any local include or filter makes recovery unsafe.
   const config = git(dir, ['config', '--local', '--list', '--null']).split('\0');
-  if (config.some(x => /^(?:filter\.|include\.|includeif\.|core\.fsmonitor|diff\..*\.command|core\.attributesfile|core\.hooksPath)/i.test(x))) {
+  if (config.some(x => /^(?:filter\.|include\.|includeif\.|core\.fsmonitor|diff\.|core\.attributesfile|core\.hooksPath|core\.sshcommand|credential\.)/i.test(x))) {
     throw new Error('R1 recovery refused: repository can execute or include external Git configuration.');
   }
   const extra = git(dir, ['rev-parse', '--git-path', 'config.worktree']).trim();
@@ -116,7 +117,7 @@ function approvedPaths(project) {
 }
 
 function changedTrackedPaths(dir, baseline) {
-  const bytes = git(dir, ['diff', '--name-status', '--no-renames', '-z', baseline, '--'], { asBuffer: true });
+  const bytes = git(dir, ['diff', '--no-ext-diff', '--no-textconv', '--name-status', '--no-renames', '-z', baseline, '--'], { asBuffer: true });
   const fields = bytes.toString('utf8').split('\0').filter(Boolean);
   if (fields.length % 2 !== 0) throw new Error('Malformed Git tracked-file change status; recovery refused.');
   const changes = [];
