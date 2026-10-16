@@ -42,6 +42,7 @@ async function harness(t, mode = 'fresh') {
   const registry = path.join(root, 'owner.json'); fs.writeFileSync(registry, '{}');
   const dependencies = ['pytest', 'ruff'].map(name => ({ name, version: '1.0', wheel: `${name}-1.0-py3-none-any.whl`, sha256: crypto.createHash('sha256').update(name).digest('hex') }));
   const policy = { interpreter: '/usr/bin/python3', indexUrl: 'https://pypi.org/simple', timeoutMs: 2000, dependencies, commands: ['project-check'] };
+  if (mode === 'install-command-network') policy.indexUrl = 'https://network.example.invalid/simple';
   const project = { enabled: true, autoMerge: false, worker: 'codex', reviewPolicy: 'always', maxAttempts: 1,
     repo: 'example/repo', checkout, worktreeRoot: path.join(root, 'worktrees'), baseBranch: 'main', readyLabel: 'staged-fixture',
     humanLabel: 'human', stateDir: path.join(root, 'state'), verification: 'true', pythonEnvironment: policy };
@@ -83,9 +84,14 @@ async function harness(t, mode = 'fresh') {
       assert.equal(options.shell, false);
       assert.ok(file.startsWith(path.join(cwd, '.venv/bin/')));
       const complete = () => {
-        if (mode === 'network') callback(new Error('DNS token=private'), '', 'Temporary failure in name resolution https://private.invalid');
+        if (['network', 'offline-network'].includes(mode)) callback(new Error('DNS token=private'), '', 'Temporary failure in name resolution https://private.invalid');
         else if (mode === 'timeout') callback(Object.assign(new Error('timed out'), { killed: true }));
-        else { prepared = mode !== 'incompatible'; callback(null); }
+        else if (mode === 'install-command-network') callback(new Error(`Command failed: ${file} ${args.join(' ')}`), '', 'Incompatible wheel');
+        else {
+          prepared = !['incompatible', 'probe-dns'].includes(mode);
+          if (policy.dependencies.some(d => d.name === 'dnspython')) fs.writeFileSync(path.join(cwd, '.venv/old-distribution'), 'dnspython');
+          callback(null);
+        }
       };
       if (mode === 'cancel' || mode === 'concurrent') {
         release = complete;
@@ -94,8 +100,8 @@ async function harness(t, mode = 'fresh') {
       complete(); return;
     }
     if (args.some(value => value.startsWith('import sys,os; assert os.path.realpath(sys.prefix)'))) { callback(null); return; }
-    if (prepared) callback(null);
-    else callback(new Error('not installed'));
+    if (prepared && !(fs.existsSync(path.join(cwd, '.venv/old-distribution')) && !policy.dependencies.some(d => d.name === 'dnspython'))) callback(null);
+    else callback(new Error(`Command failed: ${file} ${args.join(' ')}`), '', 'not installed');
   };
   const deps = {
     loadProjectConfig: () => project, discoverReadyIssues: async () => [{ number: 1, title: 'Issue', body: 'Acceptance criteria for isolated Python verification environment.' }],
@@ -113,20 +119,36 @@ async function harness(t, mode = 'fresh') {
       return { worktreePath, branch: options.branch };
     },
     cleanupIssueWorkspace: async () => {},
-    prepareRepositoryEnvironment: (cwd, p, options) => prepareRepositoryEnvironment(cwd, p, mode === 'offline-real' ? options : { ...options, execFile: fakeExec }),
+    prepareRepositoryEnvironment: async (cwd, p, options) => {
+      const outcome = await prepareRepositoryEnvironment(cwd, p, mode === 'offline-real' ? options : { ...options, execFile: fakeExec });
+      if (mode === 'cancel-after-ready') {
+        const read = store.readTask;
+        // The readiness checkpoint and subsequent admission check both see
+        // the task missing from running; later result reads work normally.
+        let missingReads = 2;
+        store.readTask = () => {
+          if (--missingReads === 0) store.readTask = read;
+          throw Object.assign(new Error('task left running'), { code: 'ENOENT' });
+        };
+      }
+      return outcome;
+    },
     createRalphTaskService: () => ({ run: async () => { workers++; return { status: 'failed', attempts: [] }; } }),
     reviewPullRequest: async () => { reviewers++; assert.fail('No failed implementation or preflight should reach review'); },
   };
   const jobs = createR1Jobs(store, { autopilotDependencies: deps });
   const start = () => { const task = jobs.submit({ project: 'demo', issue: 1 }); store.moveTask(task.id, 'pending', 'running'); jobs.advance(task); return task; };
   const until = async condition => { const deadline = Date.now() + (mode === 'offline-real' ? 25000 : 5000); while (!condition()) { assert.ok(Date.now() < deadline, 'job completed within deadline'); await new Promise(resolve => setTimeout(resolve, 10)); } };
-  return { root, project, jobs, store, stages, start, until, calls, release: () => release(), counts: () => ({ installers, workers, reviewers }),
+  return { root, project, jobs, store, stages, start, until, calls, fakeExec, release: () => release(), counts: () => ({ installers, workers, reviewers }),
     feature: () => createJobStore(project.stateDir).load(1), restart: () => createR1Jobs(store, { autopilotDependencies: deps }) };
 }
-for (const [mode, reason] of [['network', 'package_index_transport'], ['interpreter', 'interpreter_missing'], ['timeout', 'timeout'], ['incompatible', 'dependency_incompatible'],
+for (const [mode, reason] of [['network', 'package_index_transport'], ['interpreter', 'interpreter_missing'], ['timeout', 'timeout'], ['incompatible', 'dependency_incompatible'], ['probe-dns', 'dependency_incompatible'],
+  ['install-command-network', 'dependency_incompatible'], ['offline-network', 'dependency_incompatible'], ['cancel-after-ready', 'cancelled'],
   ['offline-corrupt', 'offline_bundle_invalid'], ['offline-incomplete', 'offline_bundle_invalid'], ['offline-unapproved', 'offline_bundle_invalid'], ['escape', 'unsafe_path'], ['escape-bin', 'unsafe_path']]) {
   test(`public R1 admission blocks ${mode} before any worker or critic`, async t => {
-    const h = await harness(t, mode), task = h.start();
+    const h = await harness(t, mode);
+    if (mode === 'probe-dns') h.project.pythonEnvironment.dependencies.push({ ...h.project.pythonEnvironment.dependencies[0], name: 'dnspython', wheel: 'dnspython-1.0-py3-none-any.whl' });
+    const task = h.start();
     await h.until(() => h.stages.done.has(task.id));
     const result = h.jobs.read(task.id);
     assert.equal(result.status, 'blocked');
@@ -134,7 +156,7 @@ for (const [mode, reason] of [['network', 'package_index_transport'], ['interpre
     assert.equal(result.evidence.environmentPreflight.category, 'infrastructure');
     assert.equal(result.evidence.verification, null);
     assert.equal(result.evidence.review, null);
-    assert.deepEqual(h.counts(), { installers: ['network', 'timeout', 'incompatible'].includes(mode) ? 1 : 0, workers: 0, reviewers: 0 });
+    assert.deepEqual(h.counts(), { installers: ['network', 'timeout', 'incompatible', 'probe-dns', 'install-command-network', 'offline-network', 'cancel-after-ready'].includes(mode) ? 1 : 0, workers: 0, reviewers: 0 });
     assert.ok(!JSON.stringify(result).includes('private'));
     assert.deepEqual(h.restart().read(task.id), result, 'durable queue evidence survives recreation');
     const replay = h.start(); await h.until(() => h.stages.done.has(replay.id));
@@ -258,4 +280,24 @@ test('owner Python policy rejects unapproved sources, incomplete identities and 
     { dependencies: [valid.dependencies[0]] }, { dependencies: valid.dependencies.map(d => ({ ...d, sha256: '' })) },
     { dependencies: valid.dependencies.map(d => ({ ...d, wheel: '../escape.whl' })) } ];
   for (const variant of variants) assert.throws(() => validatePythonPolicy({ ...valid, ...variant }), error => error.code === 'PYTHON_PREFLIGHT_BLOCKED');
+});
+
+test('changed owner policy rebuilds a retained environment without removed distributions', async t => {
+  const h = await harness(t);
+  const policy = h.project.pythonEnvironment;
+  policy.dependencies.push({ ...policy.dependencies[0], name: 'dnspython', wheel: 'dnspython-1.0-py3-none-any.whl' });
+  const task = h.start();
+  await h.until(() => h.stages.done.has(task.id));
+  assert.equal(h.jobs.read(task.id).evidence.environmentPreflight.status, 'ready');
+  const cwd = h.feature().worktreePath;
+  assert.ok(fs.existsSync(path.join(cwd, '.venv/old-distribution')));
+  policy.dependencies.pop();
+  const outcome = await prepareRepositoryEnvironment(cwd, h.project, { execFile: h.fakeExec });
+  assert.equal(outcome.status, 'ready');
+  assert.equal(outcome.reused, false);
+  assert.ok(!fs.existsSync(path.join(cwd, '.venv/old-distribution')));
+  assert.equal(h.calls.filter(c => c.args.includes('venv')).length, 2);
+  const reused = await prepareRepositoryEnvironment(cwd, h.project, { execFile: h.fakeExec });
+  assert.equal(reused.reused, true);
+  assert.equal(h.counts().installers, 2);
 });

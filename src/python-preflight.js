@@ -99,7 +99,7 @@ async function preparePythonInternal(root, policy, options = {}) {
   const deadline = Date.now() + p.timeoutMs;
   const cancelled = () => { try { return options.isCancelled?.() === true; } catch { return true; } };
   const check = () => { if (cancelled()) throw blocked('cancelled'); if (Date.now() >= deadline) throw blocked('timeout'); };
-  const command = (file, args, reason) => new Promise((resolve, reject) => {
+  const command = (file, args, reason, indexInstall = false) => new Promise((resolve, reject) => {
     try { check(); } catch (e) { reject(e); return; }
     let timer;
     let completed = false;
@@ -125,7 +125,7 @@ async function preparePythonInternal(root, policy, options = {}) {
       try { check(); } catch (e) { reject(e); return; }
       if (!error) { resolve(); return; }
       if (error.killed || error.code === 'ETIMEDOUT') reject(blocked('timeout'));
-      else if (/name resolution|NameResolution|DNS|connection|network|unreachable|timed out|could not fetch|retrying/i.test(String(stderr) + String(error.message))) reject(blocked('package_index_transport'));
+      else if (indexInstall && /name resolution|NameResolution|DNS|connection|network|unreachable|timed out|could not fetch|retrying/i.test(String(stderr))) reject(blocked('package_index_transport'));
       else reject(blocked(error.code === 'ENOENT' || String(stderr).includes('interpreter_missing') ? 'interpreter_missing' : reason));
     });
     if (completed) return;
@@ -190,8 +190,16 @@ async function preparePythonInternal(root, policy, options = {}) {
       await command(python, ['-I', '-m', 'ruff', '--version'], 'dependency_incompatible');
       await command(python, ['-I', '-m', 'pip', '--isolated', 'check'], 'dependency_incompatible');
       return { status: 'ready', category: 'infrastructure', reused: true, at: new Date().toISOString() }; }
-    catch (e) { if (e.outcome?.reason !== 'dependency_incompatible') throw e; }
-  } else {
+    catch (e) {
+      if (e.outcome?.reason !== 'dependency_incompatible') throw e;
+      // A new policy can remove distributions. Reinstalling into the old
+      // environment would retain them and prevent the exact-inventory probe.
+      check();
+      localEnvironment(root, p.interpreter);
+      fs.rmSync(venv, { recursive: true });
+    }
+  }
+  if (!fs.existsSync(python)) {
     await command(p.interpreter, ['-I', '-m', 'venv', '.venv'], 'interpreter_missing');
   }
   try {
@@ -211,7 +219,7 @@ async function preparePythonInternal(root, policy, options = {}) {
     const content = p.dependencies.map((d, i) => `${wheels ? pathToFileURL(wheels[i]).href : `${d.name}==${d.version}`} --hash=sha256:${d.sha256}`).join('\n');
     fs.writeFileSync(requirements, content, { flag: 'wx', mode: 0o600 });
     await command(python, ['-I', '-m', 'pip', '--isolated', 'install', '--disable-pip-version-check', '--no-cache-dir', '--no-deps', '--force-reinstall', '--require-hashes',
-      ...(wheels ? ['--no-index'] : ['--index-url', p.indexUrl, '--only-binary=:all:', '--retries', '0']), '-r', requirements], 'dependency_incompatible');
+      ...(wheels ? ['--no-index'] : ['--index-url', p.indexUrl, '--only-binary=:all:', '--retries', '0']), '-r', requirements], 'dependency_incompatible', !wheels);
     await verify();
     await command(python, ['-I', '-m', 'pytest', '--version'], 'dependency_incompatible');
     await command(python, ['-I', '-m', 'ruff', '--version'], 'dependency_incompatible');

@@ -52,8 +52,9 @@ verification still runs separately after implementation.
 
 A successful installation records the policy digest in the worktree's `.venv`.
 Matching environments are checked and reused without reinstalling. An owner
-policy change invalidates reuse. The existing workspace cleanup lifecycle is
-unchanged; a removed worktree requires preparation again. Existing `prepareVenv` Python projects can reuse an environment that passes
+policy change invalidates reuse and rebuilds the validated local environment
+from scratch so removed distributions cannot survive the old policy. The existing
+workspace cleanup lifecycle is unchanged; a removed worktree requires preparation again. Existing `prepareVenv` Python projects can reuse an environment that passes
 local pytest, Ruff, installed-command and dependency readiness checks. A fresh
 or incomplete legacy Python environment blocks before the worker, asking the
 owner to provide this policy; it cannot trigger dependency installation from an

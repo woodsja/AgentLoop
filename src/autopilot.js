@@ -586,7 +586,10 @@ async function run(argv, dependencies = {}) {
         job.environmentPreflight = environment;
         store.save(job);
       }
-      if (dependencies.environmentIsCancelled?.()) throw new Error('R1 job cancellation requested.');
+      let environmentCancelled;
+      try { environmentCancelled = dependencies.environmentIsCancelled?.() === true; }
+      catch { environmentCancelled = true; }
+      if (environmentCancelled) throw require('./python-preflight').blocked('cancelled');
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(project, candidate, instructions);
