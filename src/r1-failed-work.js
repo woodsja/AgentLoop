@@ -40,7 +40,7 @@ function rejectActiveGitConfig(dir) {
   // Git's read-only configuration introspection does not run filters, hooks,
   // or fsmonitor. Any local include or filter makes recovery unsafe.
   const config = git(dir, ['config', '--local', '--list', '--null']).split('\0');
-  if (config.some(x => /^(?:filter\.|include\.|includeif\.|core\.fsmonitor|diff\.|core\.attributesfile|core\.hooksPath|core\.sshcommand|credential\.)/i.test(x))) {
+  if (config.some(x => /^(?:filter\.|include\.|includeif\.|core\.fsmonitor|core\.worktree|diff\.|core\.attributesfile|core\.hooksPath|core\.sshcommand|credential\.)/i.test(x))) {
     throw new Error('R1 recovery refused: repository can execute or include external Git configuration.');
   }
   const extra = git(dir, ['rev-parse', '--git-path', 'config.worktree']).trim();
@@ -198,6 +198,11 @@ function captureFailedWork({ project, job, owner, workspace, stateRoot }) {
   for (const name of relative.split(path.sep)) {
     parent = path.join(parent, name);
     fs.mkdirSync(parent, { mode: 0o700 });
+    const details = fs.lstatSync(parent);
+    if (!details.isDirectory() || details.isSymbolicLink()
+      || details.uid !== process.getuid() || (details.mode & 0o077) !== 0) {
+      throw new Error('R1 recovery path has an unsafe directory or permissions.');
+    }
     fsyncDirectory(path.dirname(parent));
   }
   writeDurable(changesFile, patch);
