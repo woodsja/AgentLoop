@@ -12,6 +12,7 @@ const { managesWorktree, resolveProject } = require('./project-registry');
 const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
 const { createR1LoopImplementation } = require('./r1-loop-implementation');
+const { captureFailedR1Job, bindR1Parent } = require('./r1-failed-work');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -297,6 +298,7 @@ function createR1Jobs(store, options = {}) {
     const jobStore = { ...original,
       list: () => original.list().filter(job => job.issue.number === task.issue),
       save(job) {
+        bindR1Parent(job, task.id);
         original.save(job);
         task.r1 = structuredClone(job);
         transcriptForJob(task, job);
@@ -329,6 +331,19 @@ function createR1Jobs(store, options = {}) {
           });
           return mixed;
         } } : {}),
+        captureFailedWork: ({ job, workspace, store: jobState }) => {
+          if (!mixedEnabled) return null;
+          if (!job?.r1ParentJobId || job.r1ParentJobId !== task.id) {
+            throw new Error('R1 cleanup refused: retained workspace belongs to a different or unknown parent.');
+          }
+          const receipt = captureFailedR1Job({ project, job, workspace,
+            stateRoot: jobState.directory, queueStore: store });
+          if (receipt && JSON.stringify(job.recovery) !== JSON.stringify(receipt)) {
+            job.recovery = receipt;
+            jobState.save(job);
+          }
+          return receipt;
+        },
         cleanupIssueWorkspace: async (...args) => {
           const attached = store.listR1ChildLoops ? store.listR1ChildLoops(task.id) : [];
           if (attached.some(child => child.stage !== 'done'

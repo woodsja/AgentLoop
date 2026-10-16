@@ -2253,3 +2253,74 @@ test('an unconfirmed merge response is re-observed and recovered before handing 
   assert.equal(observations, 2); assert.equal(closes, 1); assert.equal(saved.terminalState, 'merged');
   assert.equal(saved.merge.commit, 'recovered-after-uncertain-put');
 });
+
+test('mixed-engine failed-child recovery is checkpointed before worktree cleanup', async () => {
+  const store = temporaryStore();
+  const issue = { number: 941, title: 'Failed child recovery', body: 'A coding request' };
+  const events = [];
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [issue],
+    createRalphTaskService: () => ({ run: async () => { throw new Error('Child did not obtain critic PASS'); } }),
+    captureFailedWork: ({ job, workspace, store: state }) => {
+      events.push('capture');
+      assert.equal(job.issue.number, 941);
+      assert.match(workspace.worktreePath, /issue-941$/);
+      job.recovery = { status: 'captured', sha256: 'a'.repeat(64) };
+      state.save(job);
+    },
+    cleanupIssueWorkspace: async () => {
+      events.push('cleanup');
+      assert.equal(createJobStore(store.directory).load(941).recovery.sha256, 'a'.repeat(64));
+    },
+  })).catch(error => { assert.match(error.message, /critic PASS/); });
+  assert.deepEqual(events, ['capture', 'cleanup']);
+  assert.equal(createJobStore(store.directory).load(941).workspaceState, 'removed');
+});
+
+test('failed recovery capture blocks destructive cleanup and leaves worktree registered', async () => {
+  const store = temporaryStore();
+  let cleaned = false;
+  await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [{ number: 942, title: 'Unsafe failed child', body: 'A coding request' }],
+    createRalphTaskService: () => ({ run: async () => { throw new Error('Child incomplete'); } }),
+    captureFailedWork: () => { throw new Error('No safe recovery allowlist; worktree retained'); },
+    cleanupIssueWorkspace: async () => { cleaned = true; },
+  })), /No safe recovery allowlist/);
+  assert.equal(cleaned, false);
+  assert.equal(createJobStore(store.directory).load(942).workspaceState, 'prepared');
+});
+
+test('terminal child restart retries unsafe capture without deleting, then completes after valid receipt', async () => {
+  const store = temporaryStore();
+  const issue = { number: 943, title: 'Retain on crash recovery', body: 'Requirements' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue,
+    branch: 'ralph/issue-943-retain-on-crash-recovery', worktreePath: '/tmp/worktrees/issue-943',
+    now: () => new Date().toISOString() });
+  job.workspaceState = 'prepared';
+  job.status = 'failed';
+  job.terminal = true;
+  job.terminalState = 'failed';
+  store.save(job);
+  const stage = [];
+  let canCapture = false;
+  const dependencies = enabledDependencies(store, {
+    discoverReadyIssues: async () => [],
+    captureFailedWork: ({ job: current, store: durable }) => {
+      stage.push('capture');
+      if (!canCapture) throw new Error('worker termination unconfirmed');
+      current.recovery = { sha256: 'b'.repeat(64), status: 'captured' };
+      durable.save(current);
+    },
+    cleanupIssueWorkspace: async () => {
+      stage.push('cleanup');
+      assert.equal(createJobStore(store.directory).load(943).recovery.status, 'captured');
+    },
+  });
+  await runAutopilot(['--project', 'demo'], dependencies);
+  assert.deepEqual(stage, ['capture']);
+  assert.equal(store.load(943).workspaceState, 'prepared');
+  canCapture = true;
+  await runAutopilot(['--project', 'demo'], dependencies);
+  assert.deepEqual(stage, ['capture', 'capture', 'cleanup']);
+  assert.equal(store.load(943).workspaceState, 'removed');
+});

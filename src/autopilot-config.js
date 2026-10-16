@@ -73,6 +73,16 @@ function validateProject(projectName, project) {
     throw new TypeError(`worker for project ${projectName} must be codex or claude`);
   }
 
+  if (Object.hasOwn(project, 'recoveryPaths')) {
+    if (project.implementationStrategy !== 'worker-critic-loop'
+      || !Array.isArray(project.recoveryPaths) || project.recoveryPaths.length < 1
+      || project.recoveryPaths.length > 24 || project.recoveryPaths.some(value => typeof value !== 'string'
+        || !/^(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.(?:py|js|jsx|ts|tsx)$/i.test(value))
+      || new Set(project.recoveryPaths).size !== project.recoveryPaths.length) {
+      throw new TypeError('recoveryPaths requires a mixed-engine project and an explicit set of 1-24 safe source paths.');
+    }
+  }
+
   if (Object.hasOwn(project, 'implementationStrategy')
     && !['one-shot', 'worker-critic-loop'].includes(project.implementationStrategy)) {
     throw new TypeError(`implementationStrategy for project ${projectName} must be one-shot or worker-critic-loop`);
