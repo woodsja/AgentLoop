@@ -163,3 +163,12 @@ test('another terminal job resolves its own durable parent, not the current R1 t
     stateRoot: f.stateRoot });
   assert.equal(receipt.parentJobId, 't-87654321');
 });
+
+
+test('a later R1 parent cannot silently rebind a failed job belonging to an earlier parent', t => {
+  const f = setup(t);
+  const { bindR1Parent } = require('../src/r1-failed-work');
+  assert.equal(bindR1Parent(f.job, f.owner.parentJobId).ralph.parentJobId, f.owner.parentJobId);
+  assert.throws(() => bindR1Parent(f.job, 't-87654321'), /overwrite durable parent ownership/);
+  assert.equal(f.job.ralph.parentJobId, f.owner.parentJobId);
+});

@@ -12,7 +12,7 @@ const { managesWorktree, resolveProject } = require('./project-registry');
 const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
 const { createR1LoopImplementation } = require('./r1-loop-implementation');
-const { captureFailedR1Job } = require('./r1-failed-work');
+const { captureFailedR1Job, bindR1Parent } = require('./r1-failed-work');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -298,8 +298,7 @@ function createR1Jobs(store, options = {}) {
     const jobStore = { ...original,
       list: () => original.list().filter(job => job.issue.number === task.issue),
       save(job) {
-        if (!job.ralph || typeof job.ralph !== 'object') throw new Error('R1 checkpoint missing Ralph state.');
-        job.ralph.parentJobId = task.id;
+        bindR1Parent(job, task.id);
         original.save(job);
         task.r1 = structuredClone(job);
         transcriptForJob(task, job);

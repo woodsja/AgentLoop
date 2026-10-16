@@ -211,6 +211,17 @@ function captureFailedWork({ project, job, owner, workspace, stateRoot }) {
   return receipt;
 }
 
+function bindR1Parent(job, parentId) {
+  if (!PARENT_ID.test(parentId || '') || !job || !job.ralph || typeof job.ralph !== 'object') {
+    throw new Error('R1 checkpoint missing valid parent or Ralph state.');
+  }
+  if (job.ralph.parentJobId && job.ralph.parentJobId !== parentId) {
+    throw new Error('R1 checkpoint refused to overwrite durable parent ownership.');
+  }
+  job.ralph.parentJobId = parentId;
+  return job;
+}
+
 function captureFailedR1Job({ project, job, workspace, queueStore, stateRoot }) {
   if (project?.implementationStrategy !== 'worker-critic-loop' || !job?.ralph) return null;
   if (job.delivery?.pushed || job.ralph.status === 'passed') return null;
@@ -232,4 +243,4 @@ function captureFailedR1Job({ project, job, workspace, queueStore, stateRoot }) 
       childTerminal: true, childStatus: selected.task.status } });
 }
 
-module.exports = { captureFailedWork, captureFailedR1Job };
+module.exports = { captureFailedWork, captureFailedR1Job, bindR1Parent };
