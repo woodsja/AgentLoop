@@ -100,3 +100,26 @@ test('corrupted or incomplete snapshot cannot be silently replaced', t => {
   fs.appendFileSync(path.join(f.stateRoot, receipt.patchRelativePath), 'corrupt');
   assert.throws(() => capture(f), /corrupt|mismatch|digest/);
 });
+
+test('repository-defined Git filters or attributes cannot run during owner snapshot', t => {
+  const f = setup(t);
+  const injected = path.join(f.root, 'malicious-filter.sh');
+  const marker = path.join(f.root, 'executed');
+  fs.writeFileSync(injected, `#!/bin/sh\necho invoked > '${marker}'\ncat\n`, { mode: 0o700 });
+  f.git(f.repo, 'config', 'filter.sneaky.clean', injected);
+  assert.throws(() => capture(f), /configuration|filter/);
+  assert.equal(fs.existsSync(marker), false);
+  f.git(f.repo, 'config', '--unset', 'filter.sneaky.clean');
+  const info = f.git(f.workspace, 'rev-parse', '--git-path', 'info/attributes');
+  fs.mkdirSync(path.dirname(info), { recursive: true });
+  fs.writeFileSync(info, '*.py filter=sneaky\n');
+  assert.throws(() => capture(f), /attributes|configuration/);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test('a symlinked state ancestor cannot redirect recovery inside an unsafe directory', t => {
+  const f = setup(t);
+  const link = path.join(f.root, 'redirect');
+  fs.symlinkSync(path.join(f.root, 'worktrees'), link);
+  assert.throws(() => capture(f, { stateRoot: path.join(link, 'state') }), /symlink/);
+});

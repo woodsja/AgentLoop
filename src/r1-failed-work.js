@@ -17,12 +17,41 @@ const PARENT_ID = /^t-[a-f0-9]{8}$/;
 const CHILD_ID = /^t-[a-f0-9]{24}$/;
 
 function git(cwd, args, { asBuffer = false } = {}) {
-  return execFileSync('git', ['-c', 'core.quotepath=false', ...args], {
+  return execFileSync('git', ['-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false',
+    '-c', 'core.hooksPath=/dev/null', '-c', 'core.attributesFile=/dev/null', ...args], {
     cwd, encoding: asBuffer ? 'buffer' : 'utf8', timeout: 15000,
-    maxBuffer: MAX_PATCH_BYTES * 4, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    maxBuffer: MAX_PATCH_BYTES * 4, env: { ...process.env, GIT_TERMINAL_PROMPT: '0',
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '0',
+      GIT_CONFIG_PARAMETERS: '' },
   });
 }
 function sha(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
+function trustedAncestor(file) {
+  let ancestor = file;
+  while (!fs.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (ancestor === parent) throw new Error('R1 recovery state path cannot be resolved.');
+    ancestor = parent;
+  }
+  return { ancestor, actual: fs.realpathSync(ancestor) };
+}
+function rejectActiveGitConfig(dir) {
+  // Git's read-only configuration introspection does not run filters, hooks,
+  // or fsmonitor. Any local include or filter makes recovery unsafe.
+  const config = git(dir, ['config', '--local', '--list', '--null']).split('\0');
+  if (config.some(x => /^(?:filter\.|include\.|includeif\.|core\.fsmonitor|diff\..*\.command|core\.attributesfile|core\.hooksPath)/i.test(x))) {
+    throw new Error('R1 recovery refused: repository can execute or include external Git configuration.');
+  }
+  const extra = git(dir, ['rev-parse', '--git-path', 'config.worktree']).trim();
+  if (fs.existsSync(path.isAbsolute(extra) ? extra : path.join(dir, extra))) {
+    throw new Error('R1 recovery refused: worktree-local Git configuration is not trusted.');
+  }
+  const info = git(dir, ['rev-parse', '--git-path', 'info/attributes']).trim();
+  if (fs.existsSync(path.isAbsolute(info) ? info : path.join(dir, info))) {
+    throw new Error('R1 recovery refused: repository-local attributes may invoke Git filters.');
+  }
+}
+
 function fsyncDirectory(dir) {
   const fd = fs.openSync(dir, 'r');
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
@@ -65,6 +94,10 @@ function checkOwner({ project, job, owner, workspace, stateRoot }) {
   catch { throw new Error('R1 recovery baseline is not an ancestor of the current implementation.'); }
   if (!path.isAbsolute(stateRoot) || stateRoot === dir) throw new Error('R1 recovery state directory is not owner managed.');
   const resolvedState = path.resolve(stateRoot);
+  const { ancestor, actual } = trustedAncestor(resolvedState);
+  if (actual !== ancestor) {
+    throw new Error('R1 recovery refused: state directory ancestors contain a symlink.');
+  }
   if (resolvedState === dir || resolvedState.startsWith(`${dir}${path.sep}`)
     || resolvedState === checkout || resolvedState.startsWith(`${checkout}${path.sep}`)) {
     throw new Error('R1 recovery must be saved outside the implementation worktree and repository.');
@@ -99,6 +132,7 @@ function changedTrackedPaths(dir, baseline) {
 
 function captureFailedWork({ project, job, owner, workspace, stateRoot }) {
   const { dir, baseline, stateRoot: root } = checkOwner({ project, job, owner, workspace, stateRoot });
+  rejectActiveGitConfig(dir);
   const changes = changedTrackedPaths(dir, baseline);
   const untracked = git(dir, ['ls-files', '--others', '--exclude-standard', '-z'], { asBuffer: true })
     .toString('utf8').split('\0').filter(Boolean)
