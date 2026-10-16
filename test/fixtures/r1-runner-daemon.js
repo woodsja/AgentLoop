@@ -18,7 +18,12 @@ store.appendLogLine = (id, line) => {
   }
   return appendLogLine(id, line);
 };
-const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+const git = (cwd, ...args) => {
+  try { return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim(); } catch (error) {
+    if (error && error.status === 0) return String(error.stdout || '').trim();
+    throw error;
+  }
+};
 const issueOf = branch => Number(/^ralph\/issue-(\d+)-/.exec(branch)[1]);
 const branchOf = number => git(project.checkout, 'for-each-ref', '--format=%(refname:short)', `refs/heads/ralph/issue-${number}-*`);
 const ciCalls = new Map();

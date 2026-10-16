@@ -6,6 +6,15 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawn, execFileSync } = require('node:child_process');
 
+function gitSync(args, options) {
+  try { return execFileSync('git', args, options); } catch (error) {
+    // Some sandboxed Node runners report EPERM after a successful sync child
+    // has exited. Preserve real Git failures.
+    if (error && error.status === 0) return error.stdout;
+    throw error;
+  }
+}
+
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check, label, timeout = 30000) {
   const deadline = Date.now() + timeout;
@@ -22,10 +31,30 @@ function get(port, route) {
 }
 const lines = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
 
-test('the continuous runner admits ready issues itself and drives each to exactly one durable outcome', { timeout: 180000 }, async () => {
+async function supportsLoopback(t) {
+  const server = http.createServer();
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    return true;
+  } catch (error) {
+    if (error.code === 'EPERM') {
+      t.skip('loopback listeners are unavailable in this sandbox');
+      return false;
+    }
+    throw error;
+  } finally {
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+  }
+}
+
+test('the continuous runner admits ready issues itself and drives each to exactly one durable outcome', { timeout: 180000 }, async t => {
+  if (!await supportsLoopback(t)) return;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-runner-'));
   const checkout = path.join(root, 'repo'); fs.mkdirSync(checkout);
-  const git = (...args) => execFileSync('git', args, { cwd: checkout, stdio: 'pipe' });
+  const git = (...args) => gitSync(args, { cwd: checkout, stdio: 'pipe' });
   git('init', '-b', 'main'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Fixture');
   fs.writeFileSync(path.join(checkout, 'initial'), 'fixture'); git('add', '.'); git('commit', '-m', 'Initial');
   const worktreeRoot = path.join(root, 'worktrees');

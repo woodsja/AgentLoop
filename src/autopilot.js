@@ -76,9 +76,6 @@ function errorMessage(error) {
 
 // Terminal hand-off for a CI failure the single corrective cycle could not fix.
 const READY_FOR_HUMAN = 'ready_for_human';
-// One initial review and one review of the bounded correction, including
-// interrupted invocations. This budget is never reset for a new commit.
-const MAX_REVIEW_ATTEMPTS = 2;
 const realReviewAdapter = createClaudeReviewAdapter();
 
 // A verified-but-undelivered change and an already pushed branch are both work
@@ -354,6 +351,10 @@ async function run(argv, dependencies = {}) {
         worktreePath: plannedWorktreePath(project, candidate),
         now: store.now,
       });
+      // Checkpoint the project's review budget with the job before it can
+      // perform work. Subsequent runs must retain this limit even when the
+      // project configuration later changes.
+      job.reviewMaxRounds = project.maxReviewRounds ?? 2;
       const findExistingPullRequests = dependencies.findOpenIssuePullRequests || findOpenIssuePullRequests;
       let existingPullRequests;
       try {
@@ -391,14 +392,22 @@ async function run(argv, dependencies = {}) {
       recordCiState(job, observation);
       if (observation.state === 'green') {
         if (project.reviewPolicy === 'always' || project.reviewPolicy === 'risk') {
+          // New jobs checkpoint this at creation. A missing value is a
+          // legacy two-round record, except for an already-expanded record
+          // recovered from a newer writer; in that case retain its configured
+          // project budget before attempting another review.
+          const maxReviewRounds = job.reviewMaxRounds
+            ?? ((job.reviewAttempts ?? 0) > 2 || (job.reviewCorrectiveCycles ?? 0) > 1
+              || (job.reviewHistory ?? []).length > 2 ? project.maxReviewRounds ?? 2 : 2);
+          if (job.reviewMaxRounds === undefined && maxReviewRounds !== 2) job.reviewMaxRounds = maxReviewRounds;
           // Recover the durable PASS checkpoint before spending any budget.
           // A review of another delivered SHA can never approve this head.
           if (!hasPassingVerification(job.verification, job.delivery.commit)) {
             handToHuman(job, 'review', 'Independent review requires passing deterministic verification evidence for the exact delivered commit.', store.now);
           } else if (matchingPass(job.review, job.delivery.commit)) {
             await finishApprovedMerge();
-          } else if ((job.reviewAttempts ?? 0) >= MAX_REVIEW_ATTEMPTS) {
-            handToHuman(job, 'review', `Independent review attempt limit (${MAX_REVIEW_ATTEMPTS}) reached; no further automatic review will run.`, store.now);
+          } else if ((job.reviewAttempts ?? 0) >= maxReviewRounds) {
+            handToHuman(job, 'review', `Independent review attempt limit (${maxReviewRounds}) reached; no further automatic review will run.`, store.now);
           } else {
             // Keep the original injection names working for embedders while the
             // production default is the concrete, read-only Claude adapter.
@@ -408,7 +417,9 @@ async function run(argv, dependencies = {}) {
             const model = reviewPullRequest.model || project.reviewModel || 'sonnet';
             const reviewer = reviewPullRequest.reviewer === 'claude' || reviewPullRequest === realReviewAdapter
               ? `claude:${model}` : reviewPullRequest.reviewer || 'independent-review-adapter';
-            const attempt = beginReviewAttempt(job, store.now, { reviewer, model, policy: project.reviewPolicy, commit: job.delivery.commit });
+            const attempt = beginReviewAttempt(job, store.now, {
+              reviewer, model, policy: project.reviewPolicy, commit: job.delivery.commit, maxReviewRounds,
+            });
             // Consume the attempt number durably before the paid reviewer runs.
             store.save(job);
             let review;
@@ -442,10 +453,10 @@ async function run(argv, dependencies = {}) {
               // side-effect free and restart-safe.
               recordReview(job, { ...needsChanges, policy: project.reviewPolicy, attempt }, store.now);
               const findings = findingsText(job.review.findings);
-              if ((job.reviewCorrectiveCycles ?? 0) === 0) {
+              if ((job.reviewCorrectiveCycles ?? 0) < maxReviewRounds - 1) {
                 recordReviewCorrectiveCycle(job, {
                   reviewCommit: needsChanges.commit, reviewer: needsChanges.reviewer, findings,
-                });
+                }, { maxReviewRounds });
                 job.status = 'review_correction_eligible';
                 job.ralph = { status: null, attempts: 0, taskId: null };
               } else {
@@ -564,8 +575,12 @@ async function run(argv, dependencies = {}) {
     } else {
       const instructions = await discoverInstructions(workspace.worktreePath);
       await prepareEnvironment(workspace.worktreePath, project, { instructions });
+      // A resumed reviewer correction must use the job's checkpointed budget,
+      // not a configuration value that may have changed while Ralph was down.
+      const taskProject = reviewCorrection && job.reviewMaxRounds !== undefined
+        ? { ...project, maxReviewRounds: job.reviewMaxRounds } : project;
       const task = correction
-        ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
+        ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(taskProject, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(project, candidate, instructions);
       const service = createService({ config: storeConfig, ...dependencies.ralphOptions,
         recordBaseline: sha => {

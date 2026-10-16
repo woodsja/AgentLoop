@@ -6,3 +6,5 @@ config.local.json
 Thumbs.db
 workspace/
 dashboard-tour/
+
+.test-tmp/

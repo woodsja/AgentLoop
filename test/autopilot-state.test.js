@@ -20,6 +20,7 @@ const {
   recordMerge,
   recordIssueReconciled,
   recordReview,
+  recordReviewCorrectiveCycle,
   recordVerification,
   hasPassingVerification,
   recordReviewSkip,
@@ -330,6 +331,41 @@ test('persists red CI diagnostics and the single corrective cycle before correct
   assert.ok(job.ci.diagnostics.length <= 16000);
   job.correction.status = 'bogus';
   assert.throws(() => store.save(job), /invalid corrective cycle state/);
+});
+
+test('persists five independent review rounds, four completed corrections, and a final PASS', () => {
+  const store = createJobStore(temporaryDirectory(), { now: () => '2026-10-13T00:00:00.000Z' });
+  const job = newJob(store);
+  const commits = ['a1', 'b2', 'c3', 'd4', 'e5'];
+
+  for (const [index, commit] of commits.entries()) {
+    job.delivery = { branch: job.branch, commit, pushed: true };
+    const attempt = beginReviewAttempt(job, store.now, {
+      reviewer: 'claude:opus', model: 'opus', policy: 'always', commit,
+    });
+    const finalRound = index === commits.length - 1;
+    recordReview(job, {
+      reviewer: 'claude:opus', verdict: finalRound ? 'PASS' : 'NEEDS_CHANGES', commit, policy: 'always',
+      findings: finalRound ? [] : [{ summary: `Fix finding ${index + 1}` }], attempt,
+    }, store.now);
+    if (!finalRound) {
+      recordReviewCorrectiveCycle(job, {
+        reviewCommit: commit, reviewer: 'claude:opus', findings: `Fix finding ${index + 1}`,
+      }, { maxReviewRounds: 5 });
+      job.reviewCorrection.status = 'delivered';
+      job.reviewCorrection.commit = commits[index + 1];
+    }
+  }
+
+  store.save(job);
+  const reloaded = createJobStore(store.directory).load(7);
+  assert.equal(reloaded.reviewAttempts, 5);
+  assert.equal(reloaded.reviewCorrectiveCycles, 4);
+  assert.equal(reloaded.reviewHistory.length, 5);
+  assert.deepEqual(reloaded.reviewHistory.map(entry => entry.verdict), ['NEEDS_CHANGES', 'NEEDS_CHANGES', 'NEEDS_CHANGES', 'NEEDS_CHANGES', 'PASS']);
+  assert.equal(reloaded.review.commit, 'e5');
+  assert.equal(reloaded.reviewCorrection.cycle, 4);
+  assert.equal(reloaded.reviewCorrection.status, 'delivered');
 });
 
 test('writes atomically and leaves no temporary files behind', () => {
