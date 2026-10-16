@@ -301,3 +301,8 @@ to a human without replaying the reviewer. Saved exact-SHA approval is reused.
 No additional scheduler or service is installed or started by submission. The
 generic `submit_job`, `get_job_status`, and `get_job_result` contracts are unchanged;
 the generic tools also report R1 job IDs with their compact status and result.
+
+Python projects use an [owner-controlled verification preflight](docs/python-preflight.md)
+to prepare a local `.venv` from pinned, hashed wheels before worker admission.
+Approved offline wheelhouses need no package-index connection. Infrastructure
+blocks remain distinct from implementation verification and review evidence.

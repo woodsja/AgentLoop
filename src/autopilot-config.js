@@ -35,6 +35,8 @@ function validateProject(projectName, project) {
     throw new TypeError(`prepareVenv for project ${projectName} must be a boolean`);
   }
 
+  if (Object.hasOwn(project, 'pythonEnvironment')) require('./python-preflight').validatePythonPolicy(project.pythonEnvironment);
+
   // An omitted policy behaves as `none`, which requires a persisted skip
   // explanation before the PR can be presented for merge. Until deterministic
   // risk classification exists, both `risk` and `always` require review.

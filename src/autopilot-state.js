@@ -27,7 +27,7 @@ const JOB_FILE = /^issue-([1-9][0-9]*)\.json$/;
 
 // `preparing` and `running` are only ever persisted while a process owns the
 // job.  Finding one on load means that process was interrupted.
-const ACTIVE_STATUSES = new Set(['preparing', 'running']);
+const ACTIVE_STATUSES = new Set(['preparing', 'environment_preflight', 'running']);
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
