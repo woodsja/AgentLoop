@@ -62,6 +62,7 @@ function evidence(job) {
     verification: job.verification && { ...job.verification, command: safeText(job.verification.command, 4000), stdout: safeText(job.verification.stdout, 4000), stderr: safeText(job.verification.stderr, 4000) },
     ci: job.ci && { state: job.ci.state, headCommit: job.ci.headCommit },
     review: review(job.review),
+    environmentPreflight: job.environmentPreflight,
     reviewAttempts: job.reviewAttempts,
     reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: safeText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && safeText(entry.diagnostics) })),
     diagnostics: (job.failures || []).map(failure => ({ phase: failure.phase, at: failure.at, message: safeText(failure.message) })),
@@ -105,6 +106,11 @@ function createR1Jobs(store, options = {}) {
 
   function transcriptForJob(task, job) {
     if (!job || typeof job !== 'object') return;
+    if (['ready', 'blocked'].includes(job.environmentPreflight?.status)) {
+      const outcome = job.environmentPreflight.status;
+      logTransition(task, `environment:${job.runs}:${outcome}`, outcome === 'ready'
+        ? 'Python verification environment ready.' : 'Python verification environment blocked by infrastructure.');
+    }
     if (job.verification && typeof job.verification.passed === 'boolean') {
       const verdict = job.verification.passed ? 'passed' : 'failed';
       // Verification is recorded before delivery binds its exact SHA.  The
@@ -313,6 +319,7 @@ function createR1Jobs(store, options = {}) {
       await run(['--project', task.project], {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
+        environmentIsCancelled: () => closing || store.readTask(task.id, 'running').cancelRequested === true,
         ...(mixedEnabled ? { createRalphTaskService: options => {
           const mixed = createR1LoopImplementation({
             ensureChild: () => ensureChildLoop(task.id),
@@ -332,7 +339,7 @@ function createR1Jobs(store, options = {}) {
           return mixed;
         } } : {}),
         captureFailedWork: ({ job, workspace, store: jobState }) => {
-          if (!mixedEnabled) return null;
+          if (!mixedEnabled || (job?.environmentPreflight && !job.ralph?.status)) return null;
           if (!job?.r1ParentJobId || job.r1ParentJobId !== task.id) {
             throw new Error('R1 cleanup refused: retained workspace belongs to a different or unknown parent.');
           }

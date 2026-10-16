@@ -18,7 +18,7 @@ const {
   cleanupIssueWorkspace,
 } = require('./autopilot-workspace');
 const { readRepositoryInstructions } = require('./autopilot-instructions');
-const { prepareRepositoryEnvironment } = require('./autopilot-environment');
+const { prepareRepositoryEnvironment, instructionsRequireVenv } = require('./autopilot-environment');
 const { createClaudeReviewAdapter } = require('./autopilot-review');
 const { buildAutopilotTask, buildCorrectiveTask } = require('./autopilot-task');
 const { createRalphTaskService } = require('./ralph-task-service');
@@ -156,7 +156,7 @@ function plannedWorktreePath(project, issue) {
 async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, captureFailedWork) {
   const cleaned = [];
   for (const listed of store.list()) {
-    if (!listed.terminal || listed.workspaceState !== 'prepared' || !listed.worktreePath) continue;
+    if (listed.environmentProcess || !listed.terminal || listed.workspaceState !== 'prepared' || !listed.worktreePath) continue;
     let lock;
     try {
       lock = store.acquire(listed.issue.number);
@@ -166,7 +166,7 @@ async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write
     }
     try {
       const job = store.load(listed.issue.number);
-      if (!job || !job.terminal || job.workspaceState !== 'prepared' || !job.worktreePath) continue;
+      if (!job || job.environmentProcess || !job.terminal || job.workspaceState !== 'prepared' || !job.worktreePath) continue;
       try {
         if (typeof captureFailedWork === 'function') {
           await captureFailedWork({ job, workspace: { worktreePath: job.worktreePath, branch: job.branch }, store });
@@ -497,6 +497,14 @@ async function run(argv, dependencies = {}) {
       write(`Autopilot: project ${projectName}; issue #${candidate.number}; CI ${observation.state}.`);
       return { issue: candidate, workspace: null, result: null, outcome: { status: observation.state }, job };
     }
+    if (job?.environmentProcess) {
+      const claim = job.environmentProcess;
+      if (!require('./r1-process-claim').terminatePriorR1Worker({ r1Child: true, workerPid: claim.pid, workerStartTime: claim.startTime })) {
+        throw require('./python-preflight').blocked('prior_process_unresolved');
+      }
+      job.environmentProcess = null;
+      store.save(job);
+    }
     if (job && ACTIVE_STATUSES.has(job.status)) {
       // The previous owner died mid-run (crash or reboot); its lock was
       // reclaimed above.  Record the interruption for later diagnosis.
@@ -563,7 +571,25 @@ async function run(argv, dependencies = {}) {
       outcome = { status: 'passed', terminal: false, deliverable: true };
     } else {
       const instructions = await discoverInstructions(workspace.worktreePath);
-      await prepareEnvironment(workspace.worktreePath, project, { instructions });
+      const pythonRequired = project.pythonEnvironment || project.prepareVenv || instructionsRequireVenv(instructions);
+      if (pythonRequired) {
+        phase = 'environment_preflight';
+        job.status = phase;
+        job.environmentPreflight = { status: 'preparing', category: 'infrastructure' };
+        store.save(job);
+      }
+      const environment = await prepareEnvironment(workspace.worktreePath, project, {
+        instructions, isCancelled: dependencies.environmentIsCancelled, requirePythonReadiness: true,
+        onProcess: claim => { job.environmentProcess = claim; store.save(job); },
+      });
+      if (pythonRequired) {
+        job.environmentPreflight = environment;
+        store.save(job);
+      }
+      let environmentCancelled;
+      try { environmentCancelled = dependencies.environmentIsCancelled?.() === true; }
+      catch { environmentCancelled = true; }
+      if (environmentCancelled) throw require('./python-preflight').blocked('cancelled');
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(project, candidate, instructions);
@@ -687,37 +713,45 @@ async function run(argv, dependencies = {}) {
   } catch (error) {
     if (job) {
       try {
-        recordFailure(job, phase, error, store.now);
-        if (job.ralph && job.ralph.status === 'running') job.ralph.status = 'error';
-        if (phase === 'merge' && error && (error.code === 'AUTOPILOT_MERGE_UNCONFIRMED' || error.code === 'AUTOPILOT_MERGE_REJECTED')) {
-          handToHuman(job, 'merge', errorMessage(error), store.now);
-        } else if (phase === 'merge' && job.failures.filter(failure => failure.phase === 'merge').length >= 2) {
-          // A transport failure is retryable once because GitHub may not have
-          // received the request.  It is nevertheless bounded: a broken
-          // credential or permanently unavailable endpoint must not spin a
-          // scheduled job forever.
-          handToHuman(job, 'merge', `Merge retry limit reached: ${errorMessage(error)}`, store.now);
-        } else if (phase === 'ci' || phase === 'merge') {
-          // An observation failure (gh outage, mismatched head) says nothing
-          // about the delivered work; keep polling and never restart Ralph.
-          job.status = 'awaiting_ci';
-        } else if (((job.correction && job.correction.status !== 'delivered')
-          || (job.reviewCorrection && job.reviewCorrection.status !== 'delivered'))
-          && (error.code === 'AUTOPILOT_NO_CHANGES' || job.runs >= maxJobRuns)) {
-          // A correction that changes nothing (or keeps failing outside
-          // Ralph) is handed to a human instead of being pushed or retried.
-          const activeCorrection = job.reviewCorrection && job.reviewCorrection.status !== 'delivered'
-            ? job.reviewCorrection : job.correction;
-          const diagnostics = activeCorrection && activeCorrection.findings
-            ? `Reviewer: ${activeCorrection.reviewer}\nFindings:\n${activeCorrection.findings}`
-            : `CI diagnostics:\n${activeCorrection && activeCorrection.diagnostics}`;
-          handToHuman(job, 'correction', `Corrective cycle could not be delivered: ${errorMessage(error)}\n${diagnostics}`, store.now);
+        if (error.code === 'PYTHON_PREFLIGHT_BLOCKED') {
+          job.environmentPreflight = error.outcome;
+          job.status = 'blocked_infrastructure';
+          recordFailure(job, 'environment_preflight', error, store.now);
+          markTerminal(job, 'blocked_infrastructure');
+          store.save(job);
         } else {
-          job.status = 'failed';
-          // Bound automatic retries of a job that keeps failing outside Ralph.
-          if (job.runs >= maxJobRuns) markTerminal(job, 'failed');
+          recordFailure(job, phase, error, store.now);
+          if (job.ralph && job.ralph.status === 'running') job.ralph.status = 'error';
+          if (phase === 'merge' && error && (error.code === 'AUTOPILOT_MERGE_UNCONFIRMED' || error.code === 'AUTOPILOT_MERGE_REJECTED')) {
+            handToHuman(job, 'merge', errorMessage(error), store.now);
+          } else if (phase === 'merge' && job.failures.filter(failure => failure.phase === 'merge').length >= 2) {
+            // A transport failure is retryable once because GitHub may not have
+            // received the request.  It is nevertheless bounded: a broken
+            // credential or permanently unavailable endpoint must not spin a
+            // scheduled job forever.
+            handToHuman(job, 'merge', `Merge retry limit reached: ${errorMessage(error)}`, store.now);
+          } else if (phase === 'ci' || phase === 'merge') {
+            // An observation failure (gh outage, mismatched head) says nothing
+            // about the delivered work; keep polling and never restart Ralph.
+            job.status = 'awaiting_ci';
+          } else if (((job.correction && job.correction.status !== 'delivered')
+            || (job.reviewCorrection && job.reviewCorrection.status !== 'delivered'))
+            && (error.code === 'AUTOPILOT_NO_CHANGES' || job.runs >= maxJobRuns)) {
+            // A correction that changes nothing (or keeps failing outside
+            // Ralph) is handed to a human instead of being pushed or retried.
+            const activeCorrection = job.reviewCorrection && job.reviewCorrection.status !== 'delivered'
+              ? job.reviewCorrection : job.correction;
+            const diagnostics = activeCorrection && activeCorrection.findings
+              ? `Reviewer: ${activeCorrection.reviewer}\nFindings:\n${activeCorrection.findings}`
+              : `CI diagnostics:\n${activeCorrection && activeCorrection.diagnostics}`;
+            handToHuman(job, 'correction', `Corrective cycle could not be delivered: ${errorMessage(error)}\n${diagnostics}`, store.now);
+          } else {
+            job.status = 'failed';
+            // Bound automatic retries of a job that keeps failing outside Ralph.
+            if (job.runs >= maxJobRuns) markTerminal(job, 'failed');
+          }
+          store.save(job);
         }
-        store.save(job);
       } catch (stateError) {
         write(`Autopilot: unable to record failure for issue #${candidate.number}: ${errorMessage(stateError)}`);
       }
@@ -725,7 +759,7 @@ async function run(argv, dependencies = {}) {
     throw error;
   } finally {
     try {
-      if (workspace) {
+      if (workspace && !job?.environmentProcess) {
         try {
           if (typeof dependencies.captureFailedWork === 'function') {
             await dependencies.captureFailedWork({ job, workspace, store });

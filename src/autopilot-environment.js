@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
+const { preparePython, blocked } = require('./python-preflight');
 
 function run(command, args, cwd, executeFile) {
   return new Promise((resolve, reject) => {
@@ -26,6 +27,9 @@ function instructionsRequireVenv(instructions) {
 async function prepareRepositoryEnvironment(projectPath, project, {
   execFile: executeFile = execFile,
   instructions = [],
+  isCancelled,
+  onProcess,
+  requirePythonReadiness = false,
 } = {}) {
   if (typeof projectPath !== 'string' || !projectPath.trim()) {
     throw new TypeError('Repository environment preparation requires a project path');
@@ -33,7 +37,22 @@ async function prepareRepositoryEnvironment(projectPath, project, {
   if (!project || typeof project !== 'object') {
     throw new TypeError('Repository environment preparation requires a project configuration');
   }
+  if (project.pythonEnvironment) return preparePython(path.resolve(projectPath), project.pythonEnvironment, { execFile: executeFile, isCancelled, onProcess });
   if (!project.prepareVenv && !instructionsRequireVenv(instructions)) return { venvPath: null };
+  if (requirePythonReadiness) {
+    // Existing owner prepareVenv projects may reuse prepared environments, but
+    // dependency installation needs a new explicit owner source/hash policy.
+    const localPython = path.join(path.resolve(projectPath), '.venv/bin/python');
+    let interpreter;
+    try { interpreter = fs.existsSync(localPython) ? fs.realpathSync(localPython) : '/usr/bin/python3'; }
+    catch { throw blocked('unsafe_path'); }
+    const commands = [...String(project.verification || '').matchAll(/\.venv\/bin\/([A-Za-z0-9_-]+)/g)]
+      .map(match => match[1]).filter(name => name !== 'python' && name !== 'python3');
+    return preparePython(path.resolve(projectPath), {
+      interpreter, timeoutMs: 30000, commands: [...new Set(commands)],
+      dependencies: ['pytest', 'ruff'].map(name => ({ name, version: null })),
+    }, { execFile: executeFile, isCancelled, onProcess, checkOnly: true });
+  }
   const venvPath = path.join(path.resolve(projectPath), '.venv');
   if (fs.existsSync(venvPath) && !fs.statSync(venvPath).isDirectory()) {
     throw new Error('Repository environment preparation failed: required .venv exists but is not a directory');
