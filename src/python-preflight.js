@@ -15,6 +15,7 @@ const reasons = {
   offline_bundle_invalid: 'Owner must restore the approved wheelhouse with exactly the pinned wheel files and SHA-256 digests.',
   package_index_transport: 'Configured package index is unreachable; owner may restore connectivity or approve an offline wheelhouse.',
   timeout: 'Python preparation exceeded the owner time limit.',
+  output_limit: 'Python setup emitted too much diagnostic output; the owner should inspect the installer output policy.',
   prior_process_unresolved: 'Prior Python setup process ownership is unresolved; owner intervention is required before cleanup or retry.',
   cancelled: 'Python preparation was cancelled before worker admission.',
 };
@@ -125,6 +126,7 @@ async function preparePythonInternal(root, policy, options = {}) {
       try { check(); } catch (e) { reject(e); return; }
       if (!error) { resolve(); return; }
       if (error.killed || error.code === 'ETIMEDOUT') reject(blocked('timeout'));
+      else if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') reject(blocked('output_limit'));
       else if (indexInstall && /name resolution|NameResolution|DNS|connection|network|unreachable|timed out|could not fetch|retrying/i.test(String(stderr))) reject(blocked('package_index_transport'));
       else reject(blocked(error.code === 'ENOENT' || String(stderr).includes('interpreter_missing') ? 'interpreter_missing' : reason));
     });

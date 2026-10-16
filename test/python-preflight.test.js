@@ -86,6 +86,7 @@ async function harness(t, mode = 'fresh') {
       const complete = () => {
         if (['network', 'offline-network'].includes(mode)) callback(new Error('DNS token=private'), '', 'Temporary failure in name resolution https://private.invalid');
         else if (mode === 'timeout') callback(Object.assign(new Error('timed out'), { killed: true }));
+        else if (mode === 'output-overflow') callback(Object.assign(new Error('overflow'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }), '', '');
         else if (mode === 'install-command-network') callback(new Error(`Command failed: ${file} ${args.join(' ')}`), '', 'Incompatible wheel');
         else {
           prepared = !['incompatible', 'probe-dns'].includes(mode);
@@ -143,7 +144,7 @@ async function harness(t, mode = 'fresh') {
     feature: () => createJobStore(project.stateDir).load(1), restart: () => createR1Jobs(store, { autopilotDependencies: deps }) };
 }
 for (const [mode, reason] of [['network', 'package_index_transport'], ['interpreter', 'interpreter_missing'], ['timeout', 'timeout'], ['incompatible', 'dependency_incompatible'], ['probe-dns', 'dependency_incompatible'],
-  ['install-command-network', 'dependency_incompatible'], ['offline-network', 'dependency_incompatible'], ['cancel-after-ready', 'cancelled'],
+  ['install-command-network', 'dependency_incompatible'], ['output-overflow', 'output_limit'], ['offline-network', 'dependency_incompatible'], ['cancel-after-ready', 'cancelled'],
   ['offline-corrupt', 'offline_bundle_invalid'], ['offline-incomplete', 'offline_bundle_invalid'], ['offline-unapproved', 'offline_bundle_invalid'], ['escape', 'unsafe_path'], ['escape-bin', 'unsafe_path']]) {
   test(`public R1 admission blocks ${mode} before any worker or critic`, async t => {
     const h = await harness(t, mode);
@@ -156,7 +157,7 @@ for (const [mode, reason] of [['network', 'package_index_transport'], ['interpre
     assert.equal(result.evidence.environmentPreflight.category, 'infrastructure');
     assert.equal(result.evidence.verification, null);
     assert.equal(result.evidence.review, null);
-    assert.deepEqual(h.counts(), { installers: ['network', 'timeout', 'incompatible', 'probe-dns', 'install-command-network', 'offline-network', 'cancel-after-ready'].includes(mode) ? 1 : 0, workers: 0, reviewers: 0 });
+    assert.deepEqual(h.counts(), { installers: ['network', 'timeout', 'incompatible', 'probe-dns', 'install-command-network', 'output-overflow', 'offline-network', 'cancel-after-ready'].includes(mode) ? 1 : 0, workers: 0, reviewers: 0 });
     assert.ok(!JSON.stringify(result).includes('private'));
     assert.deepEqual(h.restart().read(task.id), result, 'durable queue evidence survives recreation');
     const replay = h.start(); await h.until(() => h.stages.done.has(replay.id));
