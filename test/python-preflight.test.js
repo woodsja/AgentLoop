@@ -307,7 +307,7 @@ test('changed owner policy rebuilds a retained environment without removed distr
 test('real Python preflight subprocess bounds megabyte output while retaining transport diagnostics', async () => {
   const { execFile } = require('node:child_process');
   const runner = path.join(__dirname, '..', 'src', 'python-preflight-runner.js');
-  const flood = "process.stdout.write('x'.repeat(1024 * 1024)); process.stderr.write('y'.repeat(64 * 1024)); process.stderr.write('Temporary failure in name resolution'); process.exitCode = 7;";
+  const flood = "process.stdout.write('x'.repeat(1024 * 1024)); process.stderr.write('é'.repeat(64 * 1024)); process.stderr.write('Temporary failure in name resolution'); process.exitCode = 7;";
   const result = await new Promise(resolve => {
     const child = execFile(process.execPath, [runner, process.execPath, '-e', flood], {
       encoding: 'utf8', maxBuffer: 16384, timeout: 12000,

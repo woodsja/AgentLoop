@@ -10,12 +10,12 @@ process.stdin.on('end', () => {
   // Never pipe that unbounded output into the parent execFile maxBuffer.
   // Retain only a small bounded stderr diagnostic for transport classification.
   const child = spawn(process.argv[2], process.argv.slice(3), { stdio: ['ignore', 'ignore', 'pipe'], shell: false });
-  let diagnostics = '';
+  let diagnostics = Buffer.alloc(0);
   child.stderr.on('data', chunk => {
-    diagnostics = (diagnostics + chunk.toString('utf8')).slice(-4096);
+    diagnostics = Buffer.concat([diagnostics, chunk]).subarray(-4096);
   });
   child.stderr.on('end', () => {
-    if (diagnostics) process.stderr.write(diagnostics);
+    if (diagnostics.length) process.stderr.write(diagnostics);
   });
   child.on('error', error => { process.stderr.write(error.code === 'ENOENT' ? 'interpreter_missing' : 'process_failed'); process.exitCode = 1; });
   child.on('exit', code => { process.exitCode = code ?? 1; });
