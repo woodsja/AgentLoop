@@ -32,7 +32,7 @@ async function runCase(testCase) {
   readyLabel:'ready-for-agent',humanLabel:'ready-for-human',maxAttempts:2,stateDir:path.join(root,'r1-jobs'),verification:`node -e "if(require('fs').readFileSync('answer','utf8') !== '42')process.exit(1);require('fs').writeFileSync('${path.join(root, 'verified-at')}',new Date().toISOString())"`};
  const mock=path.resolve(__dirname,'mock-engine.js');
  const config=path.join(root,'config.json');const queue=path.join(root,'queue');const fixture=path.join(root,'fixture.json');
- fs.writeFileSync(config,JSON.stringify({dashboardPort:0,maxConcurrent:1,defaultEngine:'codex',models:{codex:'gpt-5.6-terra',claude:'opus'},
+ fs.writeFileSync(config,JSON.stringify({dashboardPort:0,maxConcurrent:1,defaultEngine:'codex',models:{codex:'gpt-6.1-sol',claude:'opus'},
   enginePaths:{codex:mock,claude:mock},allowedProjects:{demo:{root:checkout,worktreeRoot}}}));
  fs.writeFileSync(fixture,JSON.stringify({root,project}));
  let daemon,output='';
@@ -60,7 +60,7 @@ async function runCase(testCase) {
   assert.equal(finished.evidence.outcome,'ready_for_human_merge');
   const invocations=lines(path.join(mockState,'invocations.ndjson'));
   assert.deepEqual(invocations.map(x=>[x.engine,x.role]),[['codex','worker'],['claude','critic'],['codex','worker'],['claude','critic']]);
-  assert.deepEqual(invocations.map(x=>x.model),['gpt-5.6-terra','opus','gpt-5.6-terra','opus']);
+  assert.deepEqual(invocations.map(x=>x.model),['gpt-6.1-sol','opus','gpt-6.1-sol','opus']);
   assert.ok(invocations[1].argv.includes('dontAsk'));
   assert.ok(invocations[1].argv.includes('--restricted'));
   assert.ok(invocations[1].argv.includes('Read,Glob,Grep'));
@@ -88,6 +88,7 @@ async function runCase(testCase) {
   assert.equal(childState.cycles.at(-1).verdict,'PASS');
   const parentState=JSON.parse(fs.readFileSync(path.join(root,'r1-jobs','issue-5.json')));
   assert.equal(parentState.ralph.childLoopId,identity.id);
+  assert.equal(parentState.r1ParentJobId,created.id);
   assert.equal(parentState.verification.commit,delivered.commit);
  }catch(e){e.message+='\nDaemon diagnostic:\n'+output.slice(-6000);throw e;}
  finally{
