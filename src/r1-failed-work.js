@@ -215,17 +215,22 @@ function bindR1Parent(job, parentId) {
   if (!PARENT_ID.test(parentId || '') || !job || !job.ralph || typeof job.ralph !== 'object') {
     throw new Error('R1 checkpoint missing valid parent or Ralph state.');
   }
-  if (job.ralph.parentJobId && job.ralph.parentJobId !== parentId) {
+  if (job.r1ParentJobId && job.r1ParentJobId !== parentId) {
     throw new Error('R1 checkpoint refused to overwrite durable parent ownership.');
   }
-  job.ralph.parentJobId = parentId;
+  if (!job.r1ParentJobId) {
+    if (job.terminal || job.runs > 0) {
+      throw new Error('R1 checkpoint refused to adopt previously running or terminal job without owner identity.');
+    }
+    job.r1ParentJobId = parentId;
+  }
   return job;
 }
 
 function captureFailedR1Job({ project, job, workspace, queueStore, stateRoot }) {
   if (project?.implementationStrategy !== 'worker-critic-loop' || !job?.ralph) return null;
   if (job.delivery?.pushed || job.ralph.status === 'passed') return null;
-  const parentJobId = job.ralph.parentJobId;
+  const parentJobId = job.r1ParentJobId;
   if (!PARENT_ID.test(parentJobId || '') || typeof queueStore?.listR1ChildLoops !== 'function') {
     throw new Error('R1 failed-work recovery parent identity is missing or invalid.');
   }

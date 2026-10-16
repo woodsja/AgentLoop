@@ -333,7 +333,7 @@ function createR1Jobs(store, options = {}) {
         } } : {}),
         captureFailedWork: ({ job, workspace, store: jobState }) => {
           if (!mixedEnabled) return null;
-          if (!job?.ralph?.parentJobId || job.ralph.parentJobId !== task.id) {
+          if (!job?.r1ParentJobId || job.r1ParentJobId !== task.id) {
             throw new Error('R1 cleanup refused: retained workspace belongs to a different or unknown parent.');
           }
           const receipt = captureFailedR1Job({ project, job, workspace,

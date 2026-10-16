@@ -135,7 +135,7 @@ test('a symlinked state ancestor cannot redirect recovery inside an unsafe direc
 test('durable child selection refuses an active sibling, stale attempt, or ambiguous reservation', t => {
   const f = setup(t);
   const { captureFailedR1Job } = require('../src/r1-failed-work');
-  f.job.ralph.parentJobId = f.owner.parentJobId;
+  f.job.r1ParentJobId = f.owner.parentJobId;
   const done = { id: f.owner.childLoopId, attempt: 1, stage: 'done', task: { status: 'incomplete' } };
   const store = { listR1ChildLoops: () => [done] };
   const params = { project: f.project, job: f.job, workspace: { worktreePath: f.workspace, branch: 'ralph/issue-75-feature' },
@@ -153,7 +153,7 @@ test('durable child selection refuses an active sibling, stale attempt, or ambig
 test('another terminal job resolves its own durable parent, not the current R1 task', t => {
   const f = setup(t);
   const { captureFailedR1Job } = require('../src/r1-failed-work');
-  f.job.ralph.parentJobId = 't-87654321';
+  f.job.r1ParentJobId = 't-87654321';
   const store = { listR1ChildLoops: id => {
     assert.equal(id, 't-87654321');
     return [{ id: 't-aaaaaaaaaaaaaaaaaaaaaaaa', attempt: 1, stage: 'done', task: { status: 'failed' } }];
@@ -168,7 +168,17 @@ test('another terminal job resolves its own durable parent, not the current R1 t
 test('a later R1 parent cannot silently rebind a failed job belonging to an earlier parent', t => {
   const f = setup(t);
   const { bindR1Parent } = require('../src/r1-failed-work');
-  assert.equal(bindR1Parent(f.job, f.owner.parentJobId).ralph.parentJobId, f.owner.parentJobId);
+  f.job.runs = 0;
+  assert.equal(bindR1Parent(f.job, f.owner.parentJobId).r1ParentJobId, f.owner.parentJobId);
   assert.throws(() => bindR1Parent(f.job, 't-87654321'), /overwrite durable parent ownership/);
-  assert.equal(f.job.ralph.parentJobId, f.owner.parentJobId);
+  assert.equal(f.job.r1ParentJobId, f.owner.parentJobId);
+});
+
+
+test('legacy terminal or already attempted jobs cannot acquire a new parent identity', t => {
+  const f = setup(t);
+  const { bindR1Parent } = require('../src/r1-failed-work');
+  assert.throws(() => bindR1Parent({ ...f.job, ralph: {}, terminal: true }, 't-12345678'), /previously running or terminal/);
+  assert.throws(() => bindR1Parent({ ...f.job, ralph: {}, runs: 1, terminal: false }, 't-12345678'), /previously running or terminal/);
+  assert.equal(bindR1Parent({ ...f.job, ralph: {}, runs: 0, terminal: false }, 't-12345678').r1ParentJobId, 't-12345678');
 });
