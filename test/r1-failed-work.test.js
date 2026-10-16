@@ -131,3 +131,35 @@ test('a symlinked state ancestor cannot redirect recovery inside an unsafe direc
   fs.symlinkSync(path.join(f.root, 'worktrees'), link);
   assert.throws(() => capture(f, { stateRoot: path.join(link, 'state') }), /symlink/);
 });
+
+test('durable child selection refuses an active sibling, stale attempt, or ambiguous reservation', t => {
+  const f = setup(t);
+  const { captureFailedR1Job } = require('../src/r1-failed-work');
+  f.job.ralph.parentJobId = f.owner.parentJobId;
+  const done = { id: f.owner.childLoopId, attempt: 1, stage: 'done', task: { status: 'incomplete' } };
+  const store = { listR1ChildLoops: () => [done] };
+  const params = { project: f.project, job: f.job, workspace: { worktreePath: f.workspace, branch: 'ralph/issue-75-feature' },
+    queueStore: store, stateRoot: f.stateRoot };
+  const receipt = captureFailedR1Job(params);
+  assert.equal(receipt.childLoopId, done.id);
+  store.listR1ChildLoops = () => [done, { id: 't-ffffffffffffffffffffffff', attempt: 2, stage: 'running', task: { status: 'running' } }];
+  assert.throws(() => captureFailedR1Job(params), /active|ambiguous/);
+  store.listR1ChildLoops = () => [{ ...done, attempt: 2 }];
+  assert.throws(() => captureFailedR1Job(params), /attempt|exactly one/);
+  store.listR1ChildLoops = () => [done, { ...done, id: 't-aaaaaaaaaaaaaaaaaaaaaaaa' }];
+  assert.throws(() => captureFailedR1Job(params), /ambiguous|exactly one/);
+});
+
+test('another terminal job resolves its own durable parent, not the current R1 task', t => {
+  const f = setup(t);
+  const { captureFailedR1Job } = require('../src/r1-failed-work');
+  f.job.ralph.parentJobId = 't-87654321';
+  const store = { listR1ChildLoops: id => {
+    assert.equal(id, 't-87654321');
+    return [{ id: 't-aaaaaaaaaaaaaaaaaaaaaaaa', attempt: 1, stage: 'done', task: { status: 'failed' } }];
+  } };
+  const receipt = captureFailedR1Job({ project: f.project, job: f.job,
+    workspace: { worktreePath: f.workspace, branch: 'ralph/issue-75-feature' }, queueStore: store,
+    stateRoot: f.stateRoot });
+  assert.equal(receipt.parentJobId, 't-87654321');
+});

@@ -211,4 +211,25 @@ function captureFailedWork({ project, job, owner, workspace, stateRoot }) {
   return receipt;
 }
 
-module.exports = { captureFailedWork };
+function captureFailedR1Job({ project, job, workspace, queueStore, stateRoot }) {
+  if (project?.implementationStrategy !== 'worker-critic-loop' || !job?.ralph) return null;
+  if (job.delivery?.pushed || job.ralph.status === 'passed') return null;
+  const parentJobId = job.ralph.parentJobId;
+  if (!PARENT_ID.test(parentJobId || '') || typeof queueStore?.listR1ChildLoops !== 'function') {
+    throw new Error('R1 failed-work recovery parent identity is missing or invalid.');
+  }
+  const children = queueStore.listR1ChildLoops(parentJobId);
+  if (children.some(child => child.stage !== 'done' || !child.task
+    || !['passed', 'failed', 'cancelled', 'maxed', 'partial', 'incomplete'].includes(child.task.status))) {
+    throw new Error('R1 failed-work recovery refused: active or ambiguous child still attached.');
+  }
+  const matching = children.filter(child => child.attempt === job.runs);
+  if (matching.length !== 1) throw new Error('R1 recovery requires exactly one terminal child for this attempt.');
+  const [selected] = matching;
+  if (selected.task.status === 'passed') return null;
+  return captureFailedWork({ project, job, workspace, stateRoot,
+    owner: { parentJobId, childLoopId: selected.id, attempt: selected.attempt,
+      childTerminal: true, childStatus: selected.task.status } });
+}
+
+module.exports = { captureFailedWork, captureFailedR1Job };
