@@ -127,7 +127,7 @@ async function preparePythonInternal(root, policy, options = {}) {
       if (!error) { resolve(); return; }
       if (error.killed || error.code === 'ETIMEDOUT') reject(blocked('timeout'));
       else if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') reject(blocked('output_limit'));
-      else if (indexInstall && /name resolution|NameResolution|DNS|connection|network|unreachable|timed out|could not fetch|retrying/i.test(String(stderr))) reject(blocked('package_index_transport'));
+      else if (indexInstall && /(?:temporary failure in name resolution|name or service not known|newconnectionerror|connecttimeouterror|readtimeouterror|max retries exceeded|sslerror|failed to establish a new connection|network is unreachable|connection (?:timed out|refused)|could not fetch url)/i.test(String(stderr))) reject(blocked('package_index_transport'));
       else reject(blocked(error.code === 'ENOENT' || String(stderr).includes('interpreter_missing') ? 'interpreter_missing' : reason));
     });
     if (completed) return;
