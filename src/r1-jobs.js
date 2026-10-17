@@ -309,7 +309,8 @@ function createR1Jobs(store, options = {}) {
       save(job) {
         bindR1Parent(job, task.id);
         original.save(job);
-        task.r1 = snapshot(task.id, job, details => store.appendExecution(task.id, { ...details, stage: phaseOf(job), attempt: job.runs }));
+        snapshot(task.id, job, details => store.appendExecution(task.id, { ...details, stage: phaseOf(job), attempt: job.runs }));
+        task.r1 = structuredClone(job);
         task.r1.executionJournal = { id: task.id, raw: `/api/log/${task.id}?raw=1` };
         transcriptForJob(task, job);
         checkpoint(task, phaseOf(job));
@@ -403,6 +404,9 @@ function createR1Jobs(store, options = {}) {
   function advance(task) {
     if (active.has(task.id) || closing) return;
     if (task.phase === 'ci' && Date.now() < (nextAdvance.get(task.id) || 0)) return;
+    // The dispatcher passes navigation metadata. Never execute its preview;
+    // load full canonical context only after the active/poll gates admit work.
+    task = store.readTask(task.id, 'running');
     task.status = 'running';
     logTransition(task, 'admitted', 'admitted to the R1 runner.');
     const promise = withExecution((event, details) => recorder(store, task.id, { parentId: task.id, stage: task.phase, attempt: task.r1?.runs ?? 1 })(event, details), () => execute(task)).catch(error => {

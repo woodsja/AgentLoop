@@ -632,8 +632,8 @@ function createJobStore(stateDir, options = {}) {
     const file = jobPath(job.issue.number).replace(/\.json$/, '.execution.ndjson');
     const summary = snapshot(job.issue.number, job, record => journal.append(file, { ...record, timestamp: now() }));
     summary.executionJournal = { file };
-    journal.flush(file); // evidence is durable before its bounded checkpoint
-    writeJsonDurably(jobPath(job.issue.number), summary);
+    journal.flush(file); // evidence is durable before the full checkpoint
+    writeJsonDurably(jobPath(job.issue.number), { ...job, executionJournal: summary.executionJournal });
     return job;
   }
 

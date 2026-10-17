@@ -393,7 +393,7 @@ test('terminal state and complete failure diagnostics survive reload', () => {
   assert.equal(reloaded.terminal, true);
   assert.equal(reloaded.terminalState, 'needs_planning');
   assert.equal(reloaded.failures.length, 20);
-  assert.ok(reloaded.failures.at(-1).message.length < 4200);
+  assert.equal(reloaded.failures.at(-1).message, 'x'.repeat(10000));
   const records = fs.readFileSync(reloaded.executionJournal.file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(records.at(-1).changes.failures.at(-1).message, 'x'.repeat(10000));
 });

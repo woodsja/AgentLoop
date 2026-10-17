@@ -1141,7 +1141,7 @@ test('red CI diagnostics come from the GitHub adapter and survive reload without
   assert.equal(saved.correction.status, 'eligible');
 });
 
-async function reachCorrection(store, issue) {
+async function reachCorrection(store, issue, diagnostics = 'npm test: ledger.test.js failed') {
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
     discoverReadyIssues: async () => [issue],
     createRalphTaskService: passingRalph,
@@ -1149,19 +1149,20 @@ async function reachCorrection(store, issue) {
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
     discoverReadyIssues: async () => [issue],
     observePullRequestCi: async () => ({ state: 'red', details: 'CI failed', prNumber: 99, headCommit: 'abc123', runs: [] }),
-    collectCiFailureDiagnostics: async () => 'npm test: ledger.test.js failed',
+    collectCiFailureDiagnostics: async () => diagnostics,
   }));
 }
 
 test('a passed correction uses issue context plus CI diagnostics and is pushed to the same branch', async () => {
   const store = temporaryStore();
   const issue = { number: 28, title: 'Correct me', body: '## Acceptance criteria\n- Ledger balances' };
-  await reachCorrection(store, issue);
+  const diagnostics = 'npm test: ledger.test.js failed\n' + 'CI log\n'.repeat(50000) + 'EXACT TAIL: assertion balance=42 token=owner /tmp/ledger';
+  await reachCorrection(store, issue, diagnostics);
 
   const prepared = [];
   const delivered = [];
   let task;
-  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
     discoverReadyIssues: async () => [issue],
     prepareIssueWorkspace: async (value, candidate, options) => {
       prepared.push(options);
@@ -1181,7 +1182,7 @@ test('a passed correction uses issue context plus CI diagnostics and is pushed t
   assert.deepEqual(prepared, [{ branch: 'ralph/issue-28-correct-me', headCommit: 'abc123' }]);
   assert.equal(task.id, 'autopilot:example/repo#28:ci-correction-1');
   assert.equal(task.verification, 'check');
-  assert.match(task.goal, /npm test: ledger\.test\.js failed/);
+  assert.ok(task.goal.includes(`CI failure diagnostics:\n${diagnostics}\n\n`));
   assert.match(task.goal, /Ledger balances/);
   assert.match(task.goal, /Run npm test\./);
   assert.equal(delivered.length, 1);

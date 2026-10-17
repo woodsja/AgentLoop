@@ -1793,7 +1793,9 @@ function failUnauthorizedR1Child(child, error) {
 
 function fillSlots() {
   const maxConcurrent = Math.max(1, Number(store.config.maxConcurrent) || 2);
-  const running = store.listTasks('running');
+  // Admission needs only metadata. Load full execution context only for the
+  // selected task, so the two-second tick does not parse active job output.
+  const running = store.listTasks('running', { dashboard: true });
   const r1 = running.find(task => task.workflow === 'r1');
   if (r1) {
     r1Jobs.advance(r1);
@@ -1801,9 +1803,9 @@ function fillSlots() {
     // project can use a worker slot. This avoids maxConcurrent=1 deadlock.
     const childRunning = running.some(task => task.r1Child?.parentJobId === r1.id);
     if (childRunning) return;
-    const pendingChildren = store.listTasks('pending').filter(task => task.r1Child?.parentJobId === r1.id);
+    const pendingChildren = store.listTasks('pending', { dashboard: true }).filter(task => task.r1Child?.parentJobId === r1.id);
     if (pendingChildren.length === 0) return;
-    const candidate = sortPending(pendingChildren)[0];
+    const candidate = store.readTask(sortPending(pendingChildren)[0].id, 'pending');
     try {
       r1Jobs.authorizeChild(candidate);
       if (running.some(task => task.id !== r1.id)) return;
@@ -1819,8 +1821,9 @@ function fillSlots() {
   const slots = Math.max(0, maxConcurrent - runningCount);
   if (!slots) return;
 
-  const pending = sortPending(store.listTasks('pending'));
-  for (const task of pending.slice(0, slots)) {
+  const pending = sortPending(store.listTasks('pending', { dashboard: true }));
+  for (const selected of pending.slice(0, slots)) {
+    const task = store.readTask(selected.id, 'pending');
     // An orphan child never becomes an ordinary unprivileged loop simply
     // because its parent moved to done/recovery before queue admission.
     if (task.r1Child) {
@@ -1828,7 +1831,7 @@ function fillSlots() {
       continue;
     }
     if (task.workflow === 'r1') {
-      if (store.listTasks('running').length) return;
+      if (store.listTasks('running', { dashboard: true }).length) return;
       store.moveTask(task.id, 'pending', 'running');
       r1Jobs.advance(task);
       return;
@@ -1847,8 +1850,9 @@ function sendJson(res, statusCode, value) {
   send(res, statusCode, JSON.stringify(value), 'application/json; charset=utf-8');
 }
 
-function resultForTask(task) {
+function resultForTask(task, dashboard = false) {
   try {
+    if (dashboard) return store.readDashboardResult(task.id);
     const resultPath = path.join(store.paths.results, `${task.id}.json`);
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
     return result && typeof result === 'object' ? result : null;
@@ -1994,9 +1998,9 @@ function recentEvents() {
 function daemonState() {
   const now = Date.now();
   const defaultEngine = store.config.defaultEngine;
-  const pendingTasks = sortPending(store.listTasks('pending'));
-  const runningTasks = store.listTasks('running');
-  const completedTasks = store.listTasks('done');
+  const pendingTasks = sortPending(store.listTasks('pending', { dashboard: true }));
+  const runningTasks = store.listTasks('running', { dashboard: true });
+  const completedTasks = store.listTasks('done', { dashboard: true });
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
   const todayMs = todayStart.getTime();
@@ -2010,7 +2014,7 @@ function daemonState() {
   const results = new Map();
   const resultFor = (task) => {
     if (!results.has(task.id)) {
-      results.set(task.id, resultForTask(task));
+      results.set(task.id, resultForTask(task, true));
     }
 
     return results.get(task.id);

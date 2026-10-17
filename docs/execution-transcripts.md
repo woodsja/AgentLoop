@@ -9,7 +9,8 @@ Markup is escaped as inert text. Paths and token-looking values are retained.
 
 Records live under the configured `AGENTLOOP_STATE_DIR/logs`, beside the existing
 logs, as `<job-id>.execution.ndjson`. They are independent of project worktrees;
-cleanup does not delete them. Each append flushes the file to disk, and new file
+cleanup does not delete them. Appends write immediately and batch disk barriers
+at 100 ms; terminal events and orderly exit flush outstanding writes. New file
 creation flushes its directory on Linux. Restart reads the same files. There is
 no automatic log rotation or retention deletion. Operators must provision disk
 space and back up state if they need recovery from loss of the VM itself.
@@ -40,7 +41,16 @@ in file order per `commandId` and stream to reproduce the captured pipe exactly,
 including invalid UTF-8, CRLF, NUL and terminal controls. Display decoding may
 show replacement characters at chunk boundaries; downloads retain the original
 bytes. Evidence and result-file records provide complete additional captured
-results. Summary/prompt bounds do not remove the underlying raw pipe records.
+results. Canonical task, result and autopilot job JSON files preserve complete
+working state, including critic fixes and corrective diagnostics. Retries and
+R1 recovery read these full files; dashboard previews never become agent input.
+The dashboard uses separate disposable `state/dashboard/tasks` and
+`state/dashboard/results` projections, with bounded diagnostic previews. Each
+projection records its canonical file's identity, size and timestamps. Ordinary
+`/api/state` polls read these compact files without parsing full task or result
+output. Missing or stale projections are rebuilt from canonical state once;
+startup also warms them. A crash between writes leaves the canonical state
+intact. Deleting projections does not delete working state or journal evidence.
 Historical text already discarded by the previous implementation cannot be
 reconstructed. This change needs a separate deployment before live jobs produce
 these records; a commit or merge does not verify deployment.

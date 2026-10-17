@@ -1,5 +1,6 @@
 const journal = require('./execution-journal');
-const { snapshotter, preview } = require('./execution-preview');
+const { snapshotter } = require('./execution-preview');
+const { createDashboardProjection } = require('./dashboard-projection');
 const taskSnapshot = snapshotter();
 // Filesystem-backed task state and daemon configuration.
 const fs = require('node:fs');
@@ -183,6 +184,9 @@ function moveTask(id, fromStage, toStage) {
   moveFile(taskPath(id, fromStage), taskPath(id, toStage));
 }
 
+const taskProjection = createDashboardProjection(path.join(stateRoot, 'dashboard', 'tasks'), writeJsonAtomic);
+const resultProjection = createDashboardProjection(path.join(stateRoot, 'dashboard', 'results'), writeJsonAtomic);
+
 function readTask(id, stage) {
   return JSON.parse(fs.readFileSync(taskPath(id, stage), 'utf8'));
 }
@@ -195,7 +199,9 @@ function writeTask(task, stage) {
   ensureDirs();
   const summary = taskSnapshot(task.id, task, record => appendExecution(task.id, record));
   summary.executionJournal = { id: task.id, raw: `/api/log/${encodeURIComponent(task.id)}?raw=1` };
-  writeJsonAtomic(taskPath(task.id, stage), summary);
+  const file = taskPath(task.id, stage);
+  writeJsonAtomic(file, { ...task, executionJournal: summary.executionJournal });
+  taskProjection.save(file, { ...task, executionJournal: summary.executionJournal });
 }
 
 function taskRunPath(id) {
@@ -223,26 +229,25 @@ function readTaskRunState(id) {
   }
 }
 
-function listTasks(stage) {
+function listTasks(stage, { dashboard = false } = {}) {
   ensureDirs();
 
   return fs.readdirSync(stageDir(stage), { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => JSON.parse(fs.readFileSync(path.join(stageDir(stage), entry.name), 'utf8')));
+    .map((entry) => {
+      const file = path.join(stageDir(stage), entry.name);
+      return dashboard ? taskProjection.read(file) : JSON.parse(fs.readFileSync(file, 'utf8'));
+    });
 }
 
-// Upgrade existing large checkpoints once at startup, preserving the complete
-// old fields before replacing them. Ordinary polls then read compact files.
+// Warm disposable projections at startup without rewriting canonical state.
 function compactState() {
   ensureDirs();
   for (const stage of ['pending', 'running', 'done']) {
-    for (const task of listTasks(stage)) {
-      if (JSON.stringify(preview(task)) !== JSON.stringify(task)) writeTask(task, stage);
-    }
+    listTasks(stage, { dashboard: true });
   }
   for (const name of fs.readdirSync(paths.results).filter(name => name.endsWith('.json'))) {
-    const result = JSON.parse(fs.readFileSync(path.join(paths.results, name), 'utf8'));
-    if (JSON.stringify(preview(result)) !== JSON.stringify(result)) writeResult(result);
+    resultProjection.read(path.join(paths.results, name));
   }
 }
 
@@ -254,7 +259,13 @@ function writeResult(result) {
   ensureDirs();
   const summary = taskSnapshot(`result:${result.id}`, result, record => appendExecution(result.id, { ...record, kind: 'result' }));
   if (JSON.stringify(summary) !== JSON.stringify(result)) summary.executionJournal = { id: result.id, raw: `/api/log/${encodeURIComponent(result.id)}?raw=1` };
-  writeJsonAtomic(path.join(paths.results, `${result.id}.json`), summary);
+  const file = path.join(paths.results, `${result.id}.json`);
+  writeJsonAtomic(file, { ...result, ...(summary.executionJournal ? { executionJournal: summary.executionJournal } : {}) });
+  resultProjection.save(file, result);
+}
+
+function readDashboardResult(id) {
+  return resultProjection.read(path.join(paths.results, `${id}.json`));
 }
 
 function logPath(id) {
@@ -519,6 +530,7 @@ module.exports = {
   readTaskRunState,
   listTasks,
   writeResult,
+  readDashboardResult,
   compactState,
   appendLogLine,
   appendExecution,

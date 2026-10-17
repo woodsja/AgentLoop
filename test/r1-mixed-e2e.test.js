@@ -74,9 +74,10 @@ async function runCase(testCase) {
   const finished=await until(async()=>{const j=await request(port,`/api/r1/jobs/${created.id}`);return ['ready_for_human_merge','blocked','failed','passed'].includes(j.status)&&j;},55000);
   if (testCase === 'transcript') {
     assert.equal(finished.status, 'blocked');
-    assert.ok(finished.evidence.verification.stdout.length < 4200);
-    assert.ok(fs.statSync(path.join(queue,'tasks/done',`${created.id}.json`)).size < 80000);
-    assert.ok(fs.statSync(path.join(project.stateDir,'issue-5.json')).size < 80000);
+    const fullOutput = marker + 'large-log\n'.repeat(200000);
+    assert.equal(finished.evidence.verification.stdout, fullOutput);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(queue,'tasks/done',`${created.id}.json`))).r1.verification.stdout, fullOutput);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(project.stateDir,'issue-5.json'))).verification.stdout, fullOutput);
     for (let poll = 0; poll < 3; poll++) {
       const state = await request(port,'/api/state');
       assert.ok(JSON.stringify(state).length < 100000, 'fast state polls exclude massive captured output');

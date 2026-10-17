@@ -96,15 +96,18 @@ test('synchronous command output and failure diagnostics remain complete', () =>
   assert.equal(events(id).at(-1).exitCode,7);
 });
 
-test('large task and job diagnostics have bounded checkpoints and exact journal evidence without repeated snapshots', () => {
+test('large task and job diagnostics keep full checkpoints and bounded dashboard projections', () => {
   const raw = 'token=visible /tmp/owner\r\n' + 'x'.repeat(2 * 1024 * 1024) + '\0tail';
   const task = { id: 't-large', type: 'task', status: 'running', description: 'owner instructions', r1: { verification: { stdout: raw, stderr: raw }, reviewHistory: [{rawResult: raw}], failures: [{message: raw}] } };
   store.writeTask(task, 'running');
   task.status = 'passed';
   store.writeTask(task, 'running');
   const checkpoint = store.readTask(task.id, 'running');
-  assert.ok(fs.statSync(path.join(store.paths.state, 'tasks/running', task.id + '.json')).size < 80000);
-  assert.ok(checkpoint.r1.verification.stdout.length < 4200);
+  assert.equal(checkpoint.r1.verification.stdout, raw);
+  assert.equal(checkpoint.r1.verification.stderr, raw);
+  const projection = store.listTasks('running', { dashboard: true }).find(value => value.id === task.id);
+  assert.ok(JSON.stringify(projection).length < 80000);
+  assert.ok(projection.r1.verification.stdout.length < 4200);
   assert.equal(checkpoint.executionJournal.id, task.id);
   const records = events(task.id);
   assert.equal(records[0].changes.r1.verification.stdout, raw);
@@ -116,9 +119,9 @@ test('large task and job diagnostics have bounded checkpoints and exact journal 
   const job = createJob({ projectName:'example', repo:'owner/repo', issue:{number:1,title:'Fix'}, branch:'fix', worktreePath:'/tmp/work', now:jobs.now });
   job.verification = {command:'npm test',commit:null,passed:false,timedOut:false,exitCode:1,stdout:raw,stderr:raw};
   jobs.save(job);
-  assert.ok(fs.statSync(jobs.jobPath(1)).size < 80000);
+  assert.ok(fs.statSync(jobs.jobPath(1)).size > raw.length);
   const summary = jobs.load(1);
-  assert.ok(summary.verification.stdout.length < 4200);
+  assert.equal(summary.verification.stdout, raw);
   assert.equal(JSON.parse(fs.readFileSync(summary.executionJournal.file,'utf8').trim()).changes.verification.stdout, raw);
 });
 
@@ -187,19 +190,120 @@ test('previews cannot overwrite complete checkpoints when journal persistence fa
   assert.ok(summary.stdout.length<4200);
 });
 
-test('startup compacts old task/result files only after retaining their complete evidence', () => {
-  const id='t-old-state';
+test('startup builds recoverable projections without changing canonical files', () => {
+  const id = 't-old-state';
   store.ensureDirs();
-  const raw='old output\r\n'.repeat(100000);
-  fs.writeFileSync(path.join(store.paths.done,`${id}.json`),JSON.stringify({id,status:'failed',r1:{verification:{stdout:raw}}}));
-  fs.writeFileSync(path.join(store.paths.results,`${id}.json`),JSON.stringify({id,summary:raw}));
+  const raw = 'old output\r\n'.repeat(100000);
+  const taskFile = path.join(store.paths.done, `${id}.json`);
+  const resultFile = path.join(store.paths.results, `${id}.json`);
+  const task = JSON.stringify({id,status:'failed',r1:{verification:{stdout:raw}}});
+  const result = JSON.stringify({id,summary:raw});
+  fs.writeFileSync(taskFile, task);
+  fs.writeFileSync(resultFile, result);
   store.compactState();
-  assert.ok(fs.statSync(path.join(store.paths.done,`${id}.json`)).size<80000);
-  assert.ok(fs.statSync(path.join(store.paths.results,`${id}.json`)).size<80000);
-  const records=events(id);
-  assert.equal(records[0].changes.r1.verification.stdout,raw);
-  assert.equal(records[1].changes.summary,raw);
-  const size=fs.statSync(store.executionPath(id)).size;
-  store.compactState();
-  assert.equal(fs.statSync(store.executionPath(id)).size,size,'repeated startup does not duplicate evidence');
+  assert.equal(fs.readFileSync(taskFile,'utf8'), task);
+  assert.equal(fs.readFileSync(resultFile,'utf8'), result);
+  assert.ok(store.readDashboardResult(id).summary.length < 4200);
+  // A new process/module reuses durable projections; polls never read full files.
+  delete require.cache[require.resolve('../src/store')];
+  const reopened = require('../src/store');
+  const read = fs.readFileSync;
+  fs.readFileSync = (file, ...args) => {
+    assert.ok(![taskFile, resultFile].includes(file), 'poll must not parse canonical output');
+    return read(file, ...args);
+  };
+  try {
+    for (let i=0;i<3;i++) {
+      assert.ok(reopened.listTasks('done', { dashboard: true }).find(t=>t.id===id).r1.verification.stdout.length < 4200);
+      assert.ok(reopened.readDashboardResult(id).summary.length < 4200);
+    }
+  } finally { fs.readFileSync = read; }
+  // Simulate a crash after a canonical write but before its sidecar update.
+  fs.writeFileSync(resultFile, JSON.stringify({id, summary:'NEW HEAD'+raw+'NEW TAIL'}));
+  assert.ok(reopened.readDashboardResult(id).summary.startsWith('NEW HEAD'));
+  assert.equal(JSON.parse(fs.readFileSync(resultFile)).summary, 'NEW HEAD'+raw+'NEW TAIL');
+  fs.writeFileSync(path.join(root,'dashboard/results',`${id}.json`), '{torn');
+  assert.ok(reopened.readDashboardResult(id).summary.startsWith('NEW HEAD'));
+  fs.rmSync(path.join(root,'dashboard'),{recursive:true,force:true});
+  reopened.compactState();
+  assert.ok(reopened.readDashboardResult(id).summary.length < 4200);
+});
+
+test('eight critic retry cycles retain exact previous fixes in the next worker prompt after reload', () => {
+  const { loopWorkerPrompt } = require('../src/prompts');
+  const id = 't-critic-context';
+  let loop = { id, type:'loop', cycles:[] };
+  for (let n=1;n<=8;n++) {
+    const fixes = `cycle ${n} exact diagnostics ` + 'f'.repeat(20000) + ` tail ${n} token=owner /tmp/file`;
+    loop.cycles.push({n,status:'failed',fixes,workerSummary:'w'.repeat(20000),criticSummary:'c'.repeat(20000),summary:'s'.repeat(20000)});
+    store.writeTask(loop,'running');
+    delete require.cache[require.resolve('../src/store')];
+    loop = require('../src/store').readTask(id,'running');
+    assert.equal(loop.cycles.at(-1).fixes,fixes);
+    const prompt = loopWorkerPrompt(loop, loop.cycles.at(-1).fixes);
+    assert.equal(prompt.split('--- FIXES START ---\n')[1].split('\n--- FIXES END ---')[0],fixes);
+    assert.equal(loop.cycles[0].fixes, 'cycle 1 exact diagnostics ' + 'f'.repeat(20000) + ' tail 1 token=owner /tmp/file');
+  }
+});
+
+test('CI corrective prompt receives every diagnostic byte, including the tail, after job-store reload', () => {
+  const { createJob, createJobStore, recordCorrectiveCycle } = require('../src/autopilot-state');
+  const { buildCorrectiveTask } = require('../src/autopilot-task');
+  const directory = path.join(root,'corrective-jobs');
+  const jobs = createJobStore(directory);
+  const issue = { number:90,title:'Fix diagnostics',body:'Preserve complete state' };
+  const job = createJob({projectName:'example',repo:'owner/repo',issue,branch:'fix',worktreePath:'/tmp/work',now:jobs.now});
+  const diagnostics = 'CI HEAD\n' + 'log\n'.repeat(100000) + 'EXACT FAILURE TAIL token=owner /tmp/failure\nstack';
+  recordCorrectiveCycle(job,{redCommit:'a'.repeat(40),diagnostics});
+  jobs.save(job);
+  const reloaded = createJobStore(directory).load(90);
+  assert.equal(reloaded.correction.diagnostics,diagnostics);
+  const task = buildCorrectiveTask({repo:'owner/repo',verification:'npm test'},issue,[],reloaded.correction);
+  assert.ok(task.goal.includes(`CI failure diagnostics:\n${diagnostics}\n\n`));
+});
+
+test('huge canonical output stays out of repeated /api/state polls after daemon restart', async () => {
+  const http = require('node:http');
+  const pollRoot = fs.mkdtempSync(path.join(root,'poll-'));
+  const configFile = path.join(pollRoot,'config.json');
+  fs.writeFileSync(configFile, JSON.stringify({dashboardPort:0,maxConcurrent:0}));
+  const script = `
+    const fs=require('node:fs'),path=require('node:path');
+    const store=require(${JSON.stringify(require.resolve('../src/store'))});
+    const id='t-api-huge',raw='owner token=raw /tmp/path\\n'+'X'.repeat(4*1024*1024)+'END';
+    if(!fs.existsSync(path.join(store.paths.done,id+'.json'))) {
+      store.writeTask({id,type:'task',status:'done',finishedAt:new Date().toISOString(),r1:{verification:{stdout:raw}}},'done');
+      store.writeResult({id,status:'done',summary:raw});
+    }
+    store.compactState();
+    const read=fs.readFileSync;
+    fs.readFileSync=(file,...args)=>{
+      if([path.join(store.paths.done,id+'.json'),path.join(store.paths.results,id+'.json')].includes(file)) throw Error('API read full canonical output');
+      return read(file,...args);
+    };
+    require(${JSON.stringify(require.resolve('../src/daemon'))}).start();
+  `;
+  for(let restart=0;restart<2;restart++) {
+    const child=spawn(process.execPath,['-e',script],{env:{...process.env,AGENTLOOP_STATE_DIR:pollRoot,AGENTLOOP_CONFIG_PATH:configFile},stdio:['ignore','pipe','pipe']});
+    const closed=new Promise(resolve=>child.once('close',resolve));
+    let port;
+    try {
+      await new Promise((resolve,reject)=>{
+        child.once('error',reject);
+        child.stdout.on('data',chunk=>{const match=String(chunk).match(/Dashboard: http:\/\/127.0.0.1:(\d+)/);if(match){port=Number(match[1]);resolve();}});
+        child.once('exit',()=>reject(Error('fixture daemon exited before listening')));
+      });
+      for(let i=0;i<3;i++) {
+        const response=await new Promise((resolve,reject)=>{
+          http.get({host:'127.0.0.1',port,path:'/api/state'},res=>{
+            let body='';res.on('data',chunk=>body+=chunk);res.on('end',()=>resolve({status:res.statusCode,body}));
+          }).on('error',reject);
+        });
+        assert.equal(response.status,200,response.body);
+        assert.ok(response.body.length<100000);
+        assert.ok(JSON.parse(response.body).tasks.recent.find(t=>t.id==='t-api-huge').summary.length<4200);
+      }
+    } finally {child.kill('SIGTERM');await closed;}
+  }
+  assert.equal(JSON.parse(fs.readFileSync(path.join(pollRoot,'tasks/done/t-api-huge.json'))).r1.verification.stdout.length,('owner token=raw /tmp/path\n'+'X'.repeat(4*1024*1024)+'END').length);
 });

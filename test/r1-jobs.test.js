@@ -29,7 +29,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
   const config = path.join(root, 'config.json'), fixture = path.join(root, 'fixture.json');
   const worktreeRoot = path.join(root, 'worktrees');
   const project = { enabled: true, repo: 'example/repo', checkout, worktreeRoot, baseBranch: 'main', worker: 'codex', reviewPolicy: 'always', maxAttempts: 1,
-    stateDir: path.join(root, 'r1-state'), verification: `node -e "if(require('fs').readFileSync('answer','utf8')!=='42')process.exit(1);console.log('deterministic test passed')"` };
+    stateDir: path.join(root, 'r1-state'), verification: `node -e "if(require('fs').readFileSync('answer','utf8')!=='42')process.exit(1);console.log('deterministic test passed'+'D'.repeat(100000)+'EXACT DIAGNOSTIC TAIL token=owner /tmp/context')"` };
   fs.writeFileSync(fixture, JSON.stringify({ root, project }));
   fs.writeFileSync(config, JSON.stringify({ dashboardPort: 0, allowedProjects: { demo: { root: checkout, worktrees: Object.fromEntries([1, 2, 3, 4].map(n => [`issue${n}`, path.join(worktreeRoot, `issue-${n}`)])) } } }));
   let child, output = '';
@@ -63,6 +63,10 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const context = JSON.parse(fs.readFileSync(path.join(root, 'reviews'), 'utf8').trim());
     assert.equal(context.verification.command, project.verification);
     assert.equal(context.verification.commit, context.headCommit);
+    const fullOutput = 'deterministic test passed'+'D'.repeat(100000)+'EXACT DIAGNOSTIC TAIL token=owner /tmp/context\n';
+    assert.equal(context.verification.stdout, fullOutput);
+    const checkpoint = jobId => JSON.parse(fs.readFileSync(path.join(root,'queue/tasks/running',jobId+'.json')));
+    assert.equal(checkpoint(id).r1.verification.stdout,fullOutput);
     assert.equal((await get(second)).phase, 'queued');
     fs.writeFileSync(path.join(root, 'review-release'), '');
     const completed = await until(async () => { const job = await get(id); return job.status === 'passed' && job; });
@@ -102,6 +106,10 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const recovered = await until(async () => { const job = await get(interrupted); return job.status === 'blocked' && job; });
     assert.equal(recovered.evidence.reviewHistory[0].status, 'interrupted');
     assert.equal(fs.readFileSync(path.join(root, 'reviews'), 'utf8'), recorded);
+    const recoveredTask=JSON.parse(fs.readFileSync(path.join(root,'queue/tasks/done',interrupted+'.json')));
+    assert.equal(recoveredTask.r1.verification.stdout,fullOutput);
+    const persistedJob=JSON.parse(fs.readFileSync(path.join(project.stateDir,'issue-4.json')));
+    assert.equal(persistedJob.verification.stdout,fullOutput);
 
   } catch (error) { error.message += '\n' + output; throw error; }
   finally { if (child && child.exitCode === null) await halt(); fs.rmSync(root, { recursive: true, force: true }); }
