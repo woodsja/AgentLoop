@@ -23,18 +23,18 @@ function verificationFailureSummary(verification) {
   if (!verification || typeof verification !== 'object') return 'deterministic verification failed.';
   const facts = [];
   if (verification.timedOut === true) facts.push('timed out');
-  else if (Number.isSafeInteger(verification.exitCode) && verification.exitCode >= 0 && verification.exitCode <= 255) {
-    facts.push(`exit ${verification.exitCode}`);
-  }
+  else if (Number.isSafeInteger(verification.exitCode) && verification.exitCode !== 0) facts.push('exit nonzero');
+  else if (verification.exitCode === null) facts.push('terminated by signal');
 
-  // Test runners may print arbitrary repository-supplied text. Select only
-  // numeric test counts and approved reason IDs. Never display test filenames:
-  // malicious repository code can embed a credential into a plausible path.
+  // Untrusted verification output can encode secrets even in precise numbers.
+  // Only display coarse failure buckets and allowlisted reason IDs. Never
+  // display test names, filenames, counts, or arbitrary command/output text.
   const output = [verification.stdout, verification.stderr]
     .filter(value => typeof value === 'string').join('\n').slice(-16000);
-  const passed = lastNumber(output, 'pass');
   const failed = lastNumber(output, 'fail');
-  if (passed !== null && failed !== null && failed > 0) facts.push(`reported tests: ${passed} passed, ${failed} failed`);
+  if (failed === 1) facts.push('reported tests: 1 failed');
+  else if (failed >= 2 && failed <= 9) facts.push('reported tests: 2-9 failed');
+  else if (failed >= 10) facts.push('reported tests: 10+ failed');
 
   // This is a diagnostic hint, not an authoritative infrastructure verdict:
   // project test output can still impersonate a known code, but an allowlisted

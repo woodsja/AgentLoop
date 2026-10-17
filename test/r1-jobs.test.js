@@ -152,8 +152,8 @@ test('public R1 verification summaries retain bounded failure facts without expo
     "reason: 'runtime_missing'",
   ].join('\n');
   const summary = verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: raw, stderr: '' });
-  assert.match(summary, /deterministic verification failed.*exit 1/);
-  assert.match(summary, /27 passed, 1 failed/);
+  assert.match(summary, /deterministic verification failed.*exit nonzero/);
+  assert.match(summary, /reported tests: 1 failed/);
   assert.ok(!summary.includes('test/project-onboarding.test.js'), 'untrusted test paths stay out of public transcript');
   assert.match(summary, /runtime_missing/);
   const exfil = 'test/ghp_' + 'A'.repeat(36) + '.test.js';
@@ -161,12 +161,20 @@ test('public R1 verification summaries retain bounded failure facts without expo
   assert.ok(!forged.includes(exfil), 'fake test filenames never get printed');
   assert.ok(!forged.includes('arbitrary'), 'unapproved preflight values never get printed');
   assert.ok(!forged.includes('preflight:'), 'no preflight hint without the known code');
-  assert.ok(summary.length <= 450);
+  assert.ok(summary.length <= 400);
   for (const forbidden of ['secret-should-never-be-logged', '/home/privateuser', 'private thinking']) {
     assert.ok(!summary.includes(forbidden), `${forbidden} leaked into public transcript`);
   }
   assert.equal(verificationFailureSummary({ passed: false, timedOut: true, exitCode: null, stdout: 'Bearer secret', stderr: '' }),
     'deterministic verification failed (timed out).');
   assert.equal(verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: 'token=secret', stderr: '' }),
-    'deterministic verification failed (exit 1).');
+    'deterministic verification failed (exit nonzero).');
+  const chosenNumbers = verificationFailureSummary({ passed: false, timedOut: false, exitCode: 173,
+    stdout: 'ℹ pass 482913\nℹ fail 771204', stderr: '' });
+  assert.equal(chosenNumbers, 'deterministic verification failed (exit nonzero; reported tests: 10+ failed).');
+  for (const forbidden of ['482913', '771204', '173']) assert.ok(!chosenNumbers.includes(forbidden));
+  assert.equal(chosenNumbers, verificationFailureSummary({ passed: false, timedOut: false, exitCode: 251,
+    stdout: 'ℹ pass 100000\nℹ fail 900001', stderr: '' }), 'different controlled numbers in the same category yield the same public message');
+  assert.equal(verificationFailureSummary({ passed: false, timedOut: false, exitCode: null, stdout: '', stderr: '' }),
+    'deterministic verification failed (terminated by signal).');
 });
