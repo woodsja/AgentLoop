@@ -765,6 +765,7 @@ body.panel-open{overflow:hidden}
     <header class="phead"><span class="eb">Event log</span><span class="cnt" id="cEvents"></span></header>
     <div class="pbody"><ul id="evList" role="log" aria-label="Event log"></ul></div>
   </section>
+  <details class="panel" id="projectOnboarding"><summary class="phead">Project onboarding diagnostics</summary><div class="pbody" id="onboardingDiagnostics" style="overflow:auto">Loading owner records</div></details>
 </main>
 </div>
 </div>
@@ -1414,7 +1415,28 @@ async function post(url, body){
   }
 }
 
+async function loadOnboardingDiagnostics(){
+  const body = $('#onboardingDiagnostics');
+  try {
+    const response = await fetch('/api/project-onboarding', {cache:'no-store'});
+    if (!response.ok) throw new Error('http ' + response.status);
+    const data = await response.json();
+    body.replaceChildren();
+    const facts = document.createElement('pre');
+    facts.textContent = JSON.stringify(data.projects || [], null, 2);
+    body.append(facts);
+    for (const run of data.runs || []) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = run.logId;
+      button.addEventListener('click', () => openDrawer(run.logId, 'Project onboarding'));
+      body.append(button);
+    }
+  } catch (error) { body.textContent = 'Onboarding diagnostics unavailable: ' + error.message; }
+}
+
 async function loadProjects(){
+  loadOnboardingDiagnostics();
   try {
     const r = await fetch('/api/projects', {cache: 'no-store'});
     if (!r.ok) throw new Error('http ' + r.status);
@@ -2317,6 +2339,7 @@ function init(){
     const row = e.target.closest('.rrow[data-log], .arow[data-log]');
     if (row) { e.preventDefault(); openDrawer(row.getAttribute('data-log'), row.getAttribute('data-logtitle')); }
   });
+  $('#projectOnboarding').addEventListener('toggle', () => { if ($('#projectOnboarding').open) loadOnboardingDiagnostics(); });
   $('#dclose').addEventListener('click', closeDrawer);
   $('#scrim').addEventListener('click', () => { closeDrawer(); closeLoop(); closeTask(); });
   $('#newLoopBtn').addEventListener('click', openLoop);
