@@ -8,6 +8,7 @@ function createRalphTaskService(options = {}) {
   const runTaskImpl = options.runTaskImpl ?? runTask;
   const runWorker = createCliWorkerImpl({
     config: options.config,
+    ...(options.recordExecution ? { recordExecution: options.recordExecution } : {}),
     timeoutMs: options.workerTimeoutMs,
     ...(options.registryPath ? { registryPath: options.registryPath } : {}),
     ...(options.spawnImpl ? { spawnImpl: options.spawnImpl } : {}),
@@ -23,7 +24,11 @@ function createRalphTaskService(options = {}) {
           await options.onPhaseChange('verification');
           return result;
         } : runWorker,
-        onStateChange: stateWriter,
+        onStateChange: options.recordExecution ? async state => {
+          options.recordExecution?.('attempt', { state });
+          await stateWriter(state);
+        } : stateWriter,
+        ...(options.recordExecution ? { recordExecution: options.recordExecution } : {}),
         verificationTimeoutMs: options.verificationTimeoutMs,
       });
     },

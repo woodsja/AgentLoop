@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync } = require('./execution-log');
 const { verifyTask } = require('./task-runner');
 const { normalizeTaskContract } = require('./task-contract');
 

@@ -1,3 +1,4 @@
+const { recorder, captureProcess } = require('./execution-log');
 // Daemon scheduler, worker runner, and local HTTP API.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -95,6 +96,14 @@ function recordActivity(id, engine, line) {
 function recordEvent(type, data) {
   try {
     store.appendEvent(type, data);
+    if (data?.id && /^[A-Za-z0-9_-]+$/.test(data.id)) {
+      recorder(store, data.id)('orchestration', { type, data });
+      let task;
+      for (const stage of ['running', 'done', 'pending']) {
+        try { task = store.readTask(data.id, stage); break; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+      if (task?.r1Child?.parentJobId) recorder(store, task.r1Child.parentJobId)('orchestration', { type, data, childId: data.id, parentId: task.r1Child.parentJobId });
+    }
   } catch (error) {
     console.error(`Failed to append ${type} event: ${error.message}`);
   }
@@ -102,10 +111,10 @@ function recordEvent(type, data) {
 
 function streamLines(stream, onLine) {
   let buffered = '';
-  stream.setEncoding('utf8');
+  const decoder = new (require('node:string_decoder').StringDecoder)('utf8');
 
   stream.on('data', (chunk) => {
-    buffered += chunk;
+    buffered += decoder.write(chunk);
     const lines = buffered.split('\n');
     buffered = lines.pop();
 
@@ -115,6 +124,7 @@ function streamLines(stream, onLine) {
   });
 
   stream.on('end', () => {
+    buffered += decoder.end();
     if (buffered) {
       onLine(buffered.replace(/\r$/, ''));
     }
@@ -397,11 +407,14 @@ function stopBridge() {
   return true;
 }
 
-function readWorkerOutput(outputPath, fallback) {
+function readWorkerOutput(outputPath, fallback, record = () => {}) {
   try {
-    const output = fs.readFileSync(outputPath, 'utf8');
+    const bytes = fs.readFileSync(outputPath);
+    record('result-file', { base64: bytes.toString('base64'), path: outputPath });
+    const output = bytes.toString('utf8');
     return output.trim() ? output : fallback;
-  } catch {
+  } catch (error) {
+    record('exception', { path: outputPath, name: error.name, message: error.message, stack: error.stack, code: error.code });
     return fallback;
   } finally {
     try {
@@ -438,10 +451,10 @@ function trackTail(tail, parsed) {
   }
 }
 
-function finalText(engine, outputPath, tail) {
+function finalText(engine, outputPath, tail, record) {
   const fallback = tail.message || tail.text;
 
-  return engine.usesOutputFile ? readWorkerOutput(outputPath, fallback) : (tail.result || fallback);
+  return engine.usesOutputFile ? readWorkerOutput(outputPath, fallback, record) : (tail.result || fallback);
 }
 
 function timeoutMinutes() {
@@ -741,7 +754,12 @@ function appendSessionLog(loop, cycle, role, line) {
 }
 
 function appendSessionResult(loop, cycle, role, resultText) {
-  const text = String(resultText || '').trim();
+  const text = String(resultText || '');
+  if (text) {
+    const metadata = { childId: loop.id, parentId: loop.r1ParentJobId || loop.r1Child?.parentJobId, role, attempt: cycle.n };
+    recorder(store, loop.id, metadata)('result', { text });
+    if (metadata.parentId) recorder(store, metadata.parentId, metadata)('result', { text });
+  }
 
   if (text) {
     appendSessionLog(loop, cycle, role, text);
@@ -749,6 +767,9 @@ function appendSessionResult(loop, cycle, role, resultText) {
 }
 
 function failLoopTransition(loop, cycleNumber, error) {
+  const details = { childId: loop.id, parentId: loop.r1Child?.parentJobId, cycle: cycleNumber, name: error.name, message: error.message, stack: error.stack, code: error.code };
+  recorder(store, loop.id)('exception', details);
+  if (details.parentId) recorder(store, details.parentId)('exception', details);
   const current = readRunningLoop(loop.id) || loop;
   const cycle = currentCycle(current, cycleNumber);
   const passed = hasPassedCycle(current);
@@ -812,6 +833,12 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   let model;
   let outputPath;
 
+  const record = (event, details) => {
+    const metadata = { childId: loop.id, parentId: loop.r1ParentJobId || loop.r1Child?.parentJobId, role, attempt: loop.r1Child?.attempt || 1, cycle: cycle.n, stage: role };
+    recorder(store, loop.id, metadata)(event, details);
+    if (metadata.parentId) recorder(store, metadata.parentId, metadata)(event, details);
+  };
+
   try {
     engine = engines.get(id);
     if (!engine) throw new Error(`Unsupported ${role} engine: ${id}.`);
@@ -821,17 +848,15 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       : null;
     appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
     const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
-    if (scope.isolatedWorktree && role === 'worker' && engine.id !== 'codex') {
-      throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
-    }
     const args = engine.args({ model, outputPath, role, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
-    child = spawnEngine(engine, args, {
+    child = captureProcess((_file, argv, options) => spawnEngine(engine, argv, options), engines.binary(engine, store.config.enginePaths) || engine.command, args, {
       cwd: scope.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       ...(loop.r1Child && process.platform !== 'win32' ? { detached: true } : {}),
-    });
+    }, record);
   } catch (error) {
+    record('exception', { name: error.name, message: error.message, stack: error.stack, code: error.code });
     finishLoopSession(loop, cycle, onFinish, {
       exitCode: null,
       forceFailed: true,
@@ -872,7 +897,7 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       signal,
       forceFailed,
       reason: timedOut ? `${role}_timed_out` : reason || (inputFailed ? `${role}_input_failed` : undefined),
-      resultText: finalText(engine, outputPath, tail),
+      resultText: finalText(engine, outputPath, tail, record),
       timedOut,
       cancelled: worker.cancelled,
       ...(typeof tail.costUsd === 'number' ? { costUsd: tail.costUsd } : {}),
@@ -1631,17 +1656,18 @@ function spawnWorker(task) {
     ? path.join(store.paths.results, `.${task.id}.${Date.now()}.last-message.tmp`)
     : null;
   let child;
+  const record = recorder(store, task.id, { role: 'worker', stage: 'implementation', attempt: 1 });
 
   try {
     const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
-    if (scope.isolatedWorktree && engine.id !== 'codex') throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
     const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
-    child = spawnEngine(engine, args, {
+    child = captureProcess((_file, argv, options) => spawnEngine(engine, argv, options), engines.binary(engine, store.config.enginePaths) || engine.command, args, {
       cwd: scope.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-    });
+    }, record);
   } catch (error) {
+    record('exception', { name: error.name, message: error.message, stack: error.stack, code: error.code });
     completeTask(task, {
       exitCode: null,
       forceFailed: true,
@@ -1681,7 +1707,7 @@ function spawnWorker(task) {
       signal,
       forceFailed,
       reason: timedOut ? 'timed_out' : reason || (inputFailed ? 'worker_input_failed' : undefined),
-      resultText: finalText(engine, outputPath, tail),
+      resultText: finalText(engine, outputPath, tail, record),
       timedOut,
       cancelled: worker.cancelled,
       ...(typeof tail.costUsd === 'number' ? { costUsd: tail.costUsd } : {}),
@@ -2552,6 +2578,20 @@ function serveLog(res, requestPath, requestUrl) {
     return;
   }
 
+  if (requestUrl.searchParams.has('download')) {
+    const file = store.executionPath(id, requestUrl.searchParams.has('legacy'));
+    if (!fs.existsSync(file)) { res.writeHead(404); res.end('No captured execution record'); return; }
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Content-Disposition': `attachment; filename="${id}.execution.ndjson"`, 'X-Content-Type-Options': 'nosniff' });
+    const stream = fs.createReadStream(file);
+    stream.on('error', error => res.destroy(error));
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
+    return;
+  }
+  if (requestUrl.searchParams.has('raw')) {
+    sendJson(res, 200, store.readExecutionBytes(id, Number(requestUrl.searchParams.get('offset') || 0), Number(requestUrl.searchParams.get('bytes') || 65536), requestUrl.searchParams.has('legacy')));
+    return;
+  }
   sendJson(res, 200, { lines: store.readLogLines(id, logLineCount(requestUrl.searchParams.get('lines'))) });
 }
 
@@ -2686,6 +2726,15 @@ async function handleRequest(req, res) {
 
   // Project paths are intentionally not part of the dashboard contract.  The
   // browser can select only administrator-configured project names.
+  if (req.method === 'GET' && requestPath === '/api/project-onboarding') {
+    const projects = require('./project-registration').diagnosticProjects(store.paths.config);
+    const runs = fs.existsSync(store.paths.logs) ? fs.readdirSync(store.paths.logs)
+      .filter(name => /^onboarding-[A-Za-z0-9_-]+\.execution\.ndjson$/.test(name))
+      .map(name => ({ logId: name.replace('.execution.ndjson', '') })) : [];
+    sendJson(res, 200, { projects, runs });
+    return;
+  }
+
   if (req.method === 'GET' && requestPath === '/api/projects') {
     sendJson(res, 200, { projects: Object.keys(store.config.allowedProjects || {}).sort() });
     return;

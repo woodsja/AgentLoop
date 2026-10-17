@@ -263,6 +263,50 @@ function readLogLines(id, limit = 200) {
   }
 }
 
+function executionPath(id, legacy = false) {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error('Invalid execution log id.');
+  return path.join(paths.logs, `${id}${legacy ? '' : '.execution'}.ndjson`);
+}
+
+function appendExecution(id, record) {
+  ensureDirs();
+  const file = executionPath(id);
+  const existed = fs.existsSync(file);
+  const fd = fs.openSync(file, 'a+', 0o600);
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size) {
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, size - 1);
+      if (last[0] !== 10) fs.writeSync(fd, '\n'); // keep a torn crash record separate and retrievable
+    }
+    fs.writeFileSync(fd, JSON.stringify({ ...record, jobId: id, timestamp: new Date().toISOString() }) + '\n');
+    fs.fsyncSync(fd);
+    if (!existed && process.platform !== 'win32') {
+      for (const directory of [paths.logs, paths.state]) {
+        const directoryFd = fs.openSync(directory, 'r');
+        try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
+      }
+    }
+  } finally { fs.closeSync(fd); }
+}
+
+function readExecutionBytes(id, offset = 0, bytes = 65536, legacy = false) {
+  const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+  const length = Number.isSafeInteger(bytes) && bytes > 0 ? Math.min(bytes, 262144) : 65536;
+  let fd;
+  try {
+    fd = fs.openSync(executionPath(id, legacy), 'r');
+    const size = fs.fstatSync(fd).size;
+    const buffer = Buffer.alloc(Math.min(length, Math.max(0, size - start)));
+    const count = fs.readSync(fd, buffer, 0, buffer.length, start);
+    return { offset: start, nextOffset: start + count, hasMore: start + count < size, base64: buffer.subarray(0, count).toString('base64') };
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return { offset: start, nextOffset: start, hasMore: false, base64: '' };
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
 function appendEvent(type, dataObj = {}) {
   try {
     ensureDirs();
@@ -472,6 +516,9 @@ module.exports = {
   listTasks,
   writeResult,
   appendLogLine,
+  appendExecution,
+  readExecutionBytes,
+  executionPath,
   readLogLines,
   appendEvent,
   appendMessage,

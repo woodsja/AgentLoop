@@ -3,319 +3,205 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const { prepareRepositoryEnvironment } = require('../src/autopilot-environment');
+const { withExecution } = require('../src/execution-log');
 
-test('fresh Python setup blocks DNS failure before admission with a sanitized infrastructure reason', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'python-preflight-'));
+function fixture(t, source = 'python-project') {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-python-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const policy = { interpreter: '/usr/bin/python3', indexUrl: 'https://pypi.org/simple', timeoutMs: 1000,
-    dependencies: ['pytest', 'ruff'].map(name => ({ name, version: '1.0', sha256: 'a'.repeat(64), wheel: `${name}-1.0-py3-none-any.whl` })), commands: [] };
-  const calls = [];
-  await assert.rejects(prepareRepositoryEnvironment(root, { pythonEnvironment: policy }, { execFile(file, args, options, callback) {
-    calls.push(args);
-    if (args.includes('venv')) {
-      fs.mkdirSync(path.join(root, '.venv/bin'), { recursive: true });
-      fs.writeFileSync(path.join(root, '.venv/bin/python'), '');
-      fs.writeFileSync(path.join(root, '.venv/pyvenv.cfg'), 'include-system-site-packages = false');
-      callback(null, '', '');
-    } else if (args.some(value => value.startsWith('import sys,os; assert os.path.realpath(sys.prefix)'))) callback(null);
-    else if (args.includes('install')) callback(new Error('DNS https://secret:password@example.invalid/private'), '', 'Temporary failure in name resolution token=private');
-    else callback(new Error('missing dependencies'), '', '');
-    return { kill() {} };
-  } }), error => error.code === 'PYTHON_PREFLIGHT_BLOCKED' && error.outcome.reason === 'package_index_transport'
-    && !JSON.stringify(error.outcome).includes('private'));
-  assert.ok(calls.some(args => args.includes('install')));
+  fs.cpSync(path.join(__dirname, 'fixtures', source), root, { recursive: true, filter: source => !source.split(path.sep).some(part => ['.venv', '__pycache__'].includes(part)) });
+  execFileSync('git', ['init', '-q', root]);
+  commit(root);
+  return root;
+}
+function commit(root) {
+  execFileSync('git', ['-C', root, 'add', '.']);
+  execFileSync('git', ['-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
+}
+function contract(root, verification) {
+  fs.writeFileSync(path.join(root, '.ralph/project.json'), JSON.stringify({ runtime: 'python', verification, lockfile: 'uv.lock' }));
+}
+
+test('real locked Python setup uses local venv, preserves red application checks and all raw streams', async t => {
+  const root = fixture(t), records = [], claims = [], project = { runtime: 'python', enabled: false, autoMerge: false };
+  const before = fs.readFileSync(path.join(root, 'uv.lock'));
+  const result = await withExecution((event, details) => records.push({ event, ...details }), () => prepareRepositoryEnvironment(root, project, { onProcess: claim => claims.push(claim) }));
+  assert.equal(result.status, 'ready');
+  assert.equal(result.runtime, 'python');
+  assert.equal(result.baseline.passed, false);
+  assert.match(result.baseline.stdout, /x{25000}/);
+  assert.match(result.baseline.stderr, /existing application bug/);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'uv.lock')), before);
+  assert.deepEqual(project, { runtime: 'python', enabled: false, autoMerge: false });
+  assert.ok(records.some(r => r.event === 'command' && r.args.includes('--locked') && !r.args.includes('--frozen')));
+  const output = stream => Buffer.concat(records.filter(r => r.event === 'output' && r.stream === stream).map(r => Buffer.from(r.base64, 'base64'))).toString();
+  assert.match(output('stdout'), /x{25000}/);
+  assert.match(output('stderr'), /exact Python check stderr/);
+  assert.ok(claims.some(c => c?.startTime));
+  assert.equal(claims.at(-1), null);
+  assert.equal((await prepareRepositoryEnvironment(root, {})).status, 'ready', 'contract alone selects Python');
+  fs.writeFileSync(path.join(root, 'check.py'), 'import sys; assert sys.prefix != sys.base_prefix; print("fixed")');
+  assert.equal((await prepareRepositoryEnvironment(root, project)).baseline.passed, true);
 });
 
-const crypto = require('node:crypto');
-const execGit = require('node:util').promisify(require('node:child_process').execFile);
+for (const mode of ['lockfile_missing', 'lockfile_uncommitted', 'invalid', 'stale', 'metadata_missing']) {
+  test(`Python ${mode} lock/setup errors require explicit repair`, async t => {
+    const root = fixture(t), lock = path.join(root, 'uv.lock');
+    if (mode === 'lockfile_missing') fs.unlinkSync(lock);
+    if (mode === 'lockfile_uncommitted') fs.appendFileSync(lock, '\n');
+    if (mode === 'invalid') { fs.writeFileSync(lock, 'invalid = ['); commit(root); }
+    if (mode === 'stale') fs.writeFileSync(path.join(root, 'pyproject.toml'), fs.readFileSync(path.join(root, 'pyproject.toml'), 'utf8').replace('>=3.11', '>=3.12'));
+    if (mode === 'metadata_missing') fs.unlinkSync(path.join(root, 'pyproject.toml'));
+    const before = fs.existsSync(lock) ? fs.readFileSync(lock) : null;
+    await assert.rejects(prepareRepositoryEnvironment(root, { runtime: 'python' }), e => e.code === 'PROJECT_PREFLIGHT_BLOCKED' && e.outcome.reason === (mode === 'metadata_missing' ? 'package_invalid' : ['invalid', 'stale'].includes(mode) ? 'install_failed' : mode) && /uv.lock|pyproject.toml/.test(e.message));
+    if (before) assert.deepEqual(fs.readFileSync(lock), before);
+  });
+}
+
+test('Python tooling resolves ordinary PATH and reports missing uv without installation', async t => {
+  const root = fixture(t), prior = process.env.PATH;
+  t.after(() => { process.env.PATH = prior; });
+  process.env.PATH = '/usr/bin:/bin';
+  if (!require('../src/engines').findOnPath('uv')) await assert.rejects(prepareRepositoryEnvironment(root, { runtime: 'python' }), e => e.outcome.reason === 'runtime_missing' && /uv/.test(e.message));
+  process.env.PATH = prior;
+  assert.equal((await prepareRepositoryEnvironment(root, { runtime: 'python' })).status, 'ready');
+});
+
+for (const mode of ['verification_unavailable', 'timeout', 'cancelled']) {
+  test(`Python ${mode} terminates setup ownership and supports recovery`, async t => {
+    const root = fixture(t), claims = [];
+    let cancel = false;
+    contract(root, mode === 'verification_unavailable' ? 'agentloop-missing-check' : 'python wait.py');
+    fs.writeFileSync(path.join(root, 'wait.py'), 'import pathlib, time\npathlib.Path("started").touch()\ntime.sleep(60)\n');
+    const interval = setInterval(() => { if (mode === 'cancelled' && fs.existsSync(path.join(root, 'started'))) cancel = true; }, 20);
+    t.after(() => clearInterval(interval));
+    await assert.rejects(prepareRepositoryEnvironment(root, { runtime: 'python' }, { timeoutMs: mode === 'timeout' ? 1500 : 10000, isCancelled: () => cancel, onProcess: claim => claims.push(claim) }), e => e.outcome.reason === mode);
+    assert.equal(claims.at(-1), null);
+    const { hasLiveClaim } = require('../src/r1-process-claim');
+    assert.ok(claims.filter(Boolean).every(c => !hasLiveClaim({ workerPid: c.pid, workerStartTime: c.startTime })));
+    contract(root, 'python -c "import sys; assert sys.prefix != sys.base_prefix" && python -c "import sys; assert sys.prefix != sys.base_prefix"');
+    assert.equal((await prepareRepositoryEnvironment(root, { runtime: 'python' })).baseline.passed, true);
+  });
+}
 const { createR1Jobs } = require('../src/r1-jobs');
 const { configuredProjects } = require('../src/project-registry');
 const { createJobStore } = require('../src/autopilot-state');
-async function harness(t, mode = 'fresh') {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-python-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const checkout = path.join(root, 'repo'); fs.mkdirSync(checkout);
-  const git = (...args) => execGit('git', args, { cwd: checkout });
-  await git('init', '-b', 'main'); await git('config', 'user.email', 'fixture@example.invalid'); await git('config', 'user.name', 'Fixture');
-  fs.writeFileSync(path.join(checkout, 'initial'), 'fixture'); await git('add', '.'); await git('commit', '-m', 'Initial');
-  const registry = path.join(root, 'owner.json'); fs.writeFileSync(registry, '{}');
-  const dependencies = ['pytest', 'ruff'].map(name => ({ name, version: '1.0', wheel: `${name}-1.0-py3-none-any.whl`, sha256: crypto.createHash('sha256').update(name).digest('hex') }));
-  const policy = { interpreter: '/usr/bin/python3', indexUrl: 'https://pypi.org/simple', timeoutMs: 2000, dependencies, commands: ['project-check'] };
-  if (mode === 'install-command-network') policy.indexUrl = 'https://network.example.invalid/simple';
-  const project = { enabled: true, autoMerge: false, worker: 'codex', reviewPolicy: 'always', maxAttempts: 1,
-    repo: 'example/repo', checkout, worktreeRoot: path.join(root, 'worktrees'), baseBranch: 'main', readyLabel: 'staged-fixture',
-    humanLabel: 'human', stateDir: path.join(root, 'state'), verification: 'true', pythonEnvironment: policy };
-  if (mode.startsWith('offline')) {
-    delete policy.indexUrl;
-    policy.wheelhouse = path.join(root, 'wheels'); fs.mkdirSync(policy.wheelhouse);
-    for (const d of dependencies) fs.writeFileSync(path.join(policy.wheelhouse, d.wheel), d.name);
-    if (mode === 'offline-corrupt') fs.writeFileSync(path.join(policy.wheelhouse, dependencies[0].wheel), 'corrupt');
-    if (mode === 'offline-incomplete') fs.unlinkSync(path.join(policy.wheelhouse, dependencies[0].wheel));
-    if (mode === 'offline-unapproved') fs.writeFileSync(path.join(policy.wheelhouse, 'unapproved.whl'), 'unapproved');
-  }
-  const stages = { pending: new Map(), running: new Map(), done: new Map() };
-  const store = {
-    paths: { config: registry }, config: { allowedProjects: configuredProjects({ demo: { root: checkout, worktreeRoot: project.worktreeRoot } }, registry) },
-    enqueueTask(task) { const value = { ...task, id: `t-${String(stages.pending.size + stages.running.size + stages.done.size + 1).padStart(8, '0')}` }; stages.pending.set(value.id, value); return value; },
-    appendLogLine() {},
-    writeTask(task, stage) { stages[stage].set(task.id, structuredClone(task)); },
-    readTask(id, stage) { const value = stages[stage].get(id); if (!value) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return structuredClone(value); },
-    listTasks(stage) { return [...stages[stage].values()]; },
-    listR1ChildLoops() { return []; },
-    writeResult() {},
-    moveTask(id, from, to) { const task = stages[from].get(id); stages[from].delete(id); stages[to].set(id, task); },
-  };
-  let installers = 0, workers = 0, reviewers = 0, prepared = mode === 'legacy-prepared', release;
-  const calls = [];
-  const fakeExec = (file, args, options, callback) => {
-    calls.push({ file, args, options });
-    const cwd = options.cwd;
-    if (args.includes('venv')) {
-      if (mode === 'interpreter') { callback(Object.assign(new Error('missing'), { code: 'ENOENT' })); return; }
-      fs.mkdirSync(path.join(cwd, '.venv/bin'), { recursive: true });
-      fs.writeFileSync(path.join(cwd, '.venv/bin/python'), '');
-      fs.writeFileSync(path.join(cwd, '.venv/pyvenv.cfg'), 'include-system-site-packages = false');
-      callback(null); return;
+for (const mode of ['red-tests', 'missing-lock', 'restart-dead', 'restart-ambiguous']) {
+  test(`public R1 Python ${mode}: durable readiness and zero wasted setup attempts`, async t => {
+    const checkout = fixture(t);
+    if (mode === 'missing-lock') {
+      fs.unlinkSync(path.join(checkout, 'uv.lock'));
+      execFileSync('git', ['-C', checkout, 'commit', '-qam', 'remove lock']);
     }
-    if (args.includes('install')) {
-      installers++;
-      assert.equal(options.env.PYTHONPATH, undefined);
-      assert.equal(options.shell, false);
-      assert.ok(file.startsWith(path.join(cwd, '.venv/bin/')));
-      const complete = () => {
-        if (['network', 'offline-network'].includes(mode)) callback(new Error('DNS token=private'), '', 'Temporary failure in name resolution https://private.invalid');
-        else if (mode === 'timeout') callback(Object.assign(new Error('timed out'), { killed: true }));
-        else if (mode === 'output-overflow') callback(Object.assign(new Error('overflow'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }), '', '');
-        else if (mode === 'install-command-network') callback(new Error(`Command failed: ${file} ${args.join(' ')}`), '', 'Incompatible wheel');
-        else if (mode === 'install-requirement-echo') callback(new Error('pip failed'), '', 'ERROR: Could not find a version that satisfies the requirement dnspython==1.0\nERROR: No matching distribution found for dnspython==1.0');
-        else {
-          prepared = !['incompatible', 'probe-dns'].includes(mode);
-          if (policy.dependencies.some(d => d.name === 'dnspython')) fs.writeFileSync(path.join(cwd, '.venv/old-distribution'), 'dnspython');
-          callback(null);
-        }
-      };
-      if (mode === 'cancel' || mode === 'concurrent') {
-        release = complete;
-        return { kill() { callback(Object.assign(new Error('cancelled'), { killed: true })); } };
-      }
-      complete(); return;
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-node-state-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const registry = path.join(root, 'owner.json'); fs.writeFileSync(registry, '{}');
+    const project = { runtime: 'python', enabled: true, autoMerge: false, worker: 'codex', reviewPolicy: 'always', maxAttempts: 1,
+      repo: 'example/node', checkout, worktreeRoot: path.join(root, 'worktrees'), baseBranch: 'master', readyLabel: 'staged', humanLabel: 'human', stateDir: path.join(root, 'state'), verification: 'false' };
+    const stages = { pending: new Map(), running: new Map(), done: new Map() }, records = [];
+    const store = {
+      paths: { config: registry }, config: { allowedProjects: configuredProjects({ demo: { root: checkout, worktreeRoot: project.worktreeRoot } }, registry) },
+      enqueueTask(task) { const value = { ...task, id: 't-12345678' }; stages.pending.set(value.id, value); return value; },
+      appendLogLine() {}, appendExecution(id, record) { records.push({ id, ...record }); },
+      writeTask(task, stage) { stages[stage].set(task.id, structuredClone(task)); },
+      readTask(id, stage) { const value = stages[stage].get(id); if (!value) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return structuredClone(value); },
+      listTasks(stage) { return [...stages[stage].values()]; }, listR1ChildLoops() { return []; }, writeResult() {},
+      moveTask(id, from, to) { const task = stages[from].get(id); stages[from].delete(id); stages[to].set(id, task); },
+    };
+    let workers = 0;
+    const deps = {
+      loadProjectConfig: () => project, discoverReadyIssues: async () => [{ number: 1, title: 'Fix tests', body: 'Fix existing application tests.' }],
+      findOpenIssuePullRequests: async () => [], readRepositoryInstructions: async () => [], cleanupIssueWorkspace: async () => {},
+      prepareIssueWorkspace: async (_p, _issue, options) => {
+        const worktreePath = path.join(project.worktreeRoot, 'issue-1');
+        if (!fs.existsSync(worktreePath)) execFileSync('git', ['-C', checkout, 'worktree', 'add', '-b', options.branch, worktreePath, 'HEAD'], { stdio: 'pipe' });
+        return { worktreePath, branch: options.branch };
+      },
+      createRalphTaskService: () => ({ run: async (cwd, task) => {
+        workers++;
+        assert.equal(task.verification, 'export VIRTUAL_ENV="$PWD/.venv"; export PATH="$PWD/.venv/bin:$PATH"; python check.py');
+        const verification = await require('../src/verifier').runVerification(cwd, task.verification, 10000);
+        return { task, status: 'needs_planning', attempts: [{ number: 1, status: 'failed', verification }] };
+      } }),
+      reviewPullRequest: async () => assert.fail('failed checks cannot reach review'),
+    };
+    const jobs = createR1Jobs(store, { autopilotDependencies: deps });
+    const task = jobs.submit({ project: 'demo', issue: 1 }); store.moveTask(task.id, 'pending', 'running'); jobs.advance(task);
+    const deadline = Date.now() + 15000;
+    while (!stages.done.has(task.id)) { assert.ok(Date.now() < deadline, 'R1 fixture completes'); await new Promise(resolve => setTimeout(resolve, 20)); }
+    const result = jobs.read(task.id);
+    const ready = result.evidence.environmentPreflight;
+    assert.equal(ready.status, mode === 'missing-lock' ? 'blocked' : 'ready');
+    assert.equal(workers, mode === 'missing-lock' ? 0 : 1);
+    if (mode !== 'missing-lock') {
+      assert.equal(ready.baseline.passed, false);
+      assert.equal(result.evidence.verification.passed, false);
+      assert.match(result.evidence.verification.stdout, /x{25000}/);
+      assert.match(result.evidence.verification.stderr, /exact Python check stderr/);
+      assert.ok(records.some(r => r.event === 'output' && Buffer.from(r.base64, 'base64').toString().includes('baseline stdout')));
+    } else {
+      assert.equal(ready.reason, 'lockfile_missing');
+      assert.equal(result.evidence.verification, null);
+      assert.equal(result.evidence.review, null);
     }
-    if (args.some(value => value.startsWith('import sys,os; assert os.path.realpath(sys.prefix)'))) { callback(null); return; }
-    if (prepared && !(fs.existsSync(path.join(cwd, '.venv/old-distribution')) && !policy.dependencies.some(d => d.name === 'dnspython'))) callback(null);
-    else callback(new Error(`Command failed: ${file} ${args.join(' ')}`), '', 'not installed');
+    assert.deepEqual(createR1Jobs(store, { autopilotDependencies: deps }).read(task.id), result);
+    const state = createJobStore(project.stateDir);
+    assert.equal(state.load(1).environmentProcess ?? null, null);
+    if (mode.startsWith('restart-')) {
+      const prior = state.load(1);
+      prior.terminal = false; prior.terminalState = null; prior.status = 'environment_preflight';
+      prior.ralph = { status: null, attempts: 0, taskId: null };
+      prior.environmentPreflight = { status: 'preparing', category: 'infrastructure' };
+      prior.environmentProcess = mode === 'restart-dead' ? { pid: 99999999, startTime: '1' } : { pid: null, startTime: null };
+      state.save(prior);
+      store.moveTask(task.id, 'done', 'running');
+      const restarted = createR1Jobs(store, { autopilotDependencies: deps });
+      restarted.recover(store.readTask(task.id, 'running'));
+      store.moveTask(task.id, 'pending', 'running'); restarted.advance(store.readTask(task.id, 'running'));
+      const restartDeadline = Date.now() + 15000;
+      while (!stages.done.has(task.id)) { assert.ok(Date.now() < restartDeadline); await new Promise(resolve => setTimeout(resolve, 20)); }
+      const recovered = restarted.read(task.id).evidence.environmentPreflight;
+      assert.equal(recovered.status, mode === 'restart-dead' ? 'ready' : 'blocked');
+      assert.equal(workers, mode === 'restart-dead' ? 2 : 1);
+      if (mode === 'restart-ambiguous') assert.equal(recovered.reason, 'prior_process_unresolved');
+    }
+  });
+}
+
+
+
+test('real pytest source/cache failure preserves exact diagnostics, then repaired setup admits red tests', async t => {
+  const root = fixture(t, 'python-pytest'), records = [];
+  const oldCache = process.env.UV_CACHE_DIR, oldOffline = process.env.UV_OFFLINE;
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-empty-uv-cache-'));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  const restore = () => {
+    if (oldCache === undefined) delete process.env.UV_CACHE_DIR; else process.env.UV_CACHE_DIR = oldCache;
+    if (oldOffline === undefined) delete process.env.UV_OFFLINE; else process.env.UV_OFFLINE = oldOffline;
   };
-  const deps = {
-    loadProjectConfig: () => project, discoverReadyIssues: async () => [{ number: 1, title: 'Issue', body: 'Acceptance criteria for isolated Python verification environment.' }],
-    findOpenIssuePullRequests: async () => [], readRepositoryInstructions: async () => [],
-    prepareIssueWorkspace: async (_p, issue, options) => {
-      const worktreePath = path.join(project.worktreeRoot, `issue-${issue.number}`);
-      if (!fs.existsSync(worktreePath)) await git('worktree', 'add', '-b', options.branch, worktreePath, 'HEAD');
-      if (mode === 'escape') fs.symlinkSync(checkout, path.join(worktreePath, '.venv'));
-      if (mode === 'escape-bin') { fs.mkdirSync(path.join(worktreePath, '.venv')); fs.symlinkSync(checkout, path.join(worktreePath, '.venv/bin')); }
-      if (mode === 'legacy-prepared') {
-        fs.mkdirSync(path.join(worktreePath, '.venv/bin'), { recursive: true });
-        fs.writeFileSync(path.join(worktreePath, '.venv/bin/python'), '');
-        fs.writeFileSync(path.join(worktreePath, '.venv/pyvenv.cfg'), 'include-system-site-packages = false');
-      }
-      return { worktreePath, branch: options.branch };
-    },
-    cleanupIssueWorkspace: async () => {},
-    prepareRepositoryEnvironment: async (cwd, p, options) => {
-      const outcome = await prepareRepositoryEnvironment(cwd, p, mode === 'offline-real' ? options : { ...options, execFile: fakeExec });
-      if (mode === 'cancel-after-ready') {
-        const read = store.readTask;
-        // The readiness checkpoint and subsequent admission check both see
-        // the task missing from running; later result reads work normally.
-        let missingReads = 2;
-        store.readTask = () => {
-          if (--missingReads === 0) store.readTask = read;
-          throw Object.assign(new Error('task left running'), { code: 'ENOENT' });
-        };
-      }
-      return outcome;
-    },
-    createRalphTaskService: () => ({ run: async () => { workers++; return { status: 'failed', attempts: [] }; } }),
-    reviewPullRequest: async () => { reviewers++; assert.fail('No failed implementation or preflight should reach review'); },
-  };
-  const jobs = createR1Jobs(store, { autopilotDependencies: deps });
-  const start = () => { const task = jobs.submit({ project: 'demo', issue: 1 }); store.moveTask(task.id, 'pending', 'running'); jobs.advance(task); return task; };
-  const until = async condition => { const deadline = Date.now() + (mode === 'offline-real' ? 25000 : 5000); while (!condition()) { assert.ok(Date.now() < deadline, 'job completed within deadline'); await new Promise(resolve => setTimeout(resolve, 10)); } };
-  return { root, project, jobs, store, stages, start, until, calls, fakeExec, release: () => release(), counts: () => ({ installers, workers, reviewers }),
-    feature: () => createJobStore(project.stateDir).load(1), restart: () => createR1Jobs(store, { autopilotDependencies: deps }) };
-}
-for (const [mode, reason] of [['network', 'package_index_transport'], ['interpreter', 'interpreter_missing'], ['timeout', 'timeout'], ['incompatible', 'dependency_incompatible'], ['probe-dns', 'dependency_incompatible'],
-  ['install-command-network', 'dependency_incompatible'], ['install-requirement-echo', 'dependency_incompatible'], ['output-overflow', 'output_limit'], ['offline-network', 'dependency_incompatible'], ['cancel-after-ready', 'cancelled'],
-  ['offline-corrupt', 'offline_bundle_invalid'], ['offline-incomplete', 'offline_bundle_invalid'], ['offline-unapproved', 'offline_bundle_invalid'], ['escape', 'unsafe_path'], ['escape-bin', 'unsafe_path']]) {
-  test(`public R1 admission blocks ${mode} before any worker or critic`, async t => {
-    const h = await harness(t, mode);
-    if (mode === 'probe-dns') h.project.pythonEnvironment.dependencies.push({ ...h.project.pythonEnvironment.dependencies[0], name: 'dnspython', wheel: 'dnspython-1.0-py3-none-any.whl' });
-    const task = h.start();
-    await h.until(() => h.stages.done.has(task.id));
-    const result = h.jobs.read(task.id);
-    assert.equal(result.status, 'blocked');
-    assert.equal(result.evidence.environmentPreflight.reason, reason);
-    assert.equal(result.evidence.environmentPreflight.category, 'infrastructure');
-    assert.equal(result.evidence.verification, null);
-    assert.equal(result.evidence.review, null);
-    assert.deepEqual(h.counts(), { installers: ['network', 'timeout', 'incompatible', 'probe-dns', 'install-command-network', 'install-requirement-echo', 'output-overflow', 'offline-network', 'cancel-after-ready'].includes(mode) ? 1 : 0, workers: 0, reviewers: 0 });
-    assert.ok(!JSON.stringify(result).includes('private'));
-    assert.deepEqual(h.restart().read(task.id), result, 'durable queue evidence survives recreation');
-    const replay = h.start(); await h.until(() => h.stages.done.has(replay.id));
-    assert.equal(h.counts().workers, 0, 'blocked feature record prevents automatic retries');
-  });
-}
-for (const mode of ['fresh', 'offline']) {
-  test(`public R1 ${mode} setup admits only after readiness and reuses approved environment`, async t => {
-    const h = await harness(t, mode), task = h.start();
-    await h.until(() => h.stages.done.has(task.id));
-    assert.equal(h.jobs.read(task.id).evidence.environmentPreflight.status, 'ready');
-    assert.deepEqual(h.counts(), { installers: 1, workers: 1, reviewers: 0 });
-    const install = h.calls.find(c => c.args.includes('install'));
-    assert.ok(install.args.includes('--require-hashes'));
-    if (mode === 'offline') { assert.ok(install.args.includes('--no-index')); assert.ok(!install.args.includes('--index-url')); }
-    const before = h.counts().installers;
-    const outcome = await prepareRepositoryEnvironment(h.feature().worktreePath, h.project, { execFile: (file, args, options, cb) => {
-      assert.ok(!args.includes('install')); cb(null);
-    } });
-    assert.equal(outcome.reused, true); assert.equal(h.counts().installers, before);
-  });
-}
-test('public R1 cancellation terminates setup without admitting a worker', async t => {
-  const h = await harness(t, 'cancel'), task = h.start();
-  await h.until(() => h.counts().installers === 1);
-  const current = h.store.readTask(task.id, 'running'); current.cancelRequested = true; h.store.writeTask(current, 'running');
-  await h.until(() => h.stages.done.has(task.id));
-  assert.equal(h.jobs.read(task.id).evidence.environmentPreflight.reason, 'cancelled');
-  assert.equal(h.counts().workers, 0);
-});
-test('public R1 duplicate/concurrent admission never starts a duplicate installer', async t => {
-  const h = await harness(t, 'concurrent'), first = h.start();
-  await h.until(() => h.counts().installers === 1);
-  h.jobs.advance(first);
-  const second = h.start();
-  await h.until(() => h.stages.done.has(second.id));
-  assert.equal(h.counts().installers, 1);
-  h.release();
-  await h.until(() => h.stages.done.has(first.id));
-  assert.equal(h.counts().workers, 1);
-});
-test('public R1 default non-Python project remains compatible', async t => {
-  const h = await harness(t); delete h.project.pythonEnvironment;
-  const task = h.start(); await h.until(() => h.stages.done.has(task.id));
-  assert.deepEqual(h.counts(), { installers: 0, workers: 1, reviewers: 0 });
-  assert.equal(h.jobs.read(task.id).evidence.environmentPreflight, undefined);
+  t.after(restore);
+  process.env.UV_CACHE_DIR = cache;
+  process.env.UV_OFFLINE = 'true';
+  await assert.rejects(withExecution((event, details) => records.push({ event, ...details }), () => prepareRepositoryEnvironment(root, { runtime: 'python' })), e => e.outcome.reason === 'install_failed' && /offline|cache|network/i.test(e.outcome.stderr) && /retry/.test(e.message));
+  assert.ok(records.some(r => r.event === 'output' && r.stream === 'stderr'));
+  restore();
+  const result = await prepareRepositoryEnvironment(root, { runtime: 'python' });
+  assert.equal(result.status, 'ready');
+  assert.equal(result.baseline.passed, false);
+  assert.match(result.baseline.stdout, /existing pytest application bug/);
+  fs.writeFileSync(path.join(root, 'test_existing.py'), 'def test_fixed(): assert 1 == 1\n');
+  assert.equal((await prepareRepositoryEnvironment(root, { runtime: 'python' })).baseline.passed, true);
 });
 
-for (const mode of ['legacy-fresh', 'legacy-prepared']) {
-  test(`public R1 ${mode} Python project requires owner policy before installation`, async t => {
-    const h = await harness(t, mode); delete h.project.pythonEnvironment; h.project.prepareVenv = true;
-    const task = h.start(); await h.until(() => h.stages.done.has(task.id));
-    const outcome = h.jobs.read(task.id).evidence.environmentPreflight;
-    assert.equal(outcome.status, mode === 'legacy-prepared' ? 'ready' : 'blocked');
-    assert.equal(h.counts().installers, 0);
-    assert.equal(h.counts().workers, mode === 'legacy-prepared' ? 1 : 0);
-  });
-}
-for (const unresolved of [false, true]) {
-  test(`public R1 restart ${unresolved ? 'blocks ambiguous installer ownership' : 'recovers interrupted unreceipted preparation'}`, async t => {
-    const h = await harness(t), task = h.start();
-    await h.until(() => h.stages.done.has(task.id));
-    const featureStore = createJobStore(h.project.stateDir), job = featureStore.load(1);
-    job.terminal = false; job.terminalState = null; job.status = 'environment_preflight'; job.workspaceState = 'prepared';
-    job.ralph = { status: null, attempts: 0, taskId: null };
-    job.environmentPreflight = { status: 'preparing', category: 'infrastructure' };
-    job.environmentProcess = unresolved ? { pid: null, startTime: null } : { pid: 99999999, startTime: '1' };
-    featureStore.save(job);
-    fs.unlinkSync(path.join(job.worktreePath, '.venv/ralph-python-policy.json'));
-    fs.writeFileSync(path.join(job.worktreePath, '.venv/ralph-requirements.txt'), 'interrupted partial file');
-    h.store.moveTask(task.id, 'done', 'running');
-    const restarted = h.restart(); restarted.recover(h.store.readTask(task.id, 'running'));
-    h.store.moveTask(task.id, 'pending', 'running'); restarted.advance(h.store.readTask(task.id, 'running'));
-    await h.until(() => h.stages.done.has(task.id));
-    const outcome = restarted.read(task.id).evidence.environmentPreflight;
-    assert.equal(outcome.status, unresolved ? 'blocked' : 'ready');
-    if (unresolved) assert.equal(outcome.reason, 'prior_process_unresolved');
-    assert.equal(h.counts().installers, unresolved ? 1 : 2);
-    assert.equal(h.counts().workers, unresolved ? 1 : 2);
-  });
-}
 
-test('public R1 approved offline wheels exercise the real isolated venv, pip and readiness runner', { timeout: 30000 }, async t => {
-  const h = await harness(t, 'offline-real');
-  // Some managed execution sandboxes discard writes to child stdin. The
-  // production admission handshake must fail closed there; do not bypass it.
-  const stdinProbe = path.join(h.root, 'stdin-probe');
-  await new Promise(resolve => {
-    const child = require('node:child_process').execFile(process.execPath, ['-e',
-      "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>require('fs').writeFileSync(process.argv[1],s))", stdinProbe], () => resolve());
-    child.stdin.end('start\n');
-  });
-  if (fs.readFileSync(stdinProbe, 'utf8') !== 'start\n') { t.skip('Execution sandbox discards child stdin required by the durable installer handshake'); return; }
-  h.project.pythonEnvironment.timeoutMs = 20000;
-  await execGit('/usr/bin/python3', [path.join(__dirname, 'fixtures/build-python-wheels.py'), h.project.pythonEnvironment.wheelhouse]);
-  for (const d of h.project.pythonEnvironment.dependencies) d.sha256 = crypto.createHash('sha256').update(fs.readFileSync(path.join(h.project.pythonEnvironment.wheelhouse, d.wheel))).digest('hex');
-  const task = h.start();
-  await h.until(() => h.stages.done.has(task.id));
-  const outcome = h.jobs.read(task.id).evidence.environmentPreflight;
-  assert.equal(outcome.status, 'ready', JSON.stringify(outcome));
-  assert.equal(h.counts().workers, 1);
-  const reused = await prepareRepositoryEnvironment(h.feature().worktreePath, h.project);
-  assert.equal(reused.reused, true);
-});
-
-test('public mixed-engine R1 preflight failure produces no child/critic recovery verdict', async t => {
-  const h = await harness(t, 'network'); h.project.implementationStrategy = 'worker-critic-loop';
-  const task = h.start(); await h.until(() => h.stages.done.has(task.id));
-  const result = h.jobs.read(task.id);
-  assert.equal(result.evidence.environmentPreflight.reason, 'package_index_transport');
-  assert.equal(result.evidence.review, null);
-  assert.equal(h.counts().workers, 0);
-  assert.ok(!result.evidence.diagnostics.some(item => item.phase === 'cleanup'));
-});
-test('owner Python policy rejects unapproved sources, incomplete identities and unsafe paths', () => {
-  const { validatePythonPolicy } = require('../src/python-preflight');
-  const valid = { interpreter: '/usr/bin/python3', timeoutMs: 1000, indexUrl: 'https://pypi.org/simple', commands: [],
-    dependencies: ['pytest', 'ruff'].map(name => ({ name, version: '1.0', wheel: `${name}-1.0-py3-none-any.whl`, sha256: 'a'.repeat(64) })) };
-  const variants = [ { indexUrl: 'http://index.invalid' }, { indexUrl: 'https://token:private@index.invalid' },
-    { wheelhouse: '/owner/wheels' }, { interpreter: 'python3' }, { timeoutMs: 0 }, { commands: ['../outside'] },
-    { dependencies: [valid.dependencies[0]] }, { dependencies: valid.dependencies.map(d => ({ ...d, sha256: '' })) },
-    { dependencies: valid.dependencies.map(d => ({ ...d, wheel: '../escape.whl' })) } ];
-  for (const variant of variants) assert.throws(() => validatePythonPolicy({ ...valid, ...variant }), error => error.code === 'PYTHON_PREFLIGHT_BLOCKED');
-});
-
-test('changed owner policy rebuilds a retained environment without removed distributions', async t => {
-  const h = await harness(t);
-  const policy = h.project.pythonEnvironment;
-  policy.dependencies.push({ ...policy.dependencies[0], name: 'dnspython', wheel: 'dnspython-1.0-py3-none-any.whl' });
-  const task = h.start();
-  await h.until(() => h.stages.done.has(task.id));
-  assert.equal(h.jobs.read(task.id).evidence.environmentPreflight.status, 'ready');
-  const cwd = h.feature().worktreePath;
-  assert.ok(fs.existsSync(path.join(cwd, '.venv/old-distribution')));
-  policy.dependencies.pop();
-  const outcome = await prepareRepositoryEnvironment(cwd, h.project, { execFile: h.fakeExec });
-  assert.equal(outcome.status, 'ready');
-  assert.equal(outcome.reused, false);
-  assert.ok(!fs.existsSync(path.join(cwd, '.venv/old-distribution')));
-  assert.equal(h.calls.filter(c => c.args.includes('venv')).length, 2);
-  const reused = await prepareRepositoryEnvironment(cwd, h.project, { execFile: h.fakeExec });
-  assert.equal(reused.reused, true);
-  assert.equal(h.counts().installers, 2);
-});
-
-test('real Python preflight subprocess bounds megabyte output while retaining transport diagnostics', async () => {
-  const { execFile } = require('node:child_process');
-  const runner = path.join(__dirname, '..', 'src', 'python-preflight-runner.js');
-  const flood = "process.stdout.write('x'.repeat(1024 * 1024)); process.stderr.write('é'.repeat(64 * 1024)); process.stderr.write('Temporary failure in name resolution'); process.exitCode = 7;";
-  const result = await new Promise(resolve => {
-    const child = execFile(process.execPath, [runner, process.execPath, '-e', flood], {
-      encoding: 'utf8', maxBuffer: 16384, timeout: 12000,
-    }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
-    child.stdin.end('start\n');
-  });
-  assert.equal(result.error?.code, 7, `runner must preserve actual exit code, not ${result.error?.code}`);
-  assert.equal(result.stdout, '');
-  assert.ok(Buffer.byteLength(result.stderr) <= 4096, 'forwarded diagnostic output must fit buffer');
-  assert.match(result.stderr, /Temporary failure in name resolution$/);
+test('ambient active venv and uv target cannot redirect project-local setup', async t => {
+  const root = fixture(t), previous = { VIRTUAL_ENV: process.env.VIRTUAL_ENV, UV_PROJECT_ENVIRONMENT: process.env.UV_PROJECT_ENVIRONMENT };
+  t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  process.env.VIRTUAL_ENV = '/tmp/agentloop-unrelated-venv';
+  process.env.UV_PROJECT_ENVIRONMENT = '/tmp/agentloop-unrelated-venv';
+  const result = await prepareRepositoryEnvironment(root, { runtime: 'python' });
+  assert.equal(result.status, 'ready');
+  assert.match(result.baseline.stderr, /existing application bug/);
+  assert.ok(fs.existsSync(path.join(root, '.venv/bin/python')));
 });

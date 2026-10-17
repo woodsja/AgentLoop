@@ -40,11 +40,14 @@ test('a passing task returns the normalized task and full verification result', 
   assert.notStrictEqual(result.task, input);
   assert.equal(result.status, 'passed');
   assert.deepEqual(Object.keys(result.verification).sort(),
-    ['passed', 'exitCode', 'stdout', 'stderr', 'timedOut', 'durationMs'].sort());
+    ['passed', 'exitCode', 'stdout', 'stderr', 'timedOut', 'durationMs', 'command', 'exception', 'signal'].sort());
   assert.equal(result.verification.passed, true);
   assert.equal(result.verification.exitCode, 0);
   assert.equal(result.verification.timedOut, false);
   assert.ok(Number.isInteger(result.verification.durationMs));
+  assert.equal(result.verification.command, input.verification);
+  assert.equal(result.verification.exception, null);
+  assert.equal(result.verification.signal, null);
 });
 
 test('a failing verification command returns failed with its exit code', async () => {

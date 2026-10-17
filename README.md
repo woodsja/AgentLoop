@@ -209,7 +209,7 @@ To let Ralph create and use its own issue worktrees, an entry may instead (or al
 
 Keep that authoritative configuration outside every writable worker directory. Requests select `project: "ralph"` and `worktree: "review"`; they cannot register a project or override its path. The resolver checks the canonical directory, Git worktree registration, and repository ownership again before execution. `dispatch_task`, `start_loop`, and `ralph_run_task` accept the optional `worktree` selector; `cwd` and `projectPath` remain rejected. Unknown projects, redirected worktrees, and unrelated paths fail closed.
 
-Isolated worktree implementation uses Codex's filesystem sandbox with only the selected worktree writable; system temporary directories, Git metadata, and `.codex` remain read-only. These workers cannot request sandbox escalation, and ignore user/project configuration that could widen their permissions. Engines without this filesystem boundary are refused for isolated worktrees. Ralph performs verification and Git delivery separately from the implementation worker. This configuration support does not register new live projects or change services.
+Owner-authorized worktrees use ordinary VM-local subprocesses for preparation and verification. Worker CLIs keep their normal permission settings; registration does not require a per-worktree filesystem sandbox or a particular worker engine. Git worktrees support recovery and scope selection, not host isolation. See [Node project readiness](docs/node-projects.md) and [ADR 0001](docs/decisions/0001-agentloop-trust-boundary.md). This configuration support does not register new live projects or change services.
 
 **Continuous runner.** A project with `"autoMerge": true` (plus `worker: "codex"` and an independent `reviewPolicy`) is developed continuously by the AgentLoop daemon, with no scheduler pass. While no R1 job is queued or running, the daemon checks at most once a minute for the project's next `readyLabel` issue and submits it through the normal R1 path (`source: "runner"`). It then advances the job through implementation, verification, delivery, required CI (watched every 30 seconds, failing after 60 minutes), independent review, bounded correction, the guarded merge, and issue closure. Every job ends in exactly one outcome: `merged` (temporary branch deleted), `needs_specification` (the issue lacks a description; Ralph comments, swaps `readyLabel` for `humanLabel`, and waits until the description changes), or `failed` (retry or review limits exhausted; the PR is closed with the diagnostics, the temporary branch deleted, and the issue relabelled). Evidence stays in the job store and the R1 job result. Projects without `autoMerge` keep the `passed`/`blocked` hand-off.
 
@@ -306,7 +306,9 @@ No additional scheduler or service is installed or started by submission. The
 generic `submit_job`, `get_job_status`, and `get_job_result` contracts are unchanged;
 the generic tools also report R1 job IDs with their compact status and result.
 
-Python projects use an [owner-controlled verification preflight](docs/python-preflight.md)
-to prepare a local `.venv` from pinned, hashed wheels before worker admission.
-Approved offline wheelhouses need no package-index connection. Infrastructure
-blocks remain distinct from implementation verification and review evidence.
+Python projects use the [shared contract and locked readiness preflight](docs/python-preflight.md)
+to prepare a local `.venv` with `uv sync --locked` before worker admission.
+Infrastructure readiness remains distinct from application test results,
+activation, implementation verification and review evidence.
+
+Owner-controlled staged onboarding is available through `ralph project add owner/repository`; see [project registration, readiness and activation](docs/project-registration.md).
