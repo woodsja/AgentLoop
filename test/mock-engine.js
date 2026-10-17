@@ -255,6 +255,7 @@ try {
   } else {
     const index = nextIndex(stateDir, 'worker');
     step = pickStep(engine.worker, index) || {};
+    if (step.earlyStdout) require('fs').writeFileSync(1, step.earlyStdout);
     sleep(step.latencyMs || engine.latencyMs);
     const work = applyWorkerStep(step);
     lastMessage = formatWorkerMessage(step, work);
@@ -263,6 +264,9 @@ try {
     invocation.files = work.files;
     invocation.index = index;
   }
+
+  if (step.stdout) process.stdout.write(step.stdout);
+  if (step.stderr) process.stderr.write(step.stderr);
 
   if (outputPath) {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });

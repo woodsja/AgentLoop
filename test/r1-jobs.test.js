@@ -82,8 +82,8 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const third = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 3 })).value.id;
     const failed = await until(async () => { const job = await get(third); return job.status === 'blocked' && job; });
     assert.equal(failed.evidence.reviewHistory[0].status, 'failed');
-    assert.match(failed.evidence.reviewHistory[0].diagnostics, /could not be completed/);
-    assert.ok(!JSON.stringify(failed).includes('private'));
+    assert.equal(failed.evidence.reviewHistory[0].diagnostics, 'Fake reviewer failed: token=private');
+    assert.ok(JSON.stringify(failed).includes('token=private'));
     const blockedLog = (await request(port, `/api/log/${third}`)).value.lines;
     assert.equal(blockedLog.filter(line => /terminal outcome: blocked/.test(line)).length, 1, 'the transcript preserves the actual non-autonomous terminal status');
     await halt(); port = await launch();
@@ -141,7 +141,7 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   assert.equal(queued.length, 1);
 });
 
-test('public R1 verification summaries retain bounded failure facts without exposing untrusted logs', () => {
+test('R1 navigation summaries retain bounded failure facts alongside the complete raw journal', () => {
   const { verificationFailureSummary } = require('../src/r1-transcript-summary');
   const raw = [
     'credential=secret-should-never-be-logged reasoning: hidden private thinking',

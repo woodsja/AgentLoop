@@ -1,7 +1,8 @@
 'use strict';
 
 // Separate from cli-worker: the reviewer only receives fixed data on stdin.
-const { execFile, spawn } = require('node:child_process');
+const { spawn } = require('node:child_process');
+const { execFile } = require('./execution-log');
 const os = require('node:os');
 const { unattendedOptions } = require('./autopilot-subprocess');
 const { hasPassingVerification } = require('./autopilot-state');

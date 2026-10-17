@@ -1,6 +1,6 @@
 'use strict';
 
-const { execFile } = require('node:child_process');
+const { execFile } = require('./execution-log');
 const { unattendedOptions } = require('./autopilot-subprocess');
 
 function isPlainObject(value) {

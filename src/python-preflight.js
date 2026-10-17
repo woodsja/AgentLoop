@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFile } = require('node:child_process');
+const { execFile } = require('./execution-log');
 const { pathToFileURL } = require('node:url');
 const { startTime, terminatePriorR1Worker } = require('./r1-process-claim');
 
