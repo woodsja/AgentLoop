@@ -313,8 +313,12 @@ projections rebuild once from canonical state; projection write failures use a
 bounded memory cache and never fail a canonical checkpoint. Damaged canonical
 navigation entries are reported as unreadable, left untouched and never admitted
 as fresh tasks. Warm-up cannot prevent startup or running-job recovery.
-Changed top-level evidence fields are journaled before replacing a checkpoint;
-a changed nested R1 job may include its full evidence again. Standalone per-issue
+Preview budgets cover short strings, unknown fields, keys, collection sizes and
+nesting, as well as long diagnostics. Changed evidence is journaled before
+replacing a checkpoint. `nested-merge-v1` evidence records recursively merge
+`changes` into the previous evidence, replace arrays and scalar values, and
+delete the key paths listed in `removedPaths`; unchanged nested output is not
+copied for status-only checkpoints. Standalone per-issue
 checkpoints also name their adjacent `issue-N.execution.ndjson` evidence journal.
 
 Journal writers reuse open descriptors (up to 64 active writers), write bytes

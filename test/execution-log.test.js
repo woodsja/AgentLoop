@@ -190,6 +190,58 @@ test('previews cannot overwrite complete checkpoints when journal persistence fa
   assert.ok(summary.stdout.length<4200);
 });
 
+test('preview budgets bound short findings, unfamiliar fields and deeply nested output', () => {
+  const { preview } = require('../src/execution-preview');
+  const short = Object.fromEntries(Array.from({length:2000}, (_, i) => [`finding-${i}`, 'x'.repeat(250)]));
+  let deep = { diagnostic: 'tail' };
+  for (let i=0;i<100;i++) deep = { nested: deep };
+  const task = {r1:{findings:short}, unfamiliar: 'owner output '.repeat(100000), deep,
+    cycles: Array.from({length:1000}, () => 'short cycle output'),
+    id:'t-preview-shapes',type:'task',status:'failed',workflow:'r1',phase:'ci',priority:1,
+    r1Child:{parentJobId:'t-parent',attempt:2},createdAt:'2026-10-17T00:00:00Z'};
+  store.writeTask(task, 'done');
+  const projected = store.listTasks('done', {dashboard:true}).find(value => value.id === task.id);
+  assert.ok(JSON.stringify(projected).length < 100000);
+  assert.match(JSON.stringify(projected), /Preview limited/);
+  for (const key of ['id','type','status','workflow','phase','priority','r1Child','createdAt']) {
+    assert.deepEqual(projected[key],task[key], `late ${key} metadata survives diagnostic exhaustion`);
+  }
+  assert.equal(store.readTask(task.id, 'done').unfamiliar, task.unfamiliar);
+  assert.deepEqual(events(task.id)[0].changes, task, 'preview limits never alter raw evidence');
+  const unknown = preview({unfamiliar:task.unfamiliar});
+  assert.ok(unknown.unfamiliar.length < 4200);
+  assert.ok(JSON.stringify(preview({deep})).length < 4000);
+  assert.ok(preview({cycles:task.cycles}).cycles.length <= 51);
+});
+
+test('nested status checkpoints journal only new evidence and explicit removals', () => {
+  const { snapshotter } = require('../src/execution-preview');
+  const snapshot = snapshotter(), records = [];
+  const raw = 'complete output\r\n' + 'x'.repeat(2*1024*1024) + 'tail';
+  const task = {id:'t-nested-delta',r1:{status:'running',verification:{stdout:raw,stderr:raw},
+    review:{diagnostics:raw}, optional:'present'}};
+  snapshot(task.id,task,record=>records.push(record));
+  for(let i=0;i<20;i++) {
+    task.r1.status=`stage-${i}`;
+    snapshot(task.id,task,record=>records.push(record));
+  }
+  assert.equal(records[0].changes.r1.verification.stdout,raw);
+  assert.ok(JSON.stringify(records.slice(1)).length<5000, 'status updates must not repeat megabytes of evidence');
+  assert.deepEqual(records.at(-1).changes,{r1:{status:'stage-19'}});
+  delete task.r1.optional;
+  snapshot(task.id,task,record=>records.push(record));
+  assert.deepEqual(records.at(-1).removedPaths,[['r1','optional']]);
+  task.r1.verification.stdout=raw+'NEW TAIL';
+  snapshot(task.id,task,record=>records.push(record));
+  assert.deepEqual(records.at(-1).changes,{r1:{verification:{stdout:raw+'NEW TAIL'}}});
+  task.r1.review=null;
+  snapshot(task.id,task,record=>records.push(record));
+  assert.deepEqual(records.at(-1).changes,{r1:{review:null}});
+  task.r1.review={diagnostics:raw};
+  snapshot(task.id,task,record=>records.push(record));
+  assert.deepEqual(records.at(-1).changes,{r1:{review:{diagnostics:raw}}});
+});
+
 test('startup builds recoverable projections without changing canonical files', () => {
   const id = 't-old-state';
   store.ensureDirs();
@@ -356,7 +408,8 @@ test('projection write failures preserve canonical checkpoints and cache reads; 
     reopen().read(file);
     const sidecar=path.join(directory,path.basename(file));
     const entry=JSON.parse(fs.readFileSync(sidecar));
-    for(const damaged of [null,[],{source:entry.source,value:null},{source:entry.source,value:[]}]) {
+    for(const damaged of [null,[],{source:entry.source,value:null},{source:entry.source,value:[]},
+      {version:1,source:entry.source,value:{stdout:value.stdout}}]) {
       fs.writeFileSync(sidecar,JSON.stringify(damaged));
       assert.ok(reopen().read(file).stdout.length<4200);
       assert.ok(JSON.parse(fs.readFileSync(sidecar)).value.stdout.length<4200);

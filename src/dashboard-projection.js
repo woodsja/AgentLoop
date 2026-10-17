@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { preview } = require('./execution-preview');
+const VERSION = 2;
 
 function signature(file) {
   const stat = fs.statSync(file, { bigint: true });
@@ -20,7 +21,7 @@ function createDashboardProjection(directory, writeJson) {
   function save(file, value) {
     const projected = preview(value);
     try {
-      const entry = { source: signature(file), value: projected };
+      const entry = { version: VERSION, source: signature(file), value: projected };
       remember(file, entry);
       writeJson(projectionPath(file), entry);
     } catch (error) {
@@ -37,7 +38,7 @@ function createDashboardProjection(directory, writeJson) {
       if (memory.get(file)?.source === source) return memory.get(file).value;
       try {
         const cached = JSON.parse(fs.readFileSync(projectionPath(file), 'utf8'));
-        if (cached?.source === source && cached.value && typeof cached.value === 'object' && !Array.isArray(cached.value)) {
+        if (cached?.version === VERSION && cached.source === source && cached.value && typeof cached.value === 'object' && !Array.isArray(cached.value)) {
           return remember(file, cached);
         }
       } catch (error) {
