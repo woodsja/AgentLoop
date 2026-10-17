@@ -18,6 +18,7 @@ function configuredProjects(value, configPath) {
   const entries = [];
   for (const [name, entry] of Object.entries(value)) {
     if (!name.trim()) continue;
+    if (entry?.activation && entry.activation !== 'active') continue;
     if (typeof entry === 'string' && entry.trim()) entries.push([name, resolve(entry)]);
     else if (entry && typeof entry.root === 'string' && entry.root.trim()) {
       const named = entry.worktrees && typeof entry.worktrees === 'object' && !Array.isArray(entry.worktrees);
