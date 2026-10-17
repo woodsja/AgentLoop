@@ -172,6 +172,7 @@
       if (url.startsWith('/api/state')) return jsonResp(frame());
       if (url.startsWith('/api/bridge')) return jsonResp({ ...MOCK_BRIDGE, running: bridgeUp });
       if (url.startsWith('/api/log/')) {
+        if (new URL(url, 'http://localhost').searchParams.has('raw')) return jsonResp({offset:0,nextOffset:0,hasMore:false,base64:''});
         const id = decodeURIComponent(url.slice('/api/log/'.length).split('?')[0]);
         return jsonResp(id.startsWith(DATA.meta.runId) ? LOG : { lines: [] });
       }

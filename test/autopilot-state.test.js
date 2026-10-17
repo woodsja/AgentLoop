@@ -285,7 +285,7 @@ test('persists every job field and reloads it through a fresh store', () => {
   store.save(job);
 
   const reloaded = createJobStore(directory).load(7);
-  assert.deepEqual(reloaded, job);
+  assert.deepEqual(reloaded, { ...job, executionJournal: { file: path.join(directory, 'issue-7.execution.ndjson') } });
   assert.equal(reloaded.issue.title, 'Fix totals');
   assert.equal(reloaded.branch, 'ralph/issue-7-fix-totals');
   assert.equal(reloaded.worktreePath, '/worktrees/issue-7');
@@ -342,7 +342,7 @@ test('writes atomically and leaves no temporary files behind', () => {
   store.save(job);
   job.status = 'running';
   store.save(job);
-  assert.deepEqual(fs.readdirSync(directory), ['issue-7.json']);
+  assert.deepEqual(fs.readdirSync(directory), ['issue-7.execution.ndjson', 'issue-7.json']);
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'issue-7.json'), 'utf8')).status, 'running');
 });
 
@@ -393,7 +393,9 @@ test('terminal state and complete failure diagnostics survive reload', () => {
   assert.equal(reloaded.terminal, true);
   assert.equal(reloaded.terminalState, 'needs_planning');
   assert.equal(reloaded.failures.length, 20);
-  assert.equal(reloaded.failures.at(-1).message, 'x'.repeat(10000));
+  assert.ok(reloaded.failures.at(-1).message.length < 4200);
+  const records = fs.readFileSync(reloaded.executionJournal.file, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(records.at(-1).changes.failures.at(-1).message, 'x'.repeat(10000));
 });
 
 test('per-issue lock blocks a live owner and reclaims a lock from a dead or rebooted owner', () => {

@@ -31,6 +31,8 @@ function markup(html) {
 }
 
 test('Dashboard sources compile and stay aligned', () => {
+  assert.ok(replayHtml.indexOf('<script src="replay.js"></script>') >= 0);
+  assert.ok(replayHtml.indexOf('<script src="replay.js"></script>') < replayHtml.indexOf('<script>'));
   assert.equal(style(publicHtml), style(replayHtml));
   assert.equal(markup(publicHtml), markup(replayHtml));
   assert.match(publicHtml, /<aside id="rail"/);

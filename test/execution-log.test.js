@@ -55,6 +55,7 @@ test('timed-out verification retains prior output, command, signal and timeout e
 test('a torn final crash record remains retrievable and cannot corrupt the next append', () => {
   const id = 't-torn';
   store.appendExecution(id, {event:'first'});
+  require('../src/execution-journal').flush(store.executionPath(id)); // simulate a prior crashed writer
   const torn = '{"event":"partial';
   fs.appendFileSync(store.executionPath(id), torn);
   const before = fs.readFileSync(store.executionPath(id));
@@ -81,10 +82,124 @@ test('synchronous command output and failure diagnostics remain complete', () =>
   withExecution(recorder(store,id), () => {
     assert.throws(() => execFileSync(process.execPath, ['-e', "require('fs').writeFileSync(1,'token=full');require('fs').writeFileSync(2,'/tmp/failure\\nstack');process.exit(7)"], {encoding:'utf8',stdio:'pipe'}), error => error.status === 7 && error.stdout === 'token=full');
   });
-  const success = withExecution(recorder(store,'t-sync-success'), () => execFileSync(process.execPath, ['-e', "require('fs').writeFileSync(1,'ok');require('fs').writeFileSync(2,'successful stderr')"], {encoding:'utf8'}));
-  assert.equal(success, 'ok');
+  const stderrWrite = process.stderr.write;
+  let echoed = '';
+  try {
+    process.stderr.write = chunk => { echoed += chunk; return true; };
+    const success = withExecution(recorder(store,'t-sync-success'), () => execFileSync(process.execPath, ['-e', "require('fs').writeFileSync(1,'ok');require('fs').writeFileSync(2,'successful stderr')"], {encoding:'utf8'}));
+    assert.equal(success, 'ok');
+    assert.equal(echoed, 'successful stderr', 'native default stderr echo is preserved');
+  } finally { process.stderr.write = stderrWrite; }
   assert.equal(output('t-sync-success','stderr').toString(), 'successful stderr');
   assert.equal(output(id,'stdout').toString(),'token=full');
   assert.equal(output(id,'stderr').toString(),'/tmp/failure\nstack');
   assert.equal(events(id).at(-1).exitCode,7);
+});
+
+test('large task and job diagnostics have bounded checkpoints and exact journal evidence without repeated snapshots', () => {
+  const raw = 'token=visible /tmp/owner\r\n' + 'x'.repeat(2 * 1024 * 1024) + '\0tail';
+  const task = { id: 't-large', type: 'task', status: 'running', description: 'owner instructions', r1: { verification: { stdout: raw, stderr: raw }, reviewHistory: [{rawResult: raw}], failures: [{message: raw}] } };
+  store.writeTask(task, 'running');
+  task.status = 'passed';
+  store.writeTask(task, 'running');
+  const checkpoint = store.readTask(task.id, 'running');
+  assert.ok(fs.statSync(path.join(store.paths.state, 'tasks/running', task.id + '.json')).size < 80000);
+  assert.ok(checkpoint.r1.verification.stdout.length < 4200);
+  assert.equal(checkpoint.executionJournal.id, task.id);
+  const records = events(task.id);
+  assert.equal(records[0].changes.r1.verification.stdout, raw);
+  assert.equal(records[0].changes.r1.verification.stderr, raw);
+  assert.equal(records[0].changes.r1.reviewHistory[0].rawResult, raw);
+  assert.equal(records[1].changes.r1, undefined);
+  const { createJob, createJobStore } = require('../src/autopilot-state');
+  const jobs = createJobStore(path.join(root, 'jobs'));
+  const job = createJob({ projectName:'example', repo:'owner/repo', issue:{number:1,title:'Fix'}, branch:'fix', worktreePath:'/tmp/work', now:jobs.now });
+  job.verification = {command:'npm test',commit:null,passed:false,timedOut:false,exitCode:1,stdout:raw,stderr:raw};
+  jobs.save(job);
+  assert.ok(fs.statSync(jobs.jobPath(1)).size < 80000);
+  const summary = jobs.load(1);
+  assert.ok(summary.verification.stdout.length < 4200);
+  assert.equal(JSON.parse(fs.readFileSync(summary.executionJournal.file,'utf8').trim()).changes.verification.stdout, raw);
+});
+
+test('chatty output coalesces disk barriers and terminal records flush immediately', async () => {
+  const journal = require('../src/execution-journal');
+  journal.flushAll();
+  const file = store.executionPath('t-batch');
+  const sync = fs.fsyncSync;
+  const asyncSync = fs.fsync;
+  let barriers = 0;
+  let batches = 0;
+  fs.fsyncSync = fd => { barriers++; return sync(fd); };
+  fs.fsync = (fd, callback) => { batches++; return asyncSync(fd, callback); };
+  try {
+    store.appendExecution('t-batch', {event:'command'});
+    const initial = barriers;
+    for (let i=0;i<100;i++) store.appendExecution('t-batch', {event:'output',base64:'AP8='});
+    assert.equal(barriers, initial, 'no synchronous per-chunk barriers');
+    await new Promise(resolve => setTimeout(resolve, 180));
+    assert.equal(batches, 1);
+    store.appendExecution('t-batch', {event:'exit',exitCode:0});
+    assert.equal(barriers, initial + 1);
+    assert.equal(events('t-batch').length, 102);
+  } finally { fs.fsyncSync = sync; fs.fsync = asyncSync; journal.flush(file); }
+});
+
+test('SIGKILL before the batch timer retains kernel-written bytes on restart', async () => {
+  const id = 't-crash-batch';
+  const script = `const s=require(${JSON.stringify(require.resolve('../src/store'))});for(let i=0;i<100;i++)s.appendExecution('${id}',{event:'output',base64:Buffer.from([i,0,255]).toString('base64')});process.stdout.write('ready');setInterval(()=>{},1000);`;
+  const child = spawn(process.execPath, ['-e',script], {env:{...process.env,AGENTLOOP_STATE_DIR:root},stdio:['ignore','pipe','pipe']});
+  const closed = new Promise(resolve => child.once('close', resolve));
+  await new Promise(resolve => child.stdout.once('data',resolve));
+  child.kill('SIGKILL');
+  await closed;
+  store.appendExecution(id,{event:'recovery',message:'Exit details unknown'});
+  const records = events(id);
+  assert.equal(records.length,101);
+  records.slice(0,100).forEach((record,i) => assert.deepEqual(Buffer.from(record.base64,'base64'),Buffer.from([i,0,255])));
+  assert.equal(records.at(-1).event,'recovery');
+});
+
+test('Python runner streams complete binary pipes while callback diagnostics stay bounded', async () => {
+  const id = 't-python-stream';
+  const raw = Buffer.concat([Buffer.from([0,255,13,10]),Buffer.alloc(100000,120)]);
+  await withExecution(recorder(store,id), () => new Promise((resolve,reject) => {
+    const runner = execFile(process.execPath,[path.join(__dirname,'../src/python-preflight-runner.js'),process.execPath,'-e',`const b=Buffer.concat([Buffer.from([0,255,13,10]),Buffer.alloc(100000,120)]);require('fs').writeFileSync(1,b);require('fs').writeFileSync(2,b);`],{encoding:'utf8',executionPreviewBytes:4096},(error,stdout,stderr)=>{
+      if(error) return reject(error);
+      assert.ok(stdout.length<=4096);
+      assert.ok(stderr.length<=4096);
+      resolve();
+    });
+    runner.stdin.end('start\n');
+  }));
+  assert.deepEqual(output(id,'stdout'),raw);
+  assert.deepEqual(output(id,'stderr'),raw);
+});
+
+test('previews cannot overwrite complete checkpoints when journal persistence fails', () => {
+  const { snapshotter } = require('../src/execution-preview');
+  const snapshot = snapshotter();
+  const value = {stdout:'owner bytes '.repeat(1000)};
+  assert.throws(()=>snapshot('id',value,()=>{throw new Error('disk full');}),/disk full/);
+  let evidence;
+  const summary=snapshot('id',value,record=>{evidence=record;});
+  assert.equal(evidence.changes.stdout,value.stdout,'failed attempts never advance the evidence cache');
+  assert.ok(summary.stdout.length<4200);
+});
+
+test('startup compacts old task/result files only after retaining their complete evidence', () => {
+  const id='t-old-state';
+  store.ensureDirs();
+  const raw='old output\r\n'.repeat(100000);
+  fs.writeFileSync(path.join(store.paths.done,`${id}.json`),JSON.stringify({id,status:'failed',r1:{verification:{stdout:raw}}}));
+  fs.writeFileSync(path.join(store.paths.results,`${id}.json`),JSON.stringify({id,summary:raw}));
+  store.compactState();
+  assert.ok(fs.statSync(path.join(store.paths.done,`${id}.json`)).size<80000);
+  assert.ok(fs.statSync(path.join(store.paths.results,`${id}.json`)).size<80000);
+  const records=events(id);
+  assert.equal(records[0].changes.r1.verification.stdout,raw);
+  assert.equal(records[1].changes.summary,raw);
+  const size=fs.statSync(store.executionPath(id)).size;
+  store.compactState();
+  assert.equal(fs.statSync(store.executionPath(id)).size,size,'repeated startup does not duplicate evidence');
 });

@@ -1,3 +1,6 @@
+const journal = require('./execution-journal');
+const { snapshotter, preview } = require('./execution-preview');
+const taskSnapshot = snapshotter();
 // Filesystem-backed task state and daemon configuration.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -190,7 +193,9 @@ function writeTask(task, stage) {
   }
 
   ensureDirs();
-  writeJsonAtomic(taskPath(task.id, stage), task);
+  const summary = taskSnapshot(task.id, task, record => appendExecution(task.id, record));
+  summary.executionJournal = { id: task.id, raw: `/api/log/${encodeURIComponent(task.id)}?raw=1` };
+  writeJsonAtomic(taskPath(task.id, stage), summary);
 }
 
 function taskRunPath(id) {
@@ -226,13 +231,30 @@ function listTasks(stage) {
     .map((entry) => JSON.parse(fs.readFileSync(path.join(stageDir(stage), entry.name), 'utf8')));
 }
 
+// Upgrade existing large checkpoints once at startup, preserving the complete
+// old fields before replacing them. Ordinary polls then read compact files.
+function compactState() {
+  ensureDirs();
+  for (const stage of ['pending', 'running', 'done']) {
+    for (const task of listTasks(stage)) {
+      if (JSON.stringify(preview(task)) !== JSON.stringify(task)) writeTask(task, stage);
+    }
+  }
+  for (const name of fs.readdirSync(paths.results).filter(name => name.endsWith('.json'))) {
+    const result = JSON.parse(fs.readFileSync(path.join(paths.results, name), 'utf8'));
+    if (JSON.stringify(preview(result)) !== JSON.stringify(result)) writeResult(result);
+  }
+}
+
 function writeResult(result) {
   if (!result || !result.id) {
     throw new Error('Result id is required.');
   }
 
   ensureDirs();
-  writeJsonAtomic(path.join(paths.results, `${result.id}.json`), result);
+  const summary = taskSnapshot(`result:${result.id}`, result, record => appendExecution(result.id, { ...record, kind: 'result' }));
+  if (JSON.stringify(summary) !== JSON.stringify(result)) summary.executionJournal = { id: result.id, raw: `/api/log/${encodeURIComponent(result.id)}?raw=1` };
+  writeJsonAtomic(path.join(paths.results, `${result.id}.json`), summary);
 }
 
 function logPath(id) {
@@ -270,25 +292,7 @@ function executionPath(id, legacy = false) {
 
 function appendExecution(id, record) {
   ensureDirs();
-  const file = executionPath(id);
-  const existed = fs.existsSync(file);
-  const fd = fs.openSync(file, 'a+', 0o600);
-  try {
-    const size = fs.fstatSync(fd).size;
-    if (size) {
-      const last = Buffer.alloc(1);
-      fs.readSync(fd, last, 0, 1, size - 1);
-      if (last[0] !== 10) fs.writeSync(fd, '\n'); // keep a torn crash record separate and retrievable
-    }
-    fs.writeFileSync(fd, JSON.stringify({ ...record, jobId: id, timestamp: new Date().toISOString() }) + '\n');
-    fs.fsyncSync(fd);
-    if (!existed && process.platform !== 'win32') {
-      for (const directory of [paths.logs, paths.state]) {
-        const directoryFd = fs.openSync(directory, 'r');
-        try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
-      }
-    }
-  } finally { fs.closeSync(fd); }
+  return journal.append(executionPath(id), { ...record, jobId: id, timestamp: new Date().toISOString() });
 }
 
 function readExecutionBytes(id, offset = 0, bytes = 65536, legacy = false) {
@@ -515,6 +519,7 @@ module.exports = {
   readTaskRunState,
   listTasks,
   writeResult,
+  compactState,
   appendLogLine,
   appendExecution,
   readExecutionBytes,

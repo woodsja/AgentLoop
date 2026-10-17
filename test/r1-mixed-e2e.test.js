@@ -38,7 +38,7 @@ async function runCase(testCase) {
  const project={enabled:true,repo:'fixture/none',checkout,worktreeRoot,baseBranch:'main',worker:'codex',reviewPolicy:'always',reviewModel:'opus',implementationStrategy:'worker-critic-loop',autoMerge:false,
   readyLabel:'ready-for-agent',humanLabel:'ready-for-human',maxAttempts:2,stateDir:path.join(root,'r1-jobs'),verification:`node -e "if(require('fs').readFileSync('answer','utf8') !== '42')process.exit(1);require('fs').writeFileSync('${path.join(worktreeRoot, 'issue-5', 'verified-at')}',new Date().toISOString())"`};
  if (testCase === 'transcript') {
-   fs.writeFileSync(path.join(checkout,'verify.js'), `require('fs').writeFileSync(1, ${JSON.stringify(marker + 'large-log\n'.repeat(20000))});require('fs').writeFileSync(2, 'test: owner failure\\nstack line\\n');process.exit(7);`);
+   fs.writeFileSync(path.join(checkout,'verify.js'), `require('fs').writeFileSync(1, ${JSON.stringify(marker + 'large-log\n'.repeat(200000))});require('fs').writeFileSync(2, 'test: owner failure\\nstack line\\n');process.exit(7);`);
    git(checkout,'add','verify.js');git(checkout,'commit','-m','Verification fixture');
    project.verification = 'node verify.js';
  }
@@ -74,7 +74,14 @@ async function runCase(testCase) {
   const finished=await until(async()=>{const j=await request(port,`/api/r1/jobs/${created.id}`);return ['ready_for_human_merge','blocked','failed','passed'].includes(j.status)&&j;},55000);
   if (testCase === 'transcript') {
     assert.equal(finished.status, 'blocked');
-    const rawPage = async (id, offset = 0) => request(port, `/api/log/${id}?raw=1&offset=${offset}&bytes=4096`);
+    assert.ok(finished.evidence.verification.stdout.length < 4200);
+    assert.ok(fs.statSync(path.join(queue,'tasks/done',`${created.id}.json`)).size < 80000);
+    assert.ok(fs.statSync(path.join(project.stateDir,'issue-5.json')).size < 80000);
+    for (let poll = 0; poll < 3; poll++) {
+      const state = await request(port,'/api/state');
+      assert.ok(JSON.stringify(state).length < 100000, 'fast state polls exclude massive captured output');
+    }
+    const rawPage = async (id, offset = 0) => request(port, `/api/log/${id}?raw=1&offset=${offset}&bytes=262144`);
     const retrieve = async id => {
       let offset = 0; const chunks = [];
       do {
@@ -91,12 +98,12 @@ async function runCase(testCase) {
     const before = await retrieve(created.id);
     assert.deepEqual(await download(port, `/api/log/${created.id}?download=1`), before);
     assert.deepEqual(await download(port, `/api/log/${created.id}?download=1&legacy=1`), fs.readFileSync(path.join(queue,'logs',`${created.id}.ndjson`)));
-    assert.ok(before.length > 200000, 'large logs remain retrievable beyond preview limits');
+    assert.ok(before.length > 2000000, 'large logs remain retrievable beyond preview limits');
     const records = before.toString().trim().split('\n').flatMap(line => {try{return [JSON.parse(line)];}catch{return [];}});
     const captured = (role, stream) => Buffer.concat(records.filter(r => r.event === 'output' && r.role === role && r.stream === stream).map(r => Buffer.from(r.base64, 'base64'))).toString();
     assert.ok(captured('worker','stdout').includes(marker));
     assert.ok(captured('critic','stderr').includes(marker));
-    assert.equal(captured('verification','stdout'), marker + 'large-log\n'.repeat(20000));
+    assert.equal(captured('verification','stdout'), marker + 'large-log\n'.repeat(200000));
     assert.equal(captured('verification','stderr'), 'test: owner failure\nstack line\n');
     assert.ok(records.some(r => r.event === 'command' && r.role === 'verification' && r.command === 'node verify.js'));
     assert.ok(records.some(r => r.event === 'exit' && r.role === 'verification' && r.exitCode === 7));

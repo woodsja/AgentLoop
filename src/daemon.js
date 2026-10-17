@@ -2585,7 +2585,7 @@ function serveLog(res, requestPath, requestUrl) {
   if (requestUrl.searchParams.has('download')) {
     const file = store.executionPath(id, requestUrl.searchParams.has('legacy'));
     if (!fs.existsSync(file)) { res.writeHead(404); res.end('No captured execution record'); return; }
-    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Content-Disposition': `attachment; filename="${id}.execution.ndjson"`, 'X-Content-Type-Options': 'nosniff' });
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Content-Disposition': `attachment; filename="${id}${requestUrl.searchParams.has('legacy') ? '' : '.execution'}.ndjson"`, 'X-Content-Type-Options': 'nosniff' });
     const stream = fs.createReadStream(file);
     stream.on('error', error => res.destroy(error));
     res.on('close', () => stream.destroy());
@@ -2715,6 +2715,12 @@ async function cancelTask(req, res) {
 }
 
 async function handleRequest(req, res) {
+  const port = req.socket.localPort;
+  const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+  if (!allowedHosts.has(req.headers.host) || (req.headers.origin && ![...allowedHosts].some(host => req.headers.origin === `http://${host}`))) {
+    sendJson(res, 403, { error: 'Local dashboard Host and Origin required.' });
+    return;
+  }
   const requestUrl = new URL(req.url || '/', 'http://localhost');
   const requestPath = requestUrl.pathname;
 
@@ -2838,6 +2844,7 @@ function recoverRunningTasks() {
       continue;
     }
 
+    if (task.r1Child) recorder(store, task.id, { parentId: task.r1Child.parentJobId })('recovery', { previousStatus: task.status, message: 'Daemon restarted; captured output retained. Interrupted process exit details are unknown unless previously recorded.' });
     if (task.r1Child && !terminatePriorR1Worker(task)) {
       const note = 'R1 child process termination unconfirmed; worktree retained. Retry cancel after verifying the old process group has ended.';
       console.error(`R1 child ${task.id}: ${note}`);
@@ -3111,6 +3118,7 @@ function start(options = {}) {
     return;
   }
 
+  store.compactState();
   recoverBridgeHeartbeat();
   recoverRunningTasks();
 

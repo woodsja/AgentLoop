@@ -1,5 +1,8 @@
 'use strict';
 
+const journal = require('./execution-journal');
+const { snapshotter } = require('./execution-preview');
+
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -622,10 +625,15 @@ function createJobStore(stateDir, options = {}) {
       .sort((left, right) => left.issue.number - right.issue.number);
   }
 
+  const snapshot = snapshotter();
   function save(job) {
     validateJob(job, jobPath(job && job.issue && job.issue.number));
     job.updatedAt = now();
-    writeJsonDurably(jobPath(job.issue.number), job);
+    const file = jobPath(job.issue.number).replace(/\.json$/, '.execution.ndjson');
+    const summary = snapshot(job.issue.number, job, record => journal.append(file, { ...record, timestamp: now() }));
+    summary.executionJournal = { file };
+    journal.flush(file); // evidence is durable before its bounded checkpoint
+    writeJsonDurably(jobPath(job.issue.number), summary);
     return job;
   }
 

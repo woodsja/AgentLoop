@@ -1889,7 +1889,7 @@ test('reloads an interrupted job, reconciles its leftover workspace, and resumes
   assert.equal(job.failures[0].phase, 'running');
   assert.match(job.failures[0].message, /interrupted/);
   assert.equal(createJobStore(store.directory).load(3), null);
-  assert.deepEqual(fs.readdirSync(store.directory), ['issue-5.json']);
+  assert.deepEqual(fs.readdirSync(store.directory), ['issue-5.execution.ndjson', 'issue-5.json']);
 });
 
 test('records failures and stops retrying a job after the run bound', async () => {

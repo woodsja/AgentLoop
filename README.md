@@ -297,11 +297,32 @@ project registry before submission. Requests cannot register paths themselves.
 The existing dispatcher runs one R1 job at a time, retains the original per-issue
 lock, retry/correction limits and review history, and checkpoints phases in the
 existing durable queue. `get_r1_job_status({id})`, `get_r1_job_result({id})`, or
-`GET /api/r1/jobs/:id` retrieve persisted phases and sanitized verification/review
-evidence, including after daemon recovery. `passed` requires verification and an
+`GET /api/r1/jobs/:id` retrieve persisted phases and bounded verification/review
+previews with complete evidence in the execution journal, including after daemon
+recovery. `passed` requires verification and an
 independent PASS for the exact delivered SHA and means ready for human merge.
 Failures return `blocked`; interrupted independent reviews are preserved and handed
 to a human without replaying the reviewer. Saved exact-SHA approval is reused.
+Captured stdout/stderr bytes remain unredacted in `state/logs/<id>.execution.ndjson`
+(base64 chunks), available through `/api/log/<id>?raw=1` byte paging and
+`/api/log/<id>?download=1`. Task, result and R1 checkpoints keep diagnostic
+previews of at most 4,096 characters plus a journal navigation note per large
+field, with a shared 65,536 character budget for large diagnostic fields and
+journal pointers. Changed evidence fields are
+journaled before replacing a checkpoint; unchanged output is not recopied on
+phase-only saves. Standalone per-issue checkpoints also name their adjacent
+`issue-N.execution.ndjson` evidence journal.
+
+Journal writers reuse open descriptors (up to 64 active writers), write bytes
+immediately to the kernel, and schedule asynchronous disk synchronization every
+100 ms while active. Process exit, exception and recovery records flush
+synchronously; per-issue checkpoints flush evidence before saving previews.
+Daemon crashes retain kernel-written bytes. A machine power loss may lose the
+current unsynchronized window; terminal records have already crossed the disk
+barrier. Restart separates torn records and marks interrupted children with
+unknown exit details. The dashboard accepts only local Host headers and matching
+local Origins; raw records are never redacted for access control.
+
 No additional scheduler or service is installed or started by submission. The
 generic `submit_job`, `get_job_status`, and `get_job_result` contracts are unchanged;
 the generic tools also report R1 job IDs with their compact status and result.

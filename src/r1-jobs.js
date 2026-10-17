@@ -1,3 +1,4 @@
+const { snapshotter } = require('./execution-preview');
 // R1 phases run under the existing queue dispatcher, not a second scheduler.
 const fs = require('node:fs');
 const { recorder, captureProcess, withExecution } = require('./execution-log');
@@ -302,13 +303,14 @@ function createR1Jobs(store, options = {}) {
     }
     const phaseOf = job => job.reviewHistory?.at(-1)?.status === 'running' ? 'review'
       : job.status === 'running' ? 'implementation' : job.status === 'awaiting_ci' ? 'ci' : job.status;
+    const snapshot = snapshotter();
     const jobStore = { ...original,
       list: () => original.list().filter(job => job.issue.number === task.issue),
       save(job) {
         bindR1Parent(job, task.id);
         original.save(job);
-        record('evidence', { stage: phaseOf(job), attempt: job.runs, job });
-        task.r1 = structuredClone(job);
+        task.r1 = snapshot(task.id, job, details => store.appendExecution(task.id, { ...details, stage: phaseOf(job), attempt: job.runs }));
+        task.r1.executionJournal = { id: task.id, raw: `/api/log/${task.id}?raw=1` };
         transcriptForJob(task, job);
         checkpoint(task, phaseOf(job));
         return job;
