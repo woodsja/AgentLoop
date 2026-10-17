@@ -133,3 +133,8 @@ test('mixed-engine implementation is explicit and validates its owner policy', (
   assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...good, worker: 'claude' } }) }), /Codex worker/);
   assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...good, reviewPolicy: 'none' } }) }), /independent review/);
 });
+
+test('owner runtime supports the shared Node and Python contract only', () => {
+  for (const runtime of ['node', 'python']) assert.doesNotThrow(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...validProject(), runtime } }) }));
+  assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...validProject(), runtime: 'ruby' } }) }), /runtime must be node or python/);
+});

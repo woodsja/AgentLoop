@@ -504,10 +504,10 @@ async function run(argv, dependencies = {}) {
     if (job?.environmentProcess) {
       const claim = job.environmentProcess;
       if (!require('./r1-process-claim').terminatePriorR1Worker({ r1Child: true, workerPid: claim.pid, workerStartTime: claim.startTime })) {
-        if (project.runtime === 'node' || job.environmentPreflight?.runtime === 'node') {
+        if (project.runtime || job.environmentPreflight?.runtime) {
           throw require('./project-preflight').blocked('prior_process_unresolved', 'Prior project setup process ownership is unresolved; preserve the workspace and claim before retry.');
         }
-        throw require('./python-preflight').blocked('prior_process_unresolved');
+        throw require('./project-preflight').blocked('prior_process_unresolved', 'Prior Python setup process ownership is unresolved; preserve its claim before retry.');
       }
       job.environmentProcess = null;
       store.save(job);
@@ -583,7 +583,7 @@ async function run(argv, dependencies = {}) {
       if (pythonRequired || contractRequired) {
         phase = 'environment_preflight';
         job.status = phase;
-        job.environmentPreflight = { status: 'preparing', category: 'infrastructure', ...(contractRequired ? { runtime: 'node' } : {}) };
+        job.environmentPreflight = { status: 'preparing', category: 'infrastructure', ...(contractRequired ? { runtime: project.runtime || require('./project-preflight').readContract(workspace.worktreePath).runtime } : {}) };
         store.save(job);
       }
       const environment = await prepareEnvironment(workspace.worktreePath, project, {
@@ -599,7 +599,7 @@ async function run(argv, dependencies = {}) {
       catch { environmentCancelled = true; }
       if (environmentCancelled) {
         if (contractRequired) throw require('./project-preflight').blocked('cancelled', 'Project preparation cancelled before worker admission.');
-        throw require('./python-preflight').blocked('cancelled');
+        throw require('./project-preflight').blocked('cancelled', 'Python preparation cancelled before worker admission.');
       }
       const preparedProject = environment?.verification ? { ...project, verification: environment.verification } : project;
       const task = correction
