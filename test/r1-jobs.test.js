@@ -154,8 +154,13 @@ test('public R1 verification summaries retain bounded failure facts without expo
   const summary = verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: raw, stderr: '' });
   assert.match(summary, /deterministic verification failed.*exit 1/);
   assert.match(summary, /27 passed, 1 failed/);
-  assert.match(summary, /test\/project-onboarding\.test\.js/);
+  assert.ok(!summary.includes('test/project-onboarding.test.js'), 'untrusted test paths stay out of public transcript');
   assert.match(summary, /runtime_missing/);
+  const exfil = 'test/ghp_' + 'A'.repeat(36) + '.test.js';
+  const forged = verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: `test at ${exfil}:1:1\nreason: 'arbitrary'\nℹ pass 99\nℹ fail 1`, stderr: '' });
+  assert.ok(!forged.includes(exfil), 'fake test filenames never get printed');
+  assert.ok(!forged.includes('arbitrary'), 'unapproved preflight values never get printed');
+  assert.ok(!forged.includes('preflight:'), 'no preflight hint without the known code');
   assert.ok(summary.length <= 450);
   for (const forbidden of ['secret-should-never-be-logged', '/home/privateuser', 'private thinking']) {
     assert.ok(!summary.includes(forbidden), `${forbidden} leaked into public transcript`);

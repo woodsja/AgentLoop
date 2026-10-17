@@ -28,20 +28,26 @@ function verificationFailureSummary(verification) {
   }
 
   // Test runners may print arbitrary repository-supplied text. Select only
-  // numeric test counts, repo-relative test filenames, and approved reason IDs.
+  // numeric test counts and approved reason IDs. Never display test filenames:
+  // malicious repository code can embed a credential into a plausible path.
   const output = [verification.stdout, verification.stderr]
     .filter(value => typeof value === 'string').join('\n').slice(-16000);
   const passed = lastNumber(output, 'pass');
   const failed = lastNumber(output, 'fail');
-  if (passed !== null && failed !== null && failed > 0) facts.push(`${passed} passed, ${failed} failed`);
+  if (passed !== null && failed !== null && failed > 0) facts.push(`reported tests: ${passed} passed, ${failed} failed`);
 
-  const sourceFile = /(?:^|\n)test at (test\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.test\.(?:js|cjs|mjs)):[1-9][0-9]*:[1-9][0-9]*(?=\r?\n|$)/.exec(output);
-  if (sourceFile && sourceFile[1].length <= 120) facts.push(sourceFile[1]);
+  // This is a diagnostic hint, not an authoritative infrastructure verdict:
+  // project test output can still impersonate a known code, but an allowlisted
+  // reason cannot carry arbitrary secrets into the public transcript.
+  const preflightPattern = /code:\s*['"]PROJECT_PREFLIGHT_BLOCKED['"][\s\S]{0,320}?reason:\s*['"]([a-z][a-z0-9_]{0,40})['"]/g;
+  let reportedReason = null;
+  for (const match of output.matchAll(preflightPattern)) {
+    if (PREFLIGHT_REASONS.has(match[1])) reportedReason = match[1];
+  }
+  if (reportedReason) facts.push(`reported preflight: ${reportedReason}`);
 
-  const reason = /(?:^|[\s,{])reason:\s*['"]([a-z][a-z0-9_]{0,40})['"]/.exec(output);
-  if (reason && PREFLIGHT_REASONS.has(reason[1])) facts.push(`preflight: ${reason[1]}`);
-
-  return `deterministic verification failed${facts.length ? ` (${facts.join('; ')})` : ''}.`;
+  const summary = `deterministic verification failed${facts.length ? ` (${facts.join('; ')})` : ''}.`;
+  return summary.slice(0, 400);
 }
 
 module.exports = { verificationFailureSummary };
