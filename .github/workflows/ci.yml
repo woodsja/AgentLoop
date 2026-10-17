@@ -22,5 +22,14 @@ jobs:
         with:
           node-version: 24
 
+      - name: Set up uv 0.13.1
+        env:
+          UV_INSTALL_DIR: ${{ runner.temp }}/uv-bin
+          UV_NO_MODIFY_PATH: '1'
+        run: |
+          curl --fail --location --silent --show-error https://astral.sh/uv/0.13.1/install.sh --output "$RUNNER_TEMP/install-uv.sh"
+          sh "$RUNNER_TEMP/install-uv.sh"
+          echo "$UV_INSTALL_DIR" >> "$GITHUB_PATH"
+
       - name: Test
         run: npm test

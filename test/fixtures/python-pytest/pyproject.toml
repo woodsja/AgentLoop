@@ -1,0 +1,8 @@
+[project]
+name = "agentloop-pytest-fixture"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["pytest==8.4.2"]
+
+[tool.uv]
+package = false

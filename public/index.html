@@ -2138,6 +2138,43 @@ function renderTranscript(lines){
   }
   return out.join('');
 }
+function executionRecordHtml(line){
+  let record;
+  try { record = JSON.parse(line); } catch { return '<pre>' + esc(line) + '</pre>'; }
+  const metadata = [record.timestamp, record.stage, record.role, record.attempt ? 'attempt ' + record.attempt : '', record.event, record.stream].filter(Boolean).join(' · ');
+  const bytes = record.base64 ? Uint8Array.from(atob(record.base64), c => c.charCodeAt(0)) : null;
+  const text = bytes ? new TextDecoder().decode(bytes) : JSON.stringify(record, null, 2);
+  const child = /^[A-Za-z0-9_-]+$/.test(record.childId || '') ? '<a href="/api/log/' + encodeURIComponent(record.childId) + '?download=1">Child ' + esc(record.childId) + '</a>' : '';
+  return '<details><summary>' + esc(metadata) + '</summary>' + child + '<pre style="white-space:pre-wrap;overflow-wrap:anywhere;unicode-bidi:plaintext">' + esc(text) + '</pre></details>';
+}
+function mountExecutionLog(body, requestedId){
+  const section = document.createElement('section');
+  section.innerHTML = '<p>Complete captured execution · <a href="/api/log/' + encodeURIComponent(requestedId) + '?download=1">Download raw records</a> · <a href="/api/log/' + encodeURIComponent(requestedId) + '?download=1&amp;legacy=1">Download original timeline</a></p><p>Only CLI-exported events are available. Non-exported model thoughts are unavailable. Raw bytes are preserved as base64 in downloads.</p><div class="execution-records"></div><button type="button">Load captured records</button>';
+  body.prepend(section);
+  const records = section.querySelector('.execution-records');
+  const button = section.querySelector('button');
+  const decoder = new TextDecoder();
+  let offset = 0, pending = '';
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const response = await fetch('/api/log/' + encodeURIComponent(requestedId) + '?raw=1&offset=' + offset, {cache:'no-store'});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const page = await response.json();
+      if (drawerTaskId !== requestedId) return;
+      const bytes = Uint8Array.from(atob(page.base64), c => c.charCodeAt(0));
+      pending += decoder.decode(bytes, {stream:true});
+      const lines = pending.split('\n');
+      pending = lines.pop();
+      records.insertAdjacentHTML('beforeend', lines.map(executionRecordHtml).join(''));
+      offset = page.nextOffset;
+      button.textContent = page.hasMore ? 'Load more captured records' : 'Refresh captured records';
+      if (pending && !page.hasMore) button.textContent = 'Refresh (partial record; raw download available)';
+    } catch (error) { button.textContent = 'Retry loading captured records: ' + error.message; }
+    finally { button.disabled = false; }
+  };
+  button.click();
+}
 function openDrawer(id, title){
   const requestedId = String(id || '');
   drawerTaskId = requestedId;
@@ -2154,6 +2191,7 @@ function openDrawer(id, title){
       const lines = Array.isArray(j?.lines) ? j.lines : [];
       const body = $('#dbody');
       body.innerHTML = lines.length ? renderTranscript(lines) : '<div class="tlempty">Transcript is empty.</div>';
+      mountExecutionLog(body, requestedId);
       body.scrollTop = body.scrollHeight;
     })
     .catch(() => {
@@ -2163,7 +2201,8 @@ function openDrawer(id, title){
         body.innerHTML = renderTranscript(MOCK_LOG);
         body.scrollTop = body.scrollHeight;
       } else {
-        body.innerHTML = '<div class="tlempty">No transcript - the /api/log fetch failed.</div>';
+        body.innerHTML = '<div class="tlempty">Timeline unavailable. Complete captured records:</div>';
+        mountExecutionLog(body, requestedId);
       }
     });
 }

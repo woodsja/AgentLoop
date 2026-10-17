@@ -1,81 +1,70 @@
-# Owner-controlled Python verification preflight
+# Python project contract and readiness
 
-R1 projects can declare `pythonEnvironment` in the owner-managed autopilot
-project configuration. The registry, issue worktree, feature-job lock, queue,
-worker sandbox, critic, exact-head CI, final review and merge approval gates
-remain the existing authorities. Issue text and repository instructions cannot
-select setup commands or dependency sources. This change does not release #80,
-change live project labels, submit a job, enable a source, or change one-shot
-implementation policy.
-
-The owner supplies the complete wheel-only dependency closure (including the
-project wheel when its installed commands are required), exact versions and one
-approved wheel SHA-256 per distribution. Both pytest and Ruff are required.
-For example, the shape of a policy is:
+An owner-authorized disposable Python worktree uses the same three-key
+`.ralph/project.json` contract as [Node projects](node-projects.md):
 
 ```json
-{
-  "pythonEnvironment": {
-    "interpreter": "/usr/bin/python3",
-    "timeoutMs": 120000,
-    "wheelhouse": "/owner/approved/project-python-wheels",
-    "dependencies": [
-      {"name": "pytest", "version": "OWNER_PIN", "wheel": "OWNER_APPROVED.whl", "sha256": "OWNER_SHA256"},
-      {"name": "ruff", "version": "OWNER_PIN", "wheel": "OWNER_APPROVED.whl", "sha256": "OWNER_SHA256"}
-    ],
-    "commands": ["finance-dashboard"]
-  }
-}
+{"runtime":"python","verification":"python -m pytest && ruff check","lockfile":"uv.lock"}
 ```
 
-This illustrates fields, not an installable bundle. The owner must supply real,
-compatible versions, wheel names and digests and every transitive dependency.
-The wheelhouse must be canonical, outside the worktree, and contain exactly the
-approved wheels, without extra files or symlinks. Missing, stale, altered,
-unapproved or inconsistent bundles block admission. pip uses `--no-index`,
-`--no-deps`, `--require-hashes` and no download cache. It never builds source
-packages or falls back to another source. An owner may instead explicitly
-configure `indexUrl` as an HTTPS URL without credentials; it is mutually
-exclusive with `wheelhouse`. That option uses exact pins and hashes, binary
-wheels only, and zero transport retries. No default index is enabled by this
-feature. Credentials and new sources require an owner decision outside the job.
+Commit `pyproject.toml` and a compatible `uv.lock`. Set `runtime: "python"` in
+owner configuration to require the contract, including diagnosing its absence.
+A present contract also selects its runtime without an owner runtime field.
+Only Node and Python are supported; an explicit owner runtime must match.
+The contract supplies project verification, while activation, review, delivery
+and deployment policy remain in owner configuration. Registration, readiness
+and activation remain separate; preparation never changes enabled/autoMerge.
 
-Preparation uses the configured interpreter only to create `.venv`. All pip,
-readiness and dependency checks use `.venv/bin/python` with Python isolation.
-System-site packages and escaping paths are rejected. The environment excludes
-ambient Python/pip configuration, proxy variables, credentials and household
-data settings. Installed distribution versions, console executable locations,
-local shebangs (or wheel binaries), and `pip check` must pass. List all project
-installed commands in `commands`; this checks command availability without
-running application checks or accessing application data. Deterministic project
-verification still runs separately after implementation.
+Install uv and a compatible Python interpreter on the daemon's ordinary PATH.
+Preparation runs `uv sync --locked`, targeting the worktree's `.venv`, then
+probes its Python and invokes the contract's nonempty shell verification command.
+Verification exports `.venv/bin` at the front of PATH and VIRTUAL_ENV for the
+whole command, including compound commands. The same command is supplied to
+workers and subsequent deterministic verification. Python modules and installed
+console commands therefore resolve through the project environment. System
+Python installations and normal uv interpreter discovery work without a private
+tool directory. Normal indexes, caches, proxies and VM permissions are retained.
 
-A successful installation records the policy digest in the worktree's `.venv`.
-Matching environments are checked and reused without reinstalling. An owner
-policy change invalidates reuse and rebuilds the validated local environment
-from scratch so removed distributions cannot survive the old policy. The existing
-workspace cleanup lifecycle is unchanged; a removed worktree requires preparation again. Existing `prepareVenv` Python projects can reuse an environment that passes
-local pytest, Ruff, installed-command and dependency readiness checks. A fresh
-or incomplete legacy Python environment blocks before the worker, asking the
-owner to provide this policy; it cannot trigger dependency installation from an
-unapproved source. Repository instructions can require readiness but cannot
-authorize installation. Non-Python/default projects retain their prior behavior. No live project policy is enabled by this patch.
+Missing/uncommitted locks block before install. uv itself validates TOML, lock
+format and compatibility with current metadata. `--locked` must succeed; setup
+never substitutes `--frozen`, regenerates the lock or silently repairs it.
+Lock changes during setup/checks also block. For a stale or invalid lock, run
+`uv lock` deliberately and commit the compatible result before retrying. Source,
+cache or interpreter errors retain the exact command, stdout, stderr and exit
+status with repair guidance. Resolve the reported connectivity/cache/tooling
+problem and explicitly retry the existing job using normal recovery procedures.
+There is no automatic dependency repair or retry loop.
 
-The feature job records `environmentPreflight` and R1 exposes it through existing
-job status/evidence. It is `preparing`, `ready`, or `blocked` with category
-`infrastructure`, a fixed reason and actionable message. Reasons distinguish
-policy/path problems, missing interpreter or venv support, incompatible/missing
-dependencies or commands, invalid offline bundles, index/DNS transport errors,
-timeout and cancellation. Raw subprocess output, URLs, secrets and local paths
-are never persisted in preflight evidence. A failed preflight is terminal as
-`blocked_infrastructure`; it consumes no worker or critic cycle and creates no
-verification or review verdict. There are no automatic install retries. Owner
-repair and explicit feature-job recovery are required after a terminal block.
+Readiness concerns infrastructure. An invoked pytest/check command returning a
+normal failing status is recorded as a red baseline and admitted to a worker for
+repair. Shell exits 126/127, process launch failures, signals, cancellation and
+timeout block readiness. Application verification must pass after implementation;
+readiness does not bypass exact-head CI, independent review or guarded delivery.
 
-The existing feature lock serializes duplicate admissions. A detached setup
-runner waits for its PID/start-time claim to be saved before executing Python.
-On restart, the old process group must be conclusively terminated before
-worktree cleanup or a new setup. Cancellation and shutdown kill that group;
-the single owner time limit covers all subprocesses in a preparation attempt.
-Interrupted requirements files are replaced safely and unreceipted installs
-are revalidated and reinstalled using the same approved policy on recovery.
+Both runtimes share the process runner and R1 evidence path. Every command uses
+a detached process group with a durable Linux PID/start-time claim before start.
+Cancellation or the five-minute preparation deadline terminates the group.
+Restart reconciles prior ownership before cleanup/retry; an ambiguous claim
+blocks replacement. Setup failures consume no worker/critic attempt. Full raw
+stdout/stderr are forwarded to #90 owner records without output truncation or
+redaction, including setup, verification and failure output. Existing durable job
+records and transcripts survive recreation and workspace cleanup.
+
+The obsolete `pythonEnvironment` wheel policy now produces explicit migration
+guidance. Legacy prepareVenv/instruction-only R1 projects require the shared
+contract before admission. The older non-R1 helper can still create/reuse a bare
+venv; that helper is not a readiness receipt. This change edits no live project
+configuration or existing VM installation. Finance migration remains #87 work.
+
+The accepted [trust boundary](decisions/0001-agentloop-trust-boundary.md) calls
+for ordinary disposable-VM execution. There is no mandatory bubblewrap, nested
+filesystem sandbox, custom wheel inventory or approval service. Native lockfile
+hashes provide repeatability, not malware detection. Physical Windows host
+bridge checks and separately authorized deployment remain #87 work. Local tests,
+a commit or a merge do not establish deployment verification.
+
+Run tests with uv on PATH (`npm test`). The disposable fixture suite includes a
+small dependency-free repository and a real pinned pytest repository, both with
+committed native locks. The pytest fixture uses normal PyPI/cache behavior; a
+clean test environment needs source connectivity once. An empty offline cache
+is tested as a setup failure, followed by recovery using the normal cache/source.

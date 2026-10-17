@@ -1,23 +1,26 @@
 const { spawn } = require('node:child_process');
+const { captureProcess } = require('./execution-log');
 
-function runVerification(projectPath, command, timeoutMs) {
+function runVerification(projectPath, command, timeoutMs, record = () => {}) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     let stdout = '';
     let stderr = '';
     let timedOut = false;
     let spawnFailed = false;
-    const child = spawn(command, {
+    let exception = null;
+    const child = captureProcess(spawn, command, [], {
       cwd: projectPath,
       shell: true,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    }, record);
 
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const { StringDecoder } = require('node:string_decoder');
+    const outDecoder = new StringDecoder('utf8');
+    const errDecoder = new StringDecoder('utf8');
+    child.stdout.on('data', (chunk) => { stdout += outDecoder.write(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += errDecoder.write(chunk); });
 
     let timer;
     if (Number.isFinite(timeoutMs) && timeoutMs >= 0) {
@@ -35,18 +38,25 @@ function runVerification(projectPath, command, timeoutMs) {
       }, timeoutMs);
     }
 
-    child.on('error', () => { spawnFailed = true; });
+    child.on('error', error => { spawnFailed = true; exception = { name: error.name, message: error.message, code: error.code, stack: error.stack }; });
     child.on('exit', () => { clearTimeout(timer); });
     child.on('close', (exitCode, signal) => {
       clearTimeout(timer);
-      resolve({
+      stdout += outDecoder.end();
+      stderr += errDecoder.end();
+      const result = {
         passed: !spawnFailed && !timedOut && signal === null && exitCode === 0,
+        command,
+        exception,
+        signal,
         exitCode,
         stdout,
         stderr,
         timedOut,
         durationMs: Date.now() - startedAt,
-      });
+      };
+      record('verification', { result });
+      resolve(result);
     });
   });
 }

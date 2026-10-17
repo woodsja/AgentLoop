@@ -73,7 +73,6 @@ function createCliWorker(options = {}) {
 
   return async function runWorker(projectPath, task, context) {
     const scope = resolveWorkerScope(config, projectPath, registryPath);
-    if (scope.isolatedWorktree && task.worker !== 'codex') throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
     const engine = engines.get(task.worker);
     if (!engine) throw new Error(`Unknown worker engine: ${task.worker}`);
 
@@ -131,7 +130,9 @@ function createCliWorker(options = {}) {
           if (partialLine) parseLine(partialLine);
           if (engine.usesOutputFile) {
             try {
-              resultText = fs.readFileSync(outputPath, 'utf8').trim() || lastText;
+              const bytes = fs.readFileSync(outputPath);
+              options.recordExecution?.('result-file', { role: 'worker', base64: bytes.toString('base64'), path: outputPath });
+              resultText = bytes.toString('utf8').trim() || lastText;
             } catch {
               resultText = lastText;
             }

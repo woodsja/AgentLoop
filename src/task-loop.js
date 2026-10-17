@@ -44,6 +44,7 @@ async function runTask(projectPath, inputTask, options) {
       result = await executeTask(projectPath, task, {
         runWorker: (workerPath, workerTask) => options.runWorker(workerPath, workerTask, context),
         verificationTimeoutMs: options.verificationTimeoutMs,
+        recordExecution: options.recordExecution,
       });
       attempts.push({
         number,
@@ -52,6 +53,7 @@ async function runTask(projectPath, inputTask, options) {
         verification: result.verification,
       });
     } catch (error) {
+      options.recordExecution?.('exception', { role: 'worker', attempt: number, name: error.name, message: error.message, stack: error.stack, code: error.code });
       attempts.push({
         number,
         status: 'worker_error',

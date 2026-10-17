@@ -70,3 +70,15 @@ test('a timeout terminates the command and fails verification', async () => {
   assert.equal(result.exitCode, null);
   assert.ok(result.durationMs < 5000);
 });
+
+
+test('spawn failure preserves command, exception and signal diagnostics', async () => {
+  const command = 'printf unreachable';
+  const result = await runVerification('/nonexistent/agentloop-verifier-cwd', command, 5000);
+  assert.equal(result.command, command);
+  assert.equal(result.passed, false);
+  assert.equal(result.exception.code, 'ENOENT');
+  assert.match(result.exception.message, /ENOENT/);
+  assert.match(result.exception.stack, /Error/);
+  assert.equal(result.signal, null);
+});

@@ -2,8 +2,9 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
-const { preparePython, blocked } = require('./python-preflight');
+const { execFile } = require('./execution-log');
+const { preparePython } = require('./python-preflight');
+const { blocked, readContract } = require('./project-preflight');
 
 function run(command, args, cwd, executeFile) {
   return new Promise((resolve, reject) => {
@@ -30,6 +31,9 @@ async function prepareRepositoryEnvironment(projectPath, project, {
   isCancelled,
   onProcess,
   requirePythonReadiness = false,
+  timeoutMs,
+  recordExecution,
+  spawn,
 } = {}) {
   if (typeof projectPath !== 'string' || !projectPath.trim()) {
     throw new TypeError('Repository environment preparation requires a project path');
@@ -37,22 +41,16 @@ async function prepareRepositoryEnvironment(projectPath, project, {
   if (!project || typeof project !== 'object') {
     throw new TypeError('Repository environment preparation requires a project configuration');
   }
-  if (project.pythonEnvironment) return preparePython(path.resolve(projectPath), project.pythonEnvironment, { execFile: executeFile, isCancelled, onProcess });
-  if (!project.prepareVenv && !instructionsRequireVenv(instructions)) return { venvPath: null };
-  if (requirePythonReadiness) {
-    // Existing owner prepareVenv projects may reuse prepared environments, but
-    // dependency installation needs a new explicit owner source/hash policy.
-    const localPython = path.join(path.resolve(projectPath), '.venv/bin/python');
-    let interpreter;
-    try { interpreter = fs.existsSync(localPython) ? fs.realpathSync(localPython) : '/usr/bin/python3'; }
-    catch { throw blocked('unsafe_path'); }
-    const commands = [...String(project.verification || '').matchAll(/\.venv\/bin\/([A-Za-z0-9_-]+)/g)]
-      .map(match => match[1]).filter(name => name !== 'python' && name !== 'python3');
-    return preparePython(path.resolve(projectPath), {
-      interpreter, timeoutMs: 30000, commands: [...new Set(commands)],
-      dependencies: ['pytest', 'ruff'].map(name => ({ name, version: null })),
-    }, { execFile: executeFile, isCancelled, onProcess, checkOnly: true });
+  if (project.runtime || fs.existsSync(path.join(projectPath, '.ralph/project.json'))) {
+    const root = path.resolve(projectPath);
+    const contract = readContract(root, project.runtime);
+    const prepare = contract.runtime === 'python' ? preparePython : require('./project-preflight').prepareNode;
+    return prepare(root, project, { isCancelled, onProcess, timeoutMs, recordExecution, spawn });
   }
+  if (project.pythonEnvironment || (requirePythonReadiness && (project.prepareVenv || instructionsRequireVenv(instructions)))) {
+    throw blocked('contract_missing', 'Python readiness requires .ralph/project.json, pyproject.toml and a committed uv.lock. Migrate the legacy Python configuration to runtime python before retrying.');
+  }
+  if (!project.prepareVenv && !instructionsRequireVenv(instructions)) return { venvPath: null };
   const venvPath = path.join(path.resolve(projectPath), '.venv');
   if (fs.existsSync(venvPath) && !fs.statSync(venvPath).isDirectory()) {
     throw new Error('Repository environment preparation failed: required .venv exists but is not a directory');
