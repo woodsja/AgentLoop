@@ -30,7 +30,7 @@ function createDashboardProjection(directory, writeJson) {
     }
     return projected;
   }
-  function read(file) {
+  function read(file, { optional = false } = {}) {
     let source;
     try {
       source = signature(file);
@@ -49,6 +49,9 @@ function createDashboardProjection(directory, writeJson) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Canonical state must be an object');
       return save(file, value);
     } catch (error) {
+      // A result is optional for older tasks and for a crash between task
+      // completion and result persistence. Preserve the task's own status.
+      if (optional && source === undefined && error.code === 'ENOENT') return null;
       console.error(`Cannot project canonical state ${file}: ${error.stack || error.message}`);
       // Keep damaged owner data untouched and visible as an error. This is
       // navigation only: canonical execution reads still throw and fail closed.

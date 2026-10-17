@@ -275,6 +275,7 @@ test('daemon recovers with corrupt historical files while huge output stays out 
       store.writeTask({id,type:'task',status:'done',finishedAt:new Date().toISOString(),prompt:raw,goal:raw,description:raw,acceptance:[raw],r1:{verification:{stdout:raw}}},'done');
       store.writeResult({id,status:'done',summary:raw});
       store.writeTask({id:'t-recover-context',type:'task',status:'running',prompt:raw},'running');
+      store.writeTask({id:'t-without-result',type:'task',status:'passed',summary:'legacy task summary',finishedAt:new Date().toISOString()},'done');
       fs.writeFileSync(path.join(store.paths.done,'t-torn-history.json'),'{torn');
       fs.writeFileSync(path.join(store.paths.results,'t-empty-history.json'),'');
       fs.rmSync(path.join(store.paths.state,'dashboard'),{recursive:true,force:true});
@@ -308,9 +309,13 @@ test('daemon recovers with corrupt historical files while huge output stays out 
         assert.ok(response.body.length<100000);
         assert.ok(JSON.parse(response.body).tasks.recent.find(t=>t.id==='t-api-huge').summary.length<4200);
         assert.equal(JSON.parse(response.body).tasks.recent.find(t=>t.id==='t-torn-history').status,'unreadable');
+        const legacy = JSON.parse(response.body).tasks.recent.find(t=>t.id==='t-without-result');
+        assert.equal(legacy.status,'passed');
+        assert.equal(legacy.summary,'legacy task summary');
       }
       assert.match(errors,/Cannot project canonical state.*t-torn-history/);
       assert.match(errors,/Cannot project canonical state.*t-empty-history/);
+      assert.ok(!errors.includes('results/t-without-result.json'));
       assert.equal(JSON.parse(fs.readFileSync(path.join(pollRoot,'tasks/done/t-recover-context.json'))).status,'failed');
       assert.equal(fs.readFileSync(path.join(pollRoot,'tasks/done/t-torn-history.json'),'utf8'),'{torn');
       assert.equal(fs.readFileSync(path.join(pollRoot,'results/t-empty-history.json'),'utf8'),'');
@@ -328,6 +333,8 @@ test('projection write failures preserve canonical checkpoints and cache reads; 
   const messages=[],previous=console.error;
   console.error=message=>messages.push(message);
   try {
+    assert.equal(store.readDashboardResult('t-missing-optional-result'),null);
+    assert.equal(messages.length,0);
     const rename=fs.renameSync;
     fs.renameSync=(from,to)=>{if(to.includes(`${path.sep}dashboard${path.sep}`)) throw new Error('projection rename failed');return rename(from,to);};
     try {

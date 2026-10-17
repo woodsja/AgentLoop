@@ -265,7 +265,7 @@ function writeResult(result) {
 }
 
 function readDashboardResult(id) {
-  return resultProjection.read(path.join(paths.results, `${id}.json`));
+  return resultProjection.read(path.join(paths.results, `${id}.json`), { optional: true });
 }
 
 function logPath(id) {
