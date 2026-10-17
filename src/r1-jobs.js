@@ -108,7 +108,7 @@ function createR1Jobs(store, options = {}) {
     if (['ready', 'blocked'].includes(job.environmentPreflight?.status)) {
       const outcome = job.environmentPreflight.status;
       logTransition(task, `environment:${job.runs}:${outcome}`, outcome === 'ready'
-        ? 'Python verification environment ready.' : 'Python verification environment blocked by infrastructure.');
+        ? 'Project verification environment ready.' : 'Project verification environment blocked by infrastructure.');
     }
     if (job.verification && typeof job.verification.passed === 'boolean') {
       const verdict = job.verification.passed ? 'passed' : 'failed';

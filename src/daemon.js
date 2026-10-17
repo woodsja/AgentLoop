@@ -848,9 +848,6 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       : null;
     appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
     const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
-    if (scope.isolatedWorktree && role === 'worker' && engine.id !== 'codex') {
-      throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
-    }
     const args = engine.args({ model, outputPath, role, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
     child = captureProcess((_file, argv, options) => spawnEngine(engine, argv, options), engines.binary(engine, store.config.enginePaths) || engine.command, args, {
       cwd: scope.cwd,
@@ -1663,7 +1660,6 @@ function spawnWorker(task) {
 
   try {
     const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
-    if (scope.isolatedWorktree && engine.id !== 'codex') throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
     const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
     child = captureProcess((_file, argv, options) => spawnEngine(engine, argv, options), engines.binary(engine, store.config.enginePaths) || engine.command, args, {
       cwd: scope.cwd,

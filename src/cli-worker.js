@@ -73,7 +73,6 @@ function createCliWorker(options = {}) {
 
   return async function runWorker(projectPath, task, context) {
     const scope = resolveWorkerScope(config, projectPath, registryPath);
-    if (scope.isolatedWorktree && task.worker !== 'codex') throw new Error('Isolated worktree workers require the Codex filesystem sandbox.');
     const engine = engines.get(task.worker);
     if (!engine) throw new Error(`Unknown worker engine: ${task.worker}`);
 

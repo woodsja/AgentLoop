@@ -75,4 +75,4 @@ function execFileSync(file, args, options = {}) {
   return decode(result.stdout);
 }
 function withExecution(record, run) { return executionContext.run(record, run); }
-module.exports = { recorder, captureProcess, execFile, execFileSync, withExecution };
+module.exports = { currentRecorder: () => executionContext.getStore(), recorder, captureProcess, execFile, execFileSync, withExecution };

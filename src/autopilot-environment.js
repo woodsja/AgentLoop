@@ -30,6 +30,9 @@ async function prepareRepositoryEnvironment(projectPath, project, {
   isCancelled,
   onProcess,
   requirePythonReadiness = false,
+  timeoutMs,
+  recordExecution,
+  spawn,
 } = {}) {
   if (typeof projectPath !== 'string' || !projectPath.trim()) {
     throw new TypeError('Repository environment preparation requires a project path');
@@ -37,6 +40,7 @@ async function prepareRepositoryEnvironment(projectPath, project, {
   if (!project || typeof project !== 'object') {
     throw new TypeError('Repository environment preparation requires a project configuration');
   }
+  if (project.runtime || fs.existsSync(path.join(projectPath, '.ralph/project.json'))) return require('./project-preflight').prepareNode(path.resolve(projectPath), project, { isCancelled, onProcess, timeoutMs, recordExecution, spawn });
   if (project.pythonEnvironment) return preparePython(path.resolve(projectPath), project.pythonEnvironment, { execFile: executeFile, isCancelled, onProcess });
   if (!project.prepareVenv && !instructionsRequireVenv(instructions)) return { venvPath: null };
   if (requirePythonReadiness) {
