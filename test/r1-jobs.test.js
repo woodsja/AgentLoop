@@ -140,3 +140,28 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   assert.throws(() => jobs.submit({ project: 'demo', issue: 7 }), /explicitly authorized/);
   assert.equal(queued.length, 1);
 });
+
+test('public R1 verification summaries retain bounded failure facts without exposing untrusted logs', () => {
+  const { verificationFailureSummary } = require('../src/r1-transcript-summary');
+  const raw = [
+    'credential=secret-should-never-be-logged reasoning: hidden private thinking',
+    '/home/privateuser/project/private/credentials.txt',
+    'ℹ tests 28', 'ℹ pass 27', 'ℹ fail 1',
+    'test at test/project-onboarding.test.js:60:1',
+    "code: 'PROJECT_PREFLIGHT_BLOCKED'",
+    "reason: 'runtime_missing'",
+  ].join('\n');
+  const summary = verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: raw, stderr: '' });
+  assert.match(summary, /deterministic verification failed.*exit 1/);
+  assert.match(summary, /27 passed, 1 failed/);
+  assert.match(summary, /test\/project-onboarding\.test\.js/);
+  assert.match(summary, /runtime_missing/);
+  assert.ok(summary.length <= 450);
+  for (const forbidden of ['secret-should-never-be-logged', '/home/privateuser', 'private thinking']) {
+    assert.ok(!summary.includes(forbidden), `${forbidden} leaked into public transcript`);
+  }
+  assert.equal(verificationFailureSummary({ passed: false, timedOut: true, exitCode: null, stdout: 'Bearer secret', stderr: '' }),
+    'deterministic verification failed (timed out).');
+  assert.equal(verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: 'token=secret', stderr: '' }),
+    'deterministic verification failed (exit 1).');
+});

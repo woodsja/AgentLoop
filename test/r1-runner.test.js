@@ -135,6 +135,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     const verificationFailedLog = await get(port, `/api/log/${verificationFailed.task.id}?lines=200`);
     assert.equal(verificationFailed.job.status, 'failed');
     assert.equal(verificationFailedLog.lines.filter(line => /deterministic verification failed/.test(line)).length, 1);
+    assert.ok(verificationFailedLog.lines.some(line => /deterministic verification failed.*exit 1/.test(line)), 'R1 transcript must explain a failing deterministic check with its exit code');
     assert.equal(verificationFailedLog.lines.filter(line => /terminal outcome: failed/.test(line)).length, 1);
 
     // FAILED when required CI never finishes within the bounded watch.
