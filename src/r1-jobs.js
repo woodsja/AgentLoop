@@ -1,7 +1,11 @@
+const { snapshotter } = require('./execution-preview');
 // R1 phases run under the existing queue dispatcher, not a second scheduler.
 const fs = require('node:fs');
+const { recorder, captureProcess, withExecution } = require('./execution-log');
+const { verifyTask } = require('./task-runner');
 const crypto = require('node:crypto');
-const { spawn, execFile } = require('node:child_process');
+const { spawn } = require('node:child_process');
+const { execFile } = require('./execution-log');
 const { run } = require('./autopilot');
 const { loadProjectConfig } = require('./autopilot-config');
 const { discoverReadyIssues, selectReadyIssue } = require('./autopilot-github');
@@ -15,10 +19,8 @@ const { createR1LoopImplementation } = require('./r1-loop-implementation');
 const { captureFailedR1Job, bindR1Parent } = require('./r1-failed-work');
 const { verificationFailureSummary } = require('./r1-transcript-summary');
 
-function safeText(value, limit = 1000) {
-  return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
-    .replace(/(?:[A-Za-z]:\\|\/)(?:[^\s"']+[\\/])*[^\s"']+/g, '[path]').slice(0, limit);
-}
+// Owner evidence is verbatim; UI text escaping is a rendering concern.
+function ownerText(value) { return String(value ?? ''); }
 
 // Continuous runner limits. CI is watched with a bounded poll instead of a
 // scheduler pass; admission looks for the next ready issue at most once a
@@ -53,20 +55,20 @@ function approvedMerge(job) {
 
 function evidence(job) {
   const review = value => value && ({
-    reviewer: safeText(value.reviewer), verdict: value.verdict, commit: value.commit, policy: value.policy,
-    findings: (value.findings || []).map(finding => ({ ...finding, summary: safeText(finding.summary), file: safeText(finding.file) || null })),
+    reviewer: ownerText(value.reviewer), verdict: value.verdict, commit: value.commit, policy: value.policy,
+    findings: (value.findings || []).map(finding => ({ ...finding, summary: ownerText(finding.summary), file: ownerText(finding.file) || null })),
     ...(value.attempt ? { attempt: value.attempt } : {}),
   });
   return job && {
     outcome: job.terminalState || job.status,
     commit: job.delivery && job.delivery.commit,
-    verification: job.verification && { ...job.verification, command: safeText(job.verification.command, 4000), stdout: safeText(job.verification.stdout, 4000), stderr: safeText(job.verification.stderr, 4000) },
+    verification: job.verification && { ...job.verification },
     ci: job.ci && { state: job.ci.state, headCommit: job.ci.headCommit },
     review: review(job.review),
     environmentPreflight: job.environmentPreflight,
     reviewAttempts: job.reviewAttempts,
-    reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: safeText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && safeText(entry.diagnostics) })),
-    diagnostics: (job.failures || []).map(failure => ({ phase: failure.phase, at: failure.at, message: safeText(failure.message) })),
+    reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: ownerText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && ownerText(entry.diagnostics) })),
+    diagnostics: (job.failures || []).map(failure => ({ ...failure, message: ownerText(failure.message) })),
   };
 }
 
@@ -86,15 +88,12 @@ function createR1Jobs(store, options = {}) {
   let closing = false;
   const now = () => new Date().toISOString();
 
-  // R1's durable job state contains useful diagnostics, but it can also
-  // contain worker, reviewer, and CI text.  The dashboard transcript is a
-  // deliberately smaller boundary: only these fixed lifecycle summaries are
-  // eligible for it.  Keep the dedupe key on the queue task so a daemon
-  // restart or a CI poll cannot turn one persisted transition into a flood.
+  // Summaries are navigation; raw events and evidence are persisted separately.
   function logTransition(task, key, summary) {
     const seen = Array.isArray(task.r1LogEvents) ? task.r1LogEvents : [];
     if (seen.includes(key)) return;
     task.r1LogEvents = [...seen, key].slice(-20);
+    recorder(store, task.id, { parentId: task.id })('transition', { key, summary, stage: task.phase });
     const line = `[${now()}] R1: ${summary}`.replace(/[\r\n]+/g, ' ').slice(0, MAX_TRANSCRIPT_LINE);
     try {
       store.appendLogLine(task.id, line);
@@ -214,7 +213,7 @@ function createR1Jobs(store, options = {}) {
     const results = [];
     const attempt = async (action, file, args, cwd) => {
       try { await command(file, args, cwd); results.push({ action, ok: true }); }
-      catch (error) { results.push({ action, ok: false, error: safeText(error.message, 300) }); }
+      catch (error) { results.push({ action, ok: false, error: ownerText(error.message) }); }
     };
     const outcome = approvedMerge(job) ? 'merged' : task.specification === 'missing' && !job ? 'needs_specification' : 'failed';
     const branch = job && job.branch;
@@ -222,12 +221,12 @@ function createR1Jobs(store, options = {}) {
     if (outcome !== 'merged') {
       const reason = outcome === 'needs_specification'
         ? `Ralph needs a product specification before it can start: describe the required behaviour and acceptance criteria, then re-apply \`${project.readyLabel}\`.`
-        : `Ralph could not complete this issue autonomously and stopped with outcome FAILED (job ${task.id}): ${safeText(task.failure || (job && job.failures && job.failures.at(-1) && job.failures.at(-1).message) || job?.terminalState || 'no deliverable result', 600)}`;
+        : `Ralph could not complete this issue autonomously and stopped with outcome FAILED (job ${task.id}): ${job?.terminalState || task.phase || 'no deliverable result'}. Full execution evidence is available in the owner dashboard.`;
       if (pr) {
         try {
           const state = JSON.parse(await command('gh', ['pr', 'view', String(pr), '--repo', project.repo, '--json', 'state'], project.checkout)).state;
           if (state === 'OPEN') await attempt('close-pr', 'gh', ['pr', 'close', String(pr), '--repo', project.repo, '--comment', reason], project.checkout);
-        } catch (error) { results.push({ action: 'close-pr', ok: false, error: safeText(error.message, 300) }); }
+        } catch (error) { results.push({ action: 'close-pr', ok: false, error: ownerText(error.message) }); }
       }
       await attempt('comment-issue', 'gh', ['issue', 'comment', String(task.issue), '--repo', project.repo, '--body', reason], project.checkout);
       await attempt('relabel-issue', 'gh', ['issue', 'edit', String(task.issue), '--repo', project.repo, '--remove-label', project.readyLabel, '--add-label', project.humanLabel], project.checkout);
@@ -271,6 +270,8 @@ function createR1Jobs(store, options = {}) {
   }
 
   async function execute(task) {
+    const record = recorder(store, task.id, { parentId: task.id });
+    const spawnForTask = (file, args, options) => captureProcess(trackedSpawn, file, args, options, recorder(store, task.id, { parentId: task.id, role: task.phase === 'review' ? 'reviewer' : 'worker', attempt: task.r1?.runs ?? 1, stage: task.phase }));
     const project = load(task.project);
     const scope = resolveProject(store.config, task.project, undefined, store.paths.config);
     const planned = deriveWorktreePath(project, { number: task.issue, title: task.title });
@@ -302,18 +303,21 @@ function createR1Jobs(store, options = {}) {
     }
     const phaseOf = job => job.reviewHistory?.at(-1)?.status === 'running' ? 'review'
       : job.status === 'running' ? 'implementation' : job.status === 'awaiting_ci' ? 'ci' : job.status;
+    const snapshot = snapshotter();
     const jobStore = { ...original,
       list: () => original.list().filter(job => job.issue.number === task.issue),
       save(job) {
         bindR1Parent(job, task.id);
         original.save(job);
+        snapshot(task.id, job, details => store.appendExecution(task.id, { ...details, stage: phaseOf(job), attempt: job.runs }));
         task.r1 = structuredClone(job);
+        task.r1.executionJournal = { id: task.id, raw: `/api/log/${task.id}?raw=1` };
         transcriptForJob(task, job);
         checkpoint(task, phaseOf(job));
         return job;
       },
     };
-    const reviewer = dependencies.reviewPullRequest || createClaudeReviewAdapter({ spawn: trackedSpawn });
+    const reviewer = dependencies.reviewPullRequest || createClaudeReviewAdapter({ spawn: spawnForTask });
     try {
       const optionsCancelChild = options.cancelChild;
       const mixedEnabled = project.implementationStrategy === 'worker-critic-loop';
@@ -336,6 +340,7 @@ function createR1Jobs(store, options = {}) {
               if (current.childLoopId !== id) throw new Error('R1 child association changed before implementation.');
             },
             recordBaseline: options.recordBaseline,
+            verify: (cwd, inputTask) => verifyTask(cwd, inputTask, undefined, recorder(store, task.id, { parentId: task.id, role: 'verification', attempt: task.r1?.runs ?? 1, stage: 'verification' })),
           });
           return mixed;
         } } : {}),
@@ -362,33 +367,35 @@ function createR1Jobs(store, options = {}) {
         },
         discoverReadyIssues: async value => (await discover(value)).filter(issue => issue.number === task.issue),
         reviewPullRequest: reviewer,
-        ralphOptions: { ...dependencies.ralphOptions, config: store.config, spawnImpl: trackedSpawn,
+        ralphOptions: { ...dependencies.ralphOptions, config: store.config, spawnImpl: spawnForTask,
+          recordExecution: (event, details) => recorder(store, task.id, { parentId: task.id, role: 'verification', stage: 'verification', attempt: task.r1?.runs ?? 1 })(event, details),
           onPhaseChange: phase => {
             if (closing) throw new Error('R1 executor is stopping.');
             if (phase === 'implementation') logTransition(task, 'implementation', 'implementation started.');
             checkpoint(task, phase);
           },
         },
-        write: () => {},
+        write: text => record('orchestration', { text }),
       });
       task.r1 = original.load(task.issue);
       if (!task.r1) task.failure = 'Issue is not ready and has no resumable R1 checkpoint.';
       if (!task.r1 || task.r1.terminal) await conclude(task, task.r1, project);
       else checkpoint(task, phaseOf(task.r1));
     } catch (error) {
+      record('exception', { name: error.name, message: error.message, stack: error.stack, stage: task.phase });
       // R1 checkpoints expected retryable failures itself. Unexpected
       // exceptions stop this queue job instead of creating an unbounded retry.
       task.r1 = original.load(task.issue);
       if (task.autonomous && task.r1 && !task.r1.terminal && task.r1.status === 'awaiting_ci') {
         // A GitHub outage while watching CI or merging is retried on the next
         // bounded poll; the autopilot's own limits make repeated failure terminal.
-        task.lastError = safeText(error.message);
+        task.lastError = ownerText(error.message);
         checkpoint(task, phaseOf(task.r1));
         return;
       }
       if (!task.r1 || task.r1.terminal) await conclude(task, task.r1, project);
       else {
-        task.failure = safeText(error.message);
+        task.failure = ownerText(error.message);
         await conclude(task, task.r1, project);
       }
     }
@@ -397,10 +404,13 @@ function createR1Jobs(store, options = {}) {
   function advance(task) {
     if (active.has(task.id) || closing) return;
     if (task.phase === 'ci' && Date.now() < (nextAdvance.get(task.id) || 0)) return;
+    // The dispatcher passes navigation metadata. Never execute its preview;
+    // load full canonical context only after the active/poll gates admit work.
+    task = store.readTask(task.id, 'running');
     task.status = 'running';
     logTransition(task, 'admitted', 'admitted to the R1 runner.');
-    const promise = execute(task).catch(error => {
-      task.failure = safeText(error.message);
+    const promise = withExecution((event, details) => recorder(store, task.id, { parentId: task.id, stage: task.phase, attempt: task.r1?.runs ?? 1 })(event, details), () => execute(task)).catch(error => {
+      task.failure = ownerText(error.message);
       try { finish(task, task.r1); } catch {
         console.error(`R1 job ${task.id}: checkpoint persistence failed.`);
       }
@@ -437,13 +447,14 @@ function createR1Jobs(store, options = {}) {
       }
       return null;
     })().catch(error => {
-      console.error(`R1 admission failed: ${safeText(error.message)}`);
+      console.error(`R1 admission failed: ${ownerText(error.message)}`);
       return null;
     }).finally(() => { admitting = null; });
     return admitting;
   }
 
   function recover(task) {
+    recorder(store, task.id, { parentId: task.id })('recovery', { stage: task.phase, previousStatus: task.status, message: 'Daemon restarted; previously captured output retained. Interrupted process exit details are unknown unless recorded by the CLI or process supervisor.' });
     store.moveTask(task.id, 'running', 'pending');
     store.writeTask({ ...task, status: 'queued', phase: 'recovering' }, 'pending');
   }

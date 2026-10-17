@@ -220,7 +220,7 @@ test('cleans a prepared workspace when repository setup fails before Ralph runs'
   assert.equal(cleaned, true);
 });
 
-const verifierResult = { passed: true, exitCode: 0, timedOut: false, stdout: 'tests passed\n', stderr: '' };
+const verifierResult = { signal: null, exception: null, passed: true, exitCode: 0, timedOut: false, stdout: 'tests passed\n', stderr: '' };
 const verifiedEvidence = commit => ({ command: 'check', commit, ...verifierResult });
 const passingRalph = () => ({ run: async () => ({ status: 'passed', attempts: [{ number: 1, status: 'passed', verification: verifierResult }] }) });
 
@@ -422,7 +422,7 @@ test('review receives actual deterministic verification evidence after delivery 
     },
   }));
   assert.deepEqual(context.verification, {
-    command, commit: 'abc123', passed: true, exitCode: 0, timedOut: false,
+    command, commit: 'abc123', signal: null, exception: null, passed: true, exitCode: 0, timedOut: false,
     stdout: '3 tests passed\n', stderr: 'lint clean\n',
   });
   assert.equal(context.ci.state, 'green');
@@ -766,7 +766,7 @@ for (const scenario of [
   { name: 'reviewer timeouts', status: 'timed_out', result: async () => { throw new Error('Claude review failed closed: reviewer timed out token=secret-value'); } },
   { name: 'malformed verdicts', status: 'invalid_verdict', result: async () => ({ reviewer: 'claude:opus', verdict: 'APPROVE', commit: 'abc123', findings: 'token=secret-value' }) },
 ]) {
-  test(`${scenario.name} preserve sanitized review attempt evidence and never approve`, async () => {
+  test(`${scenario.name} preserve complete review attempt evidence and never approve`, async () => {
     const store = temporaryStore();
     const issue = { number: 247, title: 'Persist failed independent review', body: '' };
     const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-247', worktreePath: null, now: store.now });
@@ -806,7 +806,8 @@ for (const scenario of [
     assert.ok(failed.startedAt <= failed.completedAt);
     assert.equal(failed.verdict, null);
     assert.ok(failed.diagnostics.length > 0 && failed.diagnostics.length <= 4000);
-    assert.doesNotMatch(JSON.stringify(saved), /secret-value|hidden-token|Authorization/);
+    assert.match(JSON.stringify(saved), /secret-value/);
+    if (scenario.name !== 'malformed verdicts') assert.match(failed.exception.stack, /Error/);
     assert.equal(saved.terminalState, 'ready_for_human');
     assert.equal(saved.review, null);
     assert.equal(saved.reviewAttempts, 1);
@@ -898,7 +899,7 @@ test('restart preserves a checkpointed reviewer failure when the terminal save w
   assert.equal(recovered.reviewAttempts, 1);
   assert.deepEqual(recovered.reviewHistory, checkpoint.reviewHistory);
   assert.equal(recovered.terminalState, 'ready_for_human');
-  assert.doesNotMatch(JSON.stringify(recovered), /secret-value/);
+  assert.match(JSON.stringify(recovered), /secret-value/);
 });
 
 test('a second matching reviewer NEEDS_CHANGES after the reviewer budget is spent is handed to a human', async () => {
@@ -1140,7 +1141,7 @@ test('red CI diagnostics come from the GitHub adapter and survive reload without
   assert.equal(saved.correction.status, 'eligible');
 });
 
-async function reachCorrection(store, issue) {
+async function reachCorrection(store, issue, diagnostics = 'npm test: ledger.test.js failed') {
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
     discoverReadyIssues: async () => [issue],
     createRalphTaskService: passingRalph,
@@ -1148,19 +1149,20 @@ async function reachCorrection(store, issue) {
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
     discoverReadyIssues: async () => [issue],
     observePullRequestCi: async () => ({ state: 'red', details: 'CI failed', prNumber: 99, headCommit: 'abc123', runs: [] }),
-    collectCiFailureDiagnostics: async () => 'npm test: ledger.test.js failed',
+    collectCiFailureDiagnostics: async () => diagnostics,
   }));
 }
 
 test('a passed correction uses issue context plus CI diagnostics and is pushed to the same branch', async () => {
   const store = temporaryStore();
   const issue = { number: 28, title: 'Correct me', body: '## Acceptance criteria\n- Ledger balances' };
-  await reachCorrection(store, issue);
+  const diagnostics = 'npm test: ledger.test.js failed\n' + 'CI log\n'.repeat(50000) + 'EXACT TAIL: assertion balance=42 token=owner /tmp/ledger';
+  await reachCorrection(store, issue, diagnostics);
 
   const prepared = [];
   const delivered = [];
   let task;
-  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
     discoverReadyIssues: async () => [issue],
     prepareIssueWorkspace: async (value, candidate, options) => {
       prepared.push(options);
@@ -1180,7 +1182,7 @@ test('a passed correction uses issue context plus CI diagnostics and is pushed t
   assert.deepEqual(prepared, [{ branch: 'ralph/issue-28-correct-me', headCommit: 'abc123' }]);
   assert.equal(task.id, 'autopilot:example/repo#28:ci-correction-1');
   assert.equal(task.verification, 'check');
-  assert.match(task.goal, /npm test: ledger\.test\.js failed/);
+  assert.ok(task.goal.includes(`CI failure diagnostics:\n${diagnostics}\n\n`));
   assert.match(task.goal, /Ledger balances/);
   assert.match(task.goal, /Run npm test\./);
   assert.equal(delivered.length, 1);
@@ -1888,7 +1890,7 @@ test('reloads an interrupted job, reconciles its leftover workspace, and resumes
   assert.equal(job.failures[0].phase, 'running');
   assert.match(job.failures[0].message, /interrupted/);
   assert.equal(createJobStore(store.directory).load(3), null);
-  assert.deepEqual(fs.readdirSync(store.directory), ['issue-5.json']);
+  assert.deepEqual(fs.readdirSync(store.directory), ['issue-5.execution.ndjson', 'issue-5.json']);
 });
 
 test('records failures and stops retrying a job after the run bound', async () => {

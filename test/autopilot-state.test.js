@@ -121,7 +121,7 @@ test('verification evidence is checkpointed before delivery, bound once, and pre
   recordVerification(job, 'npm test && npm run lint', verification);
   store.save(job);
   const reloaded = createJobStore(store.directory).load(16);
-  assert.deepEqual(reloaded.verification, { command: 'npm test && npm run lint', commit: null, ...verification });
+  assert.deepEqual(reloaded.verification, { command: 'npm test && npm run lint', commit: null, signal: null, exception: null, ...verification });
   assert.equal(hasPassingVerification(reloaded.verification, 'abc123'), false);
   recordDelivery(reloaded, { commit: 'abc123', pushed: false });
   store.save(reloaded);
@@ -137,17 +137,17 @@ test('verification evidence is checkpointed before delivery, bound once, and pre
   assert.equal(hasPassingVerification(createJobStore(store.directory).load(16).verification, 'def456'), true);
 });
 
-test('verification evidence bounds test output and rejects malformed persisted records', () => {
+test('verification evidence preserves full test output and rejects malformed persisted records', () => {
   const store = createJobStore(temporaryDirectory());
   const job = newJob(store, 17);
   const verification = { passed: true, exitCode: 0, timedOut: false, stdout: 'x'.repeat(10000) + 'test summary', stderr: '' };
   recordVerification(job, 'npm test', verification);
-  assert.equal(job.verification.stdout.length, 4000);
+  assert.equal(job.verification.stdout, verification.stdout);
   assert.ok(job.verification.stdout.endsWith('test summary'));
   for (const corrupt of [
     { ...job.verification, command: '' },
     { ...job.verification, stdout: undefined },
-    { ...job.verification, stderr: 'x'.repeat(4001) },
+    { ...job.verification, stderr: null },
     { ...job.verification, exitCode: '0' },
     { ...job.verification, passed: 'true' },
   ]) {
@@ -223,7 +223,7 @@ test('legacy PASS-only review records written before review metadata remain read
   assert.throws(() => store.save(job), /invalid independent review state/);
 });
 
-test('review history retains verdicts across delivered SHAs and sanitized failures across reload', () => {
+test('review history retains verdicts across delivered SHAs and verbatim failures across reload', () => {
   const store = createJobStore(temporaryDirectory());
   const job = newJob(store, 18);
   recordDelivery(job, { commit: 'abc123' });
@@ -237,7 +237,8 @@ test('review history retains verdicts across delivered SHAs and sanitized failur
   const second = beginReviewAttempt(job, store.now, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: 'def456' });
   const failed = failReviewAttempt(job, second.number, new Error('malformed verdict JSON token=secret-value'), store.now);
   assert.equal(failed.status, 'invalid_verdict');
-  assert.doesNotMatch(failed.diagnostics, /secret-value/);
+  assert.equal(failed.diagnostics, 'malformed verdict JSON token=secret-value');
+  assert.match(failed.exception.stack, /Error/);
   assert.throws(() => recordReview(job, { reviewer: 'claude:opus', verdict: 'PASS', commit: 'def456', policy: 'always', attempt: second }), /running attempt/);
   assert.equal(job.review, null);
   store.save(job);
@@ -261,7 +262,7 @@ test('corrupt review attempt history fails closed while older jobs without histo
     { ...job.reviewHistory[0], status: 'APPROVE' },
     { ...job.reviewHistory[0], verdict: 'PASS' },
     { ...job.reviewHistory[0], completedAt: null },
-    { ...job.reviewHistory[0], diagnostics: 'x'.repeat(4001) },
+    { ...job.reviewHistory[0], diagnostics: 123 },
   ]) assert.throws(() => store.save({ ...job, reviewHistory: [corrupt] }), /invalid review attempt history/);
   assert.throws(() => store.save({ ...job, reviewHistory: [job.reviewHistory[0], job.reviewHistory[0]] }), /invalid review attempt history/);
   delete job.reviewHistory;
@@ -284,14 +285,16 @@ test('persists every job field and reloads it through a fresh store', () => {
   store.save(job);
 
   const reloaded = createJobStore(directory).load(7);
-  assert.deepEqual(reloaded, job);
+  assert.deepEqual(reloaded, { ...job, executionJournal: { file: path.join(directory, 'issue-7.execution.ndjson') } });
   assert.equal(reloaded.issue.title, 'Fix totals');
   assert.equal(reloaded.branch, 'ralph/issue-7-fix-totals');
   assert.equal(reloaded.worktreePath, '/worktrees/issue-7');
   assert.deepEqual(reloaded.pr, { number: 31, url: 'https://github.com/example/finance/pull/31' });
   assert.deepEqual(reloaded.ci, { state: 'red', details: 'pytest failed' });
   assert.equal(reloaded.correctiveCycles, 1);
-  assert.deepEqual(reloaded.failures, [{ at: '2026-10-03T00:00:00.000Z', run: 1, phase: 'ci', message: 'pytest failed' }]);
+  assert.deepEqual(reloaded.failures.map(({ exception, ...failure }) => failure), [{ at: '2026-10-03T00:00:00.000Z', run: 1, phase: 'ci', message: 'pytest failed' }]);
+  assert.equal(reloaded.failures[0].exception.message, 'pytest failed');
+  assert.match(reloaded.failures[0].exception.stack, /autopilot-state.test.js/);
   assert.equal(reloaded.terminal, false);
   assert.deepEqual(createJobStore(directory).list().map(value => value.issue.number), [7]);
 });
@@ -327,7 +330,7 @@ test('persists red CI diagnostics and the single corrective cycle before correct
 
   const long = 'x'.repeat(50000);
   recordCiState(job, { state: 'red', diagnostics: long });
-  assert.ok(job.ci.diagnostics.length <= 16000);
+  assert.equal(job.ci.diagnostics, long);
   job.correction.status = 'bogus';
   assert.throws(() => store.save(job), /invalid corrective cycle state/);
 });
@@ -339,7 +342,7 @@ test('writes atomically and leaves no temporary files behind', () => {
   store.save(job);
   job.status = 'running';
   store.save(job);
-  assert.deepEqual(fs.readdirSync(directory), ['issue-7.json']);
+  assert.deepEqual(fs.readdirSync(directory), ['issue-7.execution.ndjson', 'issue-7.json']);
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'issue-7.json'), 'utf8')).status, 'running');
 });
 
@@ -378,7 +381,7 @@ test('rejects recovery records that omit a required field or corrupt diagnostics
   assert.throws(() => store.load(7), /invalid failure diagnostics/);
 });
 
-test('terminal state and bounded failure diagnostics survive reload', () => {
+test('terminal state and complete failure diagnostics survive reload', () => {
   const directory = temporaryDirectory();
   const store = createJobStore(directory);
   const job = newJob(store);
@@ -390,7 +393,9 @@ test('terminal state and bounded failure diagnostics survive reload', () => {
   assert.equal(reloaded.terminal, true);
   assert.equal(reloaded.terminalState, 'needs_planning');
   assert.equal(reloaded.failures.length, 20);
-  assert.ok(reloaded.failures.at(-1).message.length <= 4000);
+  assert.equal(reloaded.failures.at(-1).message, 'x'.repeat(10000));
+  const records = fs.readFileSync(reloaded.executionJournal.file, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(records.at(-1).changes.failures.at(-1).message, 'x'.repeat(10000));
 });
 
 test('per-issue lock blocks a live owner and reclaims a lock from a dead or rebooted owner', () => {

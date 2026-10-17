@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFile } = require('node:child_process');
+const { execFile } = require('./execution-log');
 const { pathToFileURL } = require('node:url');
 const { startTime, terminatePriorR1Worker } = require('./r1-process-claim');
 
@@ -114,7 +114,7 @@ async function preparePythonInternal(root, policy, options = {}) {
     const env = { TMPDIR: root, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', PYTHONNOUSERSITE: '1', PIP_CONFIG_FILE: '/dev/null', PIP_NO_INPUT: '1' };
     const guarded = execute === execFile;
     child = execute(guarded ? process.execPath : file, guarded ? [path.join(__dirname, 'python-preflight-runner.js'), file, ...args] : args, { cwd: root, env, shell: false, encoding: 'utf8',
-      detached: true, timeout: Math.max(1, deadline - Date.now()), maxBuffer: 16384, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+      detached: true, timeout: Math.max(1, deadline - Date.now()), maxBuffer: 16384, ...(guarded ? { executionPreviewBytes: 4096 } : {}), killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
       completed = true;
       clearInterval(timer);
       if (child?.pid) {

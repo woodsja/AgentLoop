@@ -428,6 +428,8 @@ async function run(argv, dependencies = {}) {
               store.save(job);
               handToHuman(job, 'review', failed.diagnostics, store.now);
             }
+            const reviewEntry = job.reviewHistory?.find(entry => entry.number === attempt.number);
+            if (reviewEntry) reviewEntry.rawResult = review ?? null;
             const pass = matchingPass(review, job.delivery.commit);
             const needsChanges = matchingNeedsChanges(review, job.delivery.commit);
             if (!job.terminal && pass) {
@@ -621,7 +623,7 @@ async function run(argv, dependencies = {}) {
         && typeof lastAttempt.verification.stdout === 'string'
         && typeof lastAttempt.verification.stderr === 'string') {
         // A complete failed verifier result is durable evidence too. This
-        // lets R1 report its fixed, sanitized verdict without copying output.
+        // retains the failed verifier evidence for the owner dashboard.
         recordVerification(job, result.task ? result.task.verification : task.verification, lastAttempt.verification);
       }
       // `passed` is terminal to the scheduler.  Persisting it before the

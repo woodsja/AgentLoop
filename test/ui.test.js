@@ -31,6 +31,8 @@ function markup(html) {
 }
 
 test('Dashboard sources compile and stay aligned', () => {
+  assert.ok(replayHtml.indexOf('<script src="replay.js"></script>') >= 0);
+  assert.ok(replayHtml.indexOf('<script src="replay.js"></script>') < replayHtml.indexOf('<script>'));
   assert.equal(style(publicHtml), style(replayHtml));
   assert.equal(markup(publicHtml), markup(replayHtml));
   assert.match(publicHtml, /<aside id="rail"/);
@@ -63,4 +65,22 @@ test('Dashboard sources compile and stay aligned', () => {
   }
 
   new vm.Script(replaySource, {filename: 'replay.js'});
+});
+
+
+test('raw execution records render complete inert text with paths and token values', () => {
+  const source = scripts(publicHtml).join('\n');
+  const start = source.indexOf('function executionRecordHtml(');
+  assert.ok(start >= 0, 'owner raw renderer exists');
+  const end = source.indexOf('function mountExecutionLog(', start);
+  const context = { TextDecoder, Uint8Array, atob, esc: value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+  const raw = 'token=owner-secret /tmp/private/file\n<script>alert(1)</script>\x1b[31m' + 'x'.repeat(20000);
+  const html = context.executionRecordHtml(JSON.stringify({event:'output',role:'critic',childId:'t-child',base64:Buffer.from(raw).toString('base64')}));
+  assert.ok(html.includes('token=owner-secret /tmp/private/file'));
+  assert.ok(html.includes('x'.repeat(20000)));
+  assert.ok(html.includes('&lt;script&gt;'));
+  assert.ok(!html.includes('<script>'));
+  assert.ok(html.includes('t-child'));
 });

@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const { execFile } = require('./execution-log');
 const { unattendedOptions } = require('./autopilot-subprocess');
 
 const MAX_SLUG_LENGTH = 48;

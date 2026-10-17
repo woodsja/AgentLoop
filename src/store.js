@@ -1,3 +1,7 @@
+const journal = require('./execution-journal');
+const { snapshotter } = require('./execution-preview');
+const { createDashboardProjection } = require('./dashboard-projection');
+const taskSnapshot = snapshotter();
 // Filesystem-backed task state and daemon configuration.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -180,6 +184,9 @@ function moveTask(id, fromStage, toStage) {
   moveFile(taskPath(id, fromStage), taskPath(id, toStage));
 }
 
+const taskProjection = createDashboardProjection(path.join(stateRoot, 'dashboard', 'tasks'), writeJsonAtomic);
+const resultProjection = createDashboardProjection(path.join(stateRoot, 'dashboard', 'results'), writeJsonAtomic);
+
 function readTask(id, stage) {
   return JSON.parse(fs.readFileSync(taskPath(id, stage), 'utf8'));
 }
@@ -190,7 +197,11 @@ function writeTask(task, stage) {
   }
 
   ensureDirs();
-  writeJsonAtomic(taskPath(task.id, stage), task);
+  const summary = taskSnapshot(task.id, task, record => appendExecution(task.id, record));
+  summary.executionJournal = { id: task.id, raw: `/api/log/${encodeURIComponent(task.id)}?raw=1` };
+  const file = taskPath(task.id, stage);
+  writeJsonAtomic(file, { ...task, executionJournal: summary.executionJournal });
+  taskProjection.save(file, { ...task, executionJournal: summary.executionJournal });
 }
 
 function taskRunPath(id) {
@@ -218,12 +229,26 @@ function readTaskRunState(id) {
   }
 }
 
-function listTasks(stage) {
+function listTasks(stage, { dashboard = false } = {}) {
   ensureDirs();
 
   return fs.readdirSync(stageDir(stage), { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => JSON.parse(fs.readFileSync(path.join(stageDir(stage), entry.name), 'utf8')));
+    .map((entry) => {
+      const file = path.join(stageDir(stage), entry.name);
+      return dashboard ? taskProjection.read(file) : JSON.parse(fs.readFileSync(file, 'utf8'));
+    });
+}
+
+// Warm disposable projections at startup without rewriting canonical state.
+function compactState() {
+  ensureDirs();
+  for (const stage of ['pending', 'running', 'done']) {
+    listTasks(stage, { dashboard: true });
+  }
+  for (const name of fs.readdirSync(paths.results).filter(name => name.endsWith('.json'))) {
+    resultProjection.read(path.join(paths.results, name));
+  }
 }
 
 function writeResult(result) {
@@ -232,7 +257,15 @@ function writeResult(result) {
   }
 
   ensureDirs();
-  writeJsonAtomic(path.join(paths.results, `${result.id}.json`), result);
+  const summary = taskSnapshot(`result:${result.id}`, result, record => appendExecution(result.id, { ...record, kind: 'result' }));
+  if (JSON.stringify(summary) !== JSON.stringify(result)) summary.executionJournal = { id: result.id, raw: `/api/log/${encodeURIComponent(result.id)}?raw=1` };
+  const file = path.join(paths.results, `${result.id}.json`);
+  writeJsonAtomic(file, { ...result, ...(summary.executionJournal ? { executionJournal: summary.executionJournal } : {}) });
+  resultProjection.save(file, result);
+}
+
+function readDashboardResult(id) {
+  return resultProjection.read(path.join(paths.results, `${id}.json`), { optional: true });
 }
 
 function logPath(id) {
@@ -261,6 +294,32 @@ function readLogLines(id, limit = 200) {
   } catch {
     return [];
   }
+}
+
+function executionPath(id, legacy = false) {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error('Invalid execution log id.');
+  return path.join(paths.logs, `${id}${legacy ? '' : '.execution'}.ndjson`);
+}
+
+function appendExecution(id, record) {
+  ensureDirs();
+  return journal.append(executionPath(id), { ...record, jobId: id, timestamp: new Date().toISOString() });
+}
+
+function readExecutionBytes(id, offset = 0, bytes = 65536, legacy = false) {
+  const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+  const length = Number.isSafeInteger(bytes) && bytes > 0 ? Math.min(bytes, 262144) : 65536;
+  let fd;
+  try {
+    fd = fs.openSync(executionPath(id, legacy), 'r');
+    const size = fs.fstatSync(fd).size;
+    const buffer = Buffer.alloc(Math.min(length, Math.max(0, size - start)));
+    const count = fs.readSync(fd, buffer, 0, buffer.length, start);
+    return { offset: start, nextOffset: start + count, hasMore: start + count < size, base64: buffer.subarray(0, count).toString('base64') };
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return { offset: start, nextOffset: start, hasMore: false, base64: '' };
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
 function appendEvent(type, dataObj = {}) {
@@ -471,7 +530,12 @@ module.exports = {
   readTaskRunState,
   listTasks,
   writeResult,
+  readDashboardResult,
+  compactState,
   appendLogLine,
+  appendExecution,
+  readExecutionBytes,
+  executionPath,
   readLogLines,
   appendEvent,
   appendMessage,

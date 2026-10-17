@@ -9,7 +9,7 @@ async function executeTask(projectPath, inputTask, options) {
 
   const task = normalizeTaskContract(inputTask);
   const worker = await options.runWorker(projectPath, task);
-  const result = await verifyTask(projectPath, task, options.verificationTimeoutMs);
+  const result = await verifyTask(projectPath, task, options.verificationTimeoutMs, options.recordExecution);
 
   return {
     task,

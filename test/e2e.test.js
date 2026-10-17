@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const { callTool } = require('../src/tools');
 const {
   startDaemon, stopDaemon, runScenario, prepareMockScenario, request, waitForJob, cleanWorkspace,
@@ -57,6 +58,30 @@ test('a Claude failure sends concrete corrections to a fresh Codex worker', asyn
   ]);
   assert.match(actual.invocations[2].prompt, /syntax error in add.js/);
   assert.equal(actual.checkpoints, 1);
+});
+
+test('eight large critic failures reach each subsequent worker exactly through daemon reloads', async () => {
+  const { projectDir, mockState } = prepareMockScenario('task-retry');
+  const fixes = Array.from({length:8}, (_, n) => `cycle ${n+1}: ` + 'exact diagnostic '.repeat(1400) + `TAIL ${n+1} token=owner /tmp/failure`);
+  const scenarioFile = path.join(mockState,'large-feedback.json');
+  fs.writeFileSync(scenarioFile, JSON.stringify({engine:{
+    worker:Array.from({length:9},(_, n)=>({write:'add.js',contents:`module.exports = ${n};\n`,loopResult:{status:'done',summary:'worker evidence '.repeat(1400)}})),
+    critic:[...fixes.map(value=>`FAIL - ${value}`),'PASS'],
+  }}));
+  fs.writeFileSync(path.join(path.dirname(projectDir),'current-scenario.json'),JSON.stringify({scenario:scenarioFile,state:mockState}));
+  const submitted = await request('POST','/api/loop',{project:'task-retry',maxCycles:9,taskRetries:10,autoCommit:false,workerEngine:'codex',criticEngine:'claude'},daemon.port);
+  assert.equal(submitted.statusCode,201);
+  const waited = await waitForJob(submitted.body.id,45000,daemon.port);
+  assert.equal(waited.done,true);
+  assert.equal(waited.job.status,'passed');
+  const invocations = fs.readFileSync(path.join(mockState,'invocations.ndjson'),'utf8').trim().split('\n').map(JSON.parse);
+  const workers = invocations.filter(row=>row.role==='worker');
+  assert.equal(workers.length,9);
+  for(let n=1;n<workers.length;n++) {
+    assert.equal(workers[n].prompt.split('--- FIXES START ---\n')[1].split('\n--- FIXES END ---')[0],fixes[n-1]);
+  }
+  const canonical = JSON.parse(fs.readFileSync(path.join(daemon.stateDir,'tasks/done',`${submitted.body.id}.json`)));
+  assert.deepEqual(canonical.cycles.slice(0,8).map(cycle=>cycle.fixes),fixes);
 });
 
 test('legacy engine-only loops retain the same worker and critic engine', async () => {

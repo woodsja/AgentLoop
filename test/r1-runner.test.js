@@ -76,8 +76,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
   try {
     ready([7]);
     await launch();
-    // The real daemon exposes useful R1 progress before completion, but this
-    // public transcript must not mirror a worker's private callback text.
+    // The original line endpoint keeps short navigation labels. Complete raw
+    // output is covered through the owner journal in r1-mixed-e2e.test.js.
     const [inFlight] = await until(() => { const tasks = tasksFor(7); return tasks[0] && tasks[0].phase === 'implementation' && tasks; }, '#7 implementation');
     const progress = await get(port, `/api/log/${inFlight.id}?lines=200`);
     assert.deepEqual(Object.keys(progress), ['lines'], 'the established log endpoint response shape is preserved');
