@@ -51,4 +51,4 @@ Registration, readiness and activation remain separate operational facts. Failin
 
 ## Acceptance rule for future changes
 
-If a proposed change hides data that AgentLoop captured from its owner, or adds a mandatory per-project VM-internal security boundary while failing to address physical-host exposure, it conflicts with this accepted decision. Correctness, safety of the physical host, operator visibility and recoverability should determine implementation and review criteria.
+If a proposed change hides captured job data from its owner, makes a VM-internal filesystem sandbox or isolation layer a hard gate for project execution, or overlooks an actual path to physical-host exposure, it conflicts with this accepted decision. Correctness, safety of the physical host, operator visibility and recoverability should determine implementation and review criteria.
