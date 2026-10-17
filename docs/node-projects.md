@@ -7,7 +7,7 @@ An owner-authorized disposable repository worktree can commit this entire
 {"runtime":"node","verification":"check","lockfile":"package-lock.json"}
 ```
 
-`runtime` is currently `node`; Python contracts follow in #85. `verification`
+`runtime` selects `node` or [`python`](python-preflight.md). For Node, `verification`
 names a nonempty npm script in `package.json` (for example `check`, `test`, or
 `check:all`). It becomes the deterministic `npm run check` entry point after
 implementation, including corrective attempts. Only these three contract keys

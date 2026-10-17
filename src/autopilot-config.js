@@ -35,7 +35,7 @@ function validateProject(projectName, project) {
     throw new TypeError(`prepareVenv for project ${projectName} must be a boolean`);
   }
 
-  if (Object.hasOwn(project, 'runtime') && project.runtime !== 'node') throw new TypeError('runtime must be node; Python contracts follow in #85');
+  if (Object.hasOwn(project, 'runtime') && !['node', 'python'].includes(project.runtime)) throw new TypeError('runtime must be node or python');
 
   if (Object.hasOwn(project, 'pythonEnvironment')) require('./python-preflight').validatePythonPolicy(project.pythonEnvironment);
 
