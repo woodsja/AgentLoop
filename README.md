@@ -6,6 +6,10 @@ Self-improving fresh-context loops for coding work you can watch.
 
 [Watch the demo](https://youtu.be/4zRdMMzh3C8) | [Try the replay](https://agentloop-replay.vercel.app) - a real recorded run in the live dashboard
 
+## Ralph operator trust model
+
+For this repository's Woods-controlled autonomous Ralph deployment, the [accepted owner-visibility and disposable-VM decision](docs/decisions/0001-agentloop-trust-boundary.md) governs work on R1, logging, onboarding, and host boundaries. Complete captured transcripts belong to the owner; protect the physical host rather than disposable VM files. **This is an architecture requirement, not a claim that the live daemon already implements it** (see [#90](https://github.com/woodsja/AgentLoop/issues/90)).
+
 ## What it is
 
 Plan a goal in Claude or ChatGPT, then let it rip. AgentLoop is a local orchestration daemon for coding agents: each cycle starts a fresh worker, work carries forward in project files, a fresh critic enforces your rubric, and the whole run is watchable on a local dashboard.
