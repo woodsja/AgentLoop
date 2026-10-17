@@ -29,7 +29,7 @@ async function runCase(testCase) {
  const scenarioPath=path.join(root,'scenario.json');const mockState=path.join(root,'mock-state');
  fs.writeFileSync(scenarioPath,JSON.stringify({engine:{worker:[{write:'answer',contents:'wrong',touchState:false},{write:'answer',contents:'42',touchState:false}],critic:testCase==='critic-reject' ? ['FAIL - not acceptable'] : ['FAIL - answer was wrong','PASS']}}));
  const project={enabled:true,repo:'fixture/none',checkout,worktreeRoot,baseBranch:'main',worker:'codex',reviewPolicy:'always',reviewModel:'opus',implementationStrategy:'worker-critic-loop',autoMerge:false,
-  readyLabel:'ready-for-agent',humanLabel:'ready-for-human',maxAttempts:2,stateDir:path.join(root,'r1-jobs'),verification:`node -e "if(require('fs').readFileSync('answer','utf8') !== '42')process.exit(1);require('fs').writeFileSync('${path.join(root, 'verified-at')}',new Date().toISOString())"`};
+  readyLabel:'ready-for-agent',humanLabel:'ready-for-human',maxAttempts:2,stateDir:path.join(root,'r1-jobs'),verification:`node -e "if(require('fs').readFileSync('answer','utf8') !== '42')process.exit(1);require('fs').writeFileSync('${path.join(worktreeRoot, 'issue-5', 'verified-at')}',new Date().toISOString())"`};
  const mock=path.resolve(__dirname,'mock-engine.js');
  const config=path.join(root,'config.json');const queue=path.join(root,'queue');const fixture=path.join(root,'fixture.json');
  fs.writeFileSync(config,JSON.stringify({dashboardPort:0,maxConcurrent:1,defaultEngine:'codex',models:{codex:'gpt-6.1-sol',claude:'opus'},
@@ -64,7 +64,7 @@ async function runCase(testCase) {
   assert.ok(invocations[1].argv.includes('dontAsk'));
   assert.ok(invocations[1].argv.includes('--restricted'));
   assert.ok(invocations[1].argv.includes('Read,Glob,Grep'));
-  const verificationTime=Date.parse(fs.readFileSync(path.join(root,'verified-at'),'utf8'));
+  const verificationTime=Date.parse(fs.readFileSync(path.join(worktreeRoot,'issue-5','verified-at'),'utf8'));
   const finalCriticTime=Date.parse(invocations.at(-1).ts);
   assert.ok(verificationTime>=finalCriticTime,'deterministic verification must occur only after final critic PASS');
   const deliveries=lines(path.join(root,'delivery'));
