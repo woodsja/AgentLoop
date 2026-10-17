@@ -75,10 +75,14 @@ for (const mode of ['install_failed', 'lockfile_changed', 'timeout', 'cancelled'
 test('ordinary system node/npm resolve without a private tool directory or bubblewrap', async t => {
   const root = fixture(t), priorPath = process.env.PATH;
   t.after(() => { process.env.PATH = priorPath; });
-  process.env.PATH = '/usr/bin:/bin';
   const { findOnPath } = require('../src/engines');
-  assert.equal(findOnPath('npm'), '/usr/bin/npm');
-  assert.equal((await prepareRepositoryEnvironment(root, { runtime: 'node' })).status, 'ready');
+  assert.equal(findOnPath('npm'), execFileSync('sh', ['-c', 'command -v npm'], { encoding: 'utf8' }).trim());
+  const commands = [];
+  const result = await prepareRepositoryEnvironment(root, { runtime: 'node' }, {
+    recordExecution: (event, details) => { if (event === 'command') commands.push(details.command); },
+  });
+  assert.equal(result.status, 'ready');
+  assert.deepEqual(new Set(commands), new Set(['git', process.execPath, findOnPath('node'), findOnPath('npm')]));
   process.env.PATH = path.join(root, 'missing-tools');
   await assert.rejects(prepareRepositoryEnvironment(root, { runtime: 'node' }), e => e.outcome.reason === 'runtime_missing');
 });
@@ -110,7 +114,7 @@ for (const mode of ['red-tests', 'missing-lock', 'restart-dead', 'restart-ambigu
     const checkout = fixture(t, "console.log('full baseline/verification stdout\\n'+'x'.repeat(25000));console.error('exact test failure');process.exit(7)");
     if (mode === 'missing-lock') {
       fs.unlinkSync(path.join(checkout, 'package-lock.json'));
-      execFileSync('git', ['-C', checkout, 'commit', '-qam', 'remove lock']);
+      execFileSync('git', ['-C', checkout, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', 'remove lock']);
     }
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-node-state-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
