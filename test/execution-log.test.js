@@ -262,7 +262,7 @@ test('CI corrective prompt receives every diagnostic byte, including the tail, a
   assert.ok(task.goal.includes(`CI failure diagnostics:\n${diagnostics}\n\n`));
 });
 
-test('huge canonical output stays out of repeated /api/state polls after daemon restart', async () => {
+test('daemon recovers with corrupt historical files while huge output stays out of state polls', async () => {
   const http = require('node:http');
   const pollRoot = fs.mkdtempSync(path.join(root,'poll-'));
   const configFile = path.join(pollRoot,'config.json');
@@ -272,8 +272,12 @@ test('huge canonical output stays out of repeated /api/state polls after daemon 
     const store=require(${JSON.stringify(require.resolve('../src/store'))});
     const id='t-api-huge',raw='owner token=raw /tmp/path\\n'+'X'.repeat(4*1024*1024)+'END';
     if(!fs.existsSync(path.join(store.paths.done,id+'.json'))) {
-      store.writeTask({id,type:'task',status:'done',finishedAt:new Date().toISOString(),r1:{verification:{stdout:raw}}},'done');
+      store.writeTask({id,type:'task',status:'done',finishedAt:new Date().toISOString(),prompt:raw,goal:raw,description:raw,acceptance:[raw],r1:{verification:{stdout:raw}}},'done');
       store.writeResult({id,status:'done',summary:raw});
+      store.writeTask({id:'t-recover-context',type:'task',status:'running',prompt:raw},'running');
+      fs.writeFileSync(path.join(store.paths.done,'t-torn-history.json'),'{torn');
+      fs.writeFileSync(path.join(store.paths.results,'t-empty-history.json'),'');
+      fs.rmSync(path.join(store.paths.state,'dashboard'),{recursive:true,force:true});
     }
     store.compactState();
     const read=fs.readFileSync;
@@ -286,7 +290,8 @@ test('huge canonical output stays out of repeated /api/state polls after daemon 
   for(let restart=0;restart<2;restart++) {
     const child=spawn(process.execPath,['-e',script],{env:{...process.env,AGENTLOOP_STATE_DIR:pollRoot,AGENTLOOP_CONFIG_PATH:configFile},stdio:['ignore','pipe','pipe']});
     const closed=new Promise(resolve=>child.once('close',resolve));
-    let port;
+    let port, errors='';
+    child.stderr.on('data',chunk=>errors+=chunk);
     try {
       await new Promise((resolve,reject)=>{
         child.once('error',reject);
@@ -302,8 +307,52 @@ test('huge canonical output stays out of repeated /api/state polls after daemon 
         assert.equal(response.status,200,response.body);
         assert.ok(response.body.length<100000);
         assert.ok(JSON.parse(response.body).tasks.recent.find(t=>t.id==='t-api-huge').summary.length<4200);
+        assert.equal(JSON.parse(response.body).tasks.recent.find(t=>t.id==='t-torn-history').status,'unreadable');
       }
+      assert.match(errors,/Cannot project canonical state.*t-torn-history/);
+      assert.match(errors,/Cannot project canonical state.*t-empty-history/);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(pollRoot,'tasks/done/t-recover-context.json'))).status,'failed');
+      assert.equal(fs.readFileSync(path.join(pollRoot,'tasks/done/t-torn-history.json'),'utf8'),'{torn');
+      assert.equal(fs.readFileSync(path.join(pollRoot,'results/t-empty-history.json'),'utf8'),'');
     } finally {child.kill('SIGTERM');await closed;}
   }
   assert.equal(JSON.parse(fs.readFileSync(path.join(pollRoot,'tasks/done/t-api-huge.json'))).r1.verification.stdout.length,('owner token=raw /tmp/path\n'+'X'.repeat(4*1024*1024)+'END').length);
+});
+
+test('projection write failures preserve canonical checkpoints and cache reads; invalid cache shapes repair', () => {
+  const { createDashboardProjection } = require('../src/dashboard-projection');
+  const directory=path.join(root,'fault-projections');
+  const file=path.join(root,'canonical-cache.json');
+  const value={id:'canonical-cache',stdout:'owner bytes '.repeat(10000)};
+  fs.writeFileSync(file,JSON.stringify(value));
+  const messages=[],previous=console.error;
+  console.error=message=>messages.push(message);
+  try {
+    const rename=fs.renameSync;
+    fs.renameSync=(from,to)=>{if(to.includes(`${path.sep}dashboard${path.sep}`)) throw new Error('projection rename failed');return rename(from,to);};
+    try {
+      store.writeTask({id:'t-cache-write',type:'task',stdout:value.stdout},'pending');
+      store.writeResult({id:'t-cache-write',summary:value.stdout});
+    } finally {fs.renameSync=rename;}
+    assert.equal(store.readTask('t-cache-write','pending').stdout,value.stdout);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(store.paths.results,'t-cache-write.json'))).summary,value.stdout);
+    assert.ok(messages.some(message=>message.includes('projection rename failed')));
+    const cache=createDashboardProjection(directory,()=>{throw new Error('projection disk unavailable');});
+    assert.ok(cache.save(file,value).stdout.length<4200);
+    const read=fs.readFileSync;
+    fs.readFileSync=(candidate,...args)=>{assert.notEqual(candidate,file);return read(candidate,...args);};
+    try {assert.ok(cache.read(file).stdout.length<4200);} finally {fs.readFileSync=read;}
+    assert.ok(messages.some(message=>message.includes('projection disk unavailable')));
+    assert.deepEqual(JSON.parse(fs.readFileSync(file)),value);
+    const write=(candidate,entry)=>{fs.mkdirSync(path.dirname(candidate),{recursive:true});fs.writeFileSync(candidate,JSON.stringify(entry));};
+    const reopen=()=>createDashboardProjection(directory,write);
+    reopen().read(file);
+    const sidecar=path.join(directory,path.basename(file));
+    const entry=JSON.parse(fs.readFileSync(sidecar));
+    for(const damaged of [null,[],{source:entry.source,value:null},{source:entry.source,value:[]}]) {
+      fs.writeFileSync(sidecar,JSON.stringify(damaged));
+      assert.ok(reopen().read(file).stdout.length<4200);
+      assert.ok(JSON.parse(fs.readFileSync(sidecar)).value.stdout.length<4200);
+    }
+  } finally {console.error=previous;}
 });

@@ -1821,7 +1821,7 @@ function fillSlots() {
   const slots = Math.max(0, maxConcurrent - runningCount);
   if (!slots) return;
 
-  const pending = sortPending(store.listTasks('pending', { dashboard: true }));
+  const pending = sortPending(store.listTasks('pending', { dashboard: true }).filter(task => !task.unreadable));
   for (const selected of pending.slice(0, slots)) {
     const task = store.readTask(selected.id, 'pending');
     // An orphan child never becomes an ordinary unprivileged loop simply
@@ -3122,7 +3122,8 @@ function start(options = {}) {
     return;
   }
 
-  store.compactState();
+  try { store.compactState(); }
+  catch (error) { console.error(`Dashboard projection warm-up failed: ${error.stack || error.message}`); }
   recoverBridgeHeartbeat();
   recoverRunningTasks();
 

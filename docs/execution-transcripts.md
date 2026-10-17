@@ -51,6 +51,10 @@ projection records its canonical file's identity, size and timestamps. Ordinary
 output. Missing or stale projections are rebuilt from canonical state once;
 startup also warms them. A crash between writes leaves the canonical state
 intact. Deleting projections does not delete working state or journal evidence.
+Projection failures are reported without failing canonical checkpoints or
+startup. A bounded memory cache covers unavailable projection storage. Damaged
+canonical navigation entries appear as unreadable and are never admitted as
+fresh work; their original files remain untouched for owner inspection.
 Historical text already discarded by the previous implementation cannot be
 reconstructed. This change needs a separate deployment before live jobs produce
 these records; a commit or merge does not verify deployment.

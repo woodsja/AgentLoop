@@ -221,9 +221,9 @@ Skipping review with `"reviewPolicy": "none"` (also the default when omitted) re
 
 The job's `review` record holds the latest completed review of the delivered head: reviewer, verdict (`PASS` or `NEEDS_CHANGES`), exact commit SHA, the `reviewPolicy` that requested it, structured `findings` (`summary`, `file`, `line`, `severity`; empty for `PASS`), and `attempt` metadata (`number`, `startedAt`, `completedAt`). `reviewAttempts` counts every reviewer invocation, including failed ones. Automatic review is limited to two invocations per job, including interrupted ones; a persisted PASS for the exact delivered SHA is reused on restart. A new delivered commit clears the record but preserves the attempt count. Older PASS-only records still load.
 
-The job's `verification` record retains the actual Ralph verification command, pass flag, exit code, timeout status, and the last 4000 characters of each test-output stream. It is checkpointed before delivery and bound to the delivered commit, so it survives restarts. The independent reviewer receives this deterministic evidence alongside CI results. Missing, failed, timed-out, or different-SHA verification blocks both a fresh review and reuse of a persisted PASS. A corrected commit requires fresh verification evidence.
+The job's `verification` record retains the actual Ralph verification command, pass flag, exit code, timeout status, and complete captured stdout and stderr. It is checkpointed before delivery and bound to the delivered commit, so it survives restarts. The independent reviewer receives this deterministic evidence alongside CI results. Missing, failed, timed-out, or different-SHA verification blocks both a fresh review and reuse of a persisted PASS. A corrected commit requires fresh verification evidence.
 
-The bounded `reviewHistory` preserves each invocation's attempt number, reviewer, model, policy, exact SHA, start/completion timestamps, status, verdict/findings, and sanitized failure diagnostics. Identity is saved before invocation; statuses are `running`, `completed`, `failed`, `timed_out`, `invalid_verdict`, or `interrupted`. Raw reviewer errors, output, stacks, and credentials are not saved as failure diagnostics. On restart, an unfinished review is recorded as interrupted and handed to a human without another invocation; a checkpointed failure is also reconciled without replay. History survives delivery of a corrected SHA, while only a valid exact-SHA PASS can authorize merge readiness. Injected adapters may declare their `reviewer` and `model` identity properties; otherwise their identity is recorded as `independent-review-adapter` with the configured model. Older jobs without history still load.
+The bounded `reviewHistory` preserves each invocation's attempt number, reviewer, model, policy, exact SHA, start/completion timestamps, status, verdict/findings, and verbatim failure diagnostics. Identity is saved before invocation; statuses are `running`, `completed`, `failed`, `timed_out`, `invalid_verdict`, or `interrupted`. Captured reviewer errors, output and stacks remain available verbatim to the owner. On restart, an unfinished review is recorded as interrupted and handed to a human without another invocation; a checkpointed failure is also reconciled without replay. History survives delivery of a corrected SHA, while only a valid exact-SHA PASS can authorize merge readiness. Injected adapters may declare their `reviewer` and `model` identity properties; otherwise their identity is recorded as `independent-review-adapter` with the configured model. Older jobs without history still load.
 
 ## AgentLoop daemon (systemd user service)
 
@@ -297,26 +297,30 @@ project registry before submission. Requests cannot register paths themselves.
 The existing dispatcher runs one R1 job at a time, retains the original per-issue
 lock, retry/correction limits and review history, and checkpoints phases in the
 existing durable queue. `get_r1_job_status({id})`, `get_r1_job_result({id})`, or
-`GET /api/r1/jobs/:id` retrieve persisted phases and bounded verification/review
-previews with complete evidence in the execution journal, including after daemon
+`GET /api/r1/jobs/:id` retrieve persisted phases and complete verification/review
+evidence, including after daemon
 recovery. `passed` requires verification and an
 independent PASS for the exact delivered SHA and means ready for human merge.
 Failures return `blocked`; interrupted independent reviews are preserved and handed
 to a human without replaying the reviewer. Saved exact-SHA approval is reused.
 Captured stdout/stderr bytes remain unredacted in `state/logs/<id>.execution.ndjson`
 (base64 chunks), available through `/api/log/<id>?raw=1` byte paging and
-`/api/log/<id>?download=1`. Task, result and R1 checkpoints keep diagnostic
-previews of at most 4,096 characters plus a journal navigation note per large
-field, with a shared 65,536 character budget for large diagnostic fields and
-journal pointers. Changed evidence fields are
-journaled before replacing a checkpoint; unchanged output is not recopied on
-phase-only saves. Standalone per-issue checkpoints also name their adjacent
-`issue-N.execution.ndjson` evidence journal.
+`/api/log/<id>?download=1`. Canonical task, result and R1 job checkpoints keep
+full execution context, including critic fixes and CI diagnostic tails. Only
+separate disposable `state/dashboard/{tasks,results}` projections use bounded
+previews for `/api/state` and admission metadata. Missing, stale or damaged
+projections rebuild once from canonical state; projection write failures use a
+bounded memory cache and never fail a canonical checkpoint. Damaged canonical
+navigation entries are reported as unreadable, left untouched and never admitted
+as fresh tasks. Warm-up cannot prevent startup or running-job recovery.
+Changed top-level evidence fields are journaled before replacing a checkpoint;
+a changed nested R1 job may include its full evidence again. Standalone per-issue
+checkpoints also name their adjacent `issue-N.execution.ndjson` evidence journal.
 
 Journal writers reuse open descriptors (up to 64 active writers), write bytes
 immediately to the kernel, and schedule asynchronous disk synchronization every
 100 ms while active. Process exit, exception and recovery records flush
-synchronously; per-issue checkpoints flush evidence before saving previews.
+synchronously; per-issue checkpoints flush evidence before saving full checkpoints.
 Daemon crashes retain kernel-written bytes. A machine power loss may lose the
 current unsynchronized window; terminal records have already crossed the disk
 barrier. Restart separates torn records and marks interrupted children with

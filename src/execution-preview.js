@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 // Navigation only. Never use this preview as canonical execution state.
 // Hashes, rather than previous output copies, bound the journal diff cache.
-const diagnosticFields = new Set(['r1', 'stdout', 'stderr', 'output', 'summary', 'diagnostics', 'message', 'stack', 'exception', 'verification', 'rawResult', 'findings', 'failure', 'lastError', 'result', 'details', 'lastActivity', 'reason', 'error', 'fixes', 'workerSummary', 'criticSummary', 'checkpointError']);
+const diagnosticFields = new Set(['r1', 'stdout', 'stderr', 'output', 'summary', 'diagnostics', 'message', 'stack', 'exception', 'verification', 'rawResult', 'findings', 'failure', 'lastError', 'result', 'details', 'lastActivity', 'reason', 'error', 'fixes', 'workerSummary', 'criticSummary', 'checkpointError', 'goal', 'prompt', 'description', 'acceptance', 'title']);
 function preview(value, budget = { remaining: 65536 }, bounded = false) {
   if (typeof value === 'string') {
     if (!bounded || value.length <= 256) return value;
