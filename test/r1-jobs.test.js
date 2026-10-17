@@ -140,3 +140,41 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   assert.throws(() => jobs.submit({ project: 'demo', issue: 7 }), /explicitly authorized/);
   assert.equal(queued.length, 1);
 });
+
+test('public R1 verification summaries retain bounded failure facts without exposing untrusted logs', () => {
+  const { verificationFailureSummary } = require('../src/r1-transcript-summary');
+  const raw = [
+    'credential=secret-should-never-be-logged reasoning: hidden private thinking',
+    '/home/privateuser/project/private/credentials.txt',
+    'ℹ tests 28', 'ℹ pass 27', 'ℹ fail 1',
+    'test at test/project-onboarding.test.js:60:1',
+    "code: 'PROJECT_PREFLIGHT_BLOCKED'",
+    "reason: 'runtime_missing'",
+  ].join('\n');
+  const summary = verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: raw, stderr: '' });
+  assert.match(summary, /deterministic verification failed.*exit nonzero/);
+  assert.match(summary, /reported tests: 1 failed/);
+  assert.ok(!summary.includes('test/project-onboarding.test.js'), 'untrusted test paths stay out of public transcript');
+  assert.match(summary, /runtime_missing/);
+  const exfil = 'test/ghp_' + 'A'.repeat(36) + '.test.js';
+  const forged = verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: `test at ${exfil}:1:1\nreason: 'arbitrary'\nℹ pass 99\nℹ fail 1`, stderr: '' });
+  assert.ok(!forged.includes(exfil), 'fake test filenames never get printed');
+  assert.ok(!forged.includes('arbitrary'), 'unapproved preflight values never get printed');
+  assert.ok(!forged.includes('preflight:'), 'no preflight hint without the known code');
+  assert.ok(summary.length <= 400);
+  for (const forbidden of ['secret-should-never-be-logged', '/home/privateuser', 'private thinking']) {
+    assert.ok(!summary.includes(forbidden), `${forbidden} leaked into public transcript`);
+  }
+  assert.equal(verificationFailureSummary({ passed: false, timedOut: true, exitCode: null, stdout: 'Bearer secret', stderr: '' }),
+    'deterministic verification failed (timed out).');
+  assert.equal(verificationFailureSummary({ passed: false, timedOut: false, exitCode: 1, stdout: 'token=secret', stderr: '' }),
+    'deterministic verification failed (exit nonzero).');
+  const chosenNumbers = verificationFailureSummary({ passed: false, timedOut: false, exitCode: 173,
+    stdout: 'ℹ pass 482913\nℹ fail 771204', stderr: '' });
+  assert.equal(chosenNumbers, 'deterministic verification failed (exit nonzero; reported tests: 10+ failed).');
+  for (const forbidden of ['482913', '771204', '173']) assert.ok(!chosenNumbers.includes(forbidden));
+  assert.equal(chosenNumbers, verificationFailureSummary({ passed: false, timedOut: false, exitCode: 251,
+    stdout: 'ℹ pass 100000\nℹ fail 900001', stderr: '' }), 'different controlled numbers in the same category yield the same public message');
+  assert.equal(verificationFailureSummary({ passed: false, timedOut: false, exitCode: null, stdout: '', stderr: '' }),
+    'deterministic verification failed (terminated by signal).');
+});

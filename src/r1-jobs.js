@@ -13,6 +13,7 @@ const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
 const { createR1LoopImplementation } = require('./r1-loop-implementation');
 const { captureFailedR1Job, bindR1Parent } = require('./r1-failed-work');
+const { verificationFailureSummary } = require('./r1-transcript-summary');
 
 function safeText(value, limit = 1000) {
   return String(value ?? '').replace(/\b(?:Bearer\s+\S+|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)/gi, '[redacted]')
@@ -117,7 +118,7 @@ function createR1Jobs(store, options = {}) {
       // run counter is already durable at that point, so it avoids emitting
       // the same verdict again when delivery later fills in the commit.
       logTransition(task, `verification:${job.runs}:${verdict}`,
-        `deterministic verification ${verdict}.`);
+        job.verification.passed ? 'deterministic verification passed.' : verificationFailureSummary(job.verification));
     }
   }
 
