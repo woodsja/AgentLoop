@@ -39,8 +39,8 @@ function isVerificationEvidence(value) {
     && (value.commit === null || (typeof value.commit === 'string' && value.commit.length > 0))
     && typeof value.passed === 'boolean' && typeof value.timedOut === 'boolean'
     && (value.exitCode === null || Number.isSafeInteger(value.exitCode))
-    && typeof value.stdout === 'string' && value.stdout.length <= MAX_DIAGNOSTIC_LENGTH
-    && typeof value.stderr === 'string' && value.stderr.length <= MAX_DIAGNOSTIC_LENGTH;
+    && typeof value.stdout === 'string'
+    && typeof value.stderr === 'string';
 }
 
 function hasPassingVerification(value, commit) {
@@ -54,9 +54,9 @@ function validateIssueNumber(issueNumber) {
   }
 }
 
-function truncate(text, limit = MAX_DIAGNOSTIC_LENGTH) {
+function diagnosticText(text) {
   const value = String(text ?? '');
-  return value.length <= limit ? value : `…${value.slice(value.length - limit + 1)}`;
+  return value;
 }
 
 function resolveStateDir(projectName, project = {}, stateRoot = DEFAULT_STATE_ROOT) {
@@ -186,20 +186,17 @@ function validateJob(job, filePath) {
     && (value.ci.prNumber === undefined || Number.isSafeInteger(value.ci.prNumber))
     && (value.ci.headCommit === undefined || typeof value.ci.headCommit === 'string')
     && (value.ci.runs === undefined || Array.isArray(value.ci.runs) && value.ci.runs.every(hasValidCiRun))
-    && (value.ci.diagnostics === undefined || (typeof value.ci.diagnostics === 'string'
-      && value.ci.diagnostics.length <= MAX_CI_DIAGNOSTIC_LENGTH)));
+    && (value.ci.diagnostics === undefined || (typeof value.ci.diagnostics === 'string')));
   const hasValidCorrection = value => value.correction === undefined || value.correction === null
     || (isPlainObject(value.correction)
       && value.correction.cycle === 1
       && CORRECTION_STATUSES.has(value.correction.status)
       && typeof value.correction.redCommit === 'string' && value.correction.redCommit.length > 0
       && typeof value.correction.diagnostics === 'string' && value.correction.diagnostics.length > 0
-      && value.correction.diagnostics.length <= MAX_CI_DIAGNOSTIC_LENGTH
       && (value.correction.commit === null || typeof value.correction.commit === 'string'));
   const nullableString = text => text === null || typeof text === 'string';
   const hasValidFinding = finding => isPlainObject(finding)
     && typeof finding.summary === 'string' && finding.summary.length > 0
-    && finding.summary.length <= MAX_DIAGNOSTIC_LENGTH
     && nullableString(finding.file) && nullableString(finding.severity)
     && (finding.line === null || (Number.isSafeInteger(finding.line) && finding.line > 0));
   const hasValidReviewAttempt = attempt => isPlainObject(attempt)
@@ -231,8 +228,7 @@ function validateJob(job, filePath) {
               ? REVIEW_VERDICTS.has(entry.verdict) && (entry.verdict === 'PASS') === (entry.findings.length === 0)
                 && entry.diagnostics === null
               : entry.verdict === null && entry.findings.length === 0
-                && typeof entry.diagnostics === 'string' && entry.diagnostics.length > 0
-                && entry.diagnostics.length <= MAX_DIAGNOSTIC_LENGTH))));
+                && typeof entry.diagnostics === 'string' && entry.diagnostics.length > 0))));
   const hasValidReview = value => value.review === undefined || value.review === null
     || (isPlainObject(value.review)
       && typeof value.review.reviewer === 'string' && value.review.reviewer.length > 0
@@ -251,7 +247,6 @@ function validateJob(job, filePath) {
       && typeof value.reviewCorrection.reviewCommit === 'string' && value.reviewCorrection.reviewCommit.length > 0
       && typeof value.reviewCorrection.reviewer === 'string' && value.reviewCorrection.reviewer.length > 0
       && typeof value.reviewCorrection.findings === 'string' && value.reviewCorrection.findings.length > 0
-      && value.reviewCorrection.findings.length <= MAX_DIAGNOSTIC_LENGTH
       && (value.reviewCorrection.commit === null || typeof value.reviewCorrection.commit === 'string'));
   const hasValidReviewSkip = value => value.reviewSkip === undefined || value.reviewSkip === null
     || (isPlainObject(value.reviewSkip) && value.reviewSkip.policy === 'none'
@@ -272,8 +267,7 @@ function validateJob(job, filePath) {
     && typeof value.at === 'string' && value.at.length > 0
     && Number.isSafeInteger(value.run) && value.run >= 0
     && typeof value.phase === 'string' && value.phase.length > 0
-    && typeof value.message === 'string' && value.message.length > 0
-    && value.message.length <= MAX_DIAGNOSTIC_LENGTH;
+    && typeof value.message === 'string' && value.message.length > 0;
   const problem = !isPlainObject(job) ? 'not an object'
     : job.schemaVersion !== SCHEMA_VERSION ? `unsupported schemaVersion ${String(job.schemaVersion)}`
       : typeof job.project !== 'string' || !job.project ? 'missing project identity'
@@ -314,7 +308,9 @@ function validateJob(job, filePath) {
 
 function recordFailure(job, phase, error, now = () => new Date().toISOString()) {
   const message = error instanceof Error ? error.message : String(error);
-  job.failures.push({ at: now(), run: job.runs, phase, message: truncate(message) });
+  job.failures.push({ at: now(), run: job.runs, phase, message: diagnosticText(message),
+    ...(error instanceof Error ? { exception: { name: error.name, message: error.message, stack: error.stack ?? null, code: error.code ?? null } } : {}),
+  });
   if (job.failures.length > MAX_FAILURES) job.failures.splice(0, job.failures.length - MAX_FAILURES);
   return job;
 }
@@ -374,8 +370,9 @@ function recordVerification(job, command, verification) {
   const evidence = {
     command, commit: null, passed: verification.passed, exitCode: verification.exitCode,
     timedOut: verification.timedOut,
-    stdout: typeof verification.stdout === 'string' ? truncate(verification.stdout) : undefined,
-    stderr: typeof verification.stderr === 'string' ? truncate(verification.stderr) : undefined,
+    signal: verification.signal ?? null, exception: verification.exception ?? null,
+    stdout: typeof verification.stdout === 'string' ? verification.stdout : undefined,
+    stderr: typeof verification.stderr === 'string' ? verification.stderr : undefined,
   };
   if (!isVerificationEvidence(evidence)) throw new TypeError('Deterministic verification requires the actual command, exit code, timeout status, and test output');
   job.verification = evidence;
@@ -404,11 +401,11 @@ function recordCiState(job, observation, details = null) {
   }
   job.ci = {
     state: source.state,
-    details: source.details == null ? null : truncate(source.details),
+    details: source.details == null ? null : diagnosticText(source.details),
     ...(source.prNumber === undefined ? {} : { prNumber: source.prNumber }),
     ...(source.headCommit === undefined ? {} : { headCommit: source.headCommit }),
     ...(source.runs === undefined ? {} : { runs: source.runs }),
-    ...(source.diagnostics === undefined ? {} : { diagnostics: truncate(source.diagnostics, MAX_CI_DIAGNOSTIC_LENGTH) }),
+    ...(source.diagnostics === undefined ? {} : { diagnostics: diagnosticText(source.diagnostics) }),
   };
   return job;
 }
@@ -429,7 +426,7 @@ function normalizeReviewFindings(findings) {
       throw new TypeError('Each review finding requires a summary and optional file, positive line, and severity');
     }
     return {
-      summary: truncate(item.summary.trim()),
+      summary: diagnosticText(item.summary.trim()),
       file: item.file || null,
       line: item.line ?? null,
       severity: item.severity || null,
@@ -478,14 +475,12 @@ function failReviewAttempt(job, number, error, now = () => new Date().toISOStrin
   status ??= /timed out|timeout/i.test(message) ? 'timed_out'
     : /malformed|invalid verdict|invalid CLI result|findings do not match/i.test(message) ? 'invalid_verdict' : 'failed';
   if (!['failed', 'timed_out', 'invalid_verdict', 'interrupted'].includes(status)) throw new TypeError('Invalid review failure status');
-  // Never persist arbitrary reviewer errors, raw output, stacks, or tokens.
-  // Stable categories keep diagnostics useful without copying sensitive text.
-  const diagnostics = status === 'interrupted' ? 'Independent review was interrupted before a durable result was recorded.'
-    : status === 'timed_out' ? 'Independent reviewer timed out.'
-      : status === 'invalid_verdict' ? 'Independent reviewer returned a malformed or invalid verdict.'
-        : /auth|credential|unauthorized|forbidden/i.test(message) ? 'Independent reviewer authentication failed.'
-          : 'Independent review could not be completed.';
-  Object.assign(entry, { status, completedAt: now(), verdict: null, findings: [], diagnostics });
+  const diagnostics = message || (status === 'interrupted'
+    ? 'Independent review was interrupted before a durable result was recorded.'
+    : 'Independent reviewer returned no valid verdict.');
+  Object.assign(entry, { status, completedAt: now(), verdict: null, findings: [], diagnostics,
+    ...(error instanceof Error ? { exception: { name: error.name, message: error.message, stack: error.stack ?? null, code: error.code ?? null } } : {}),
+  });
   return entry;
 }
 
@@ -535,7 +530,7 @@ function recordReviewCorrectiveCycle(job, { reviewCommit, reviewer, findings } =
   job.reviewCorrectiveCycles = 1;
   job.reviewCorrection = {
     cycle: 1, status: 'eligible', reviewCommit, reviewer: reviewer.trim(),
-    findings: truncate(findings), commit: null,
+    findings: diagnosticText(findings), commit: null,
   };
   return job;
 }
@@ -556,7 +551,7 @@ function recordCorrectiveCycle(job, { redCommit, diagnostics } = {}) {
       cycle: job.correctiveCycles,
       status: 'eligible',
       redCommit,
-      diagnostics: truncate(diagnostics, MAX_CI_DIAGNOSTIC_LENGTH),
+      diagnostics: diagnosticText(diagnostics),
       commit: null,
     };
   }
@@ -571,7 +566,7 @@ function summarizeRalphAttempt(attempt) {
   const verification = attempt.verification || {};
   const output = String(verification.stderr || verification.stdout || '').trim();
   return `attempt ${attempt.number}: ${attempt.status}; verification exit ${String(verification.exitCode)}`
-    + `${verification.timedOut ? ' (timed out)' : ''}${output ? `\n${truncate(output, 2000)}` : ''}`;
+    + `${verification.timedOut ? ' (timed out)' : ''}${output ? `\n${diagnosticText(output)}` : ''}`;
 }
 
 function createJobStore(stateDir, options = {}) {

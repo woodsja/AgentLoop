@@ -5,7 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFileSync } = require('node:child_process');
+const { execFileSync } = require('./execution-log');
 
 const SOURCE_FILE = /\.(?:py|js|jsx|ts|tsx)$/i;
 const SAFE_PATH = /^(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.(?:py|js|jsx|ts|tsx)$/i;

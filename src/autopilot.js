@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
 const { loadProjectConfig } = require('./autopilot-config');
 const {
   discoverReadyIssues,
@@ -428,6 +430,8 @@ async function run(argv, dependencies = {}) {
               store.save(job);
               handToHuman(job, 'review', failed.diagnostics, store.now);
             }
+            const reviewEntry = job.reviewHistory?.find(entry => entry.number === attempt.number);
+            if (reviewEntry) reviewEntry.rawResult = review ?? null;
             const pass = matchingPass(review, job.delivery.commit);
             const needsChanges = matchingNeedsChanges(review, job.delivery.commit);
             if (!job.terminal && pass) {
@@ -500,6 +504,9 @@ async function run(argv, dependencies = {}) {
     if (job?.environmentProcess) {
       const claim = job.environmentProcess;
       if (!require('./r1-process-claim').terminatePriorR1Worker({ r1Child: true, workerPid: claim.pid, workerStartTime: claim.startTime })) {
+        if (project.runtime === 'node' || job.environmentPreflight?.runtime === 'node') {
+          throw require('./project-preflight').blocked('prior_process_unresolved', 'Prior project setup process ownership is unresolved; preserve the workspace and claim before retry.');
+        }
         throw require('./python-preflight').blocked('prior_process_unresolved');
       }
       job.environmentProcess = null;
@@ -571,28 +578,33 @@ async function run(argv, dependencies = {}) {
       outcome = { status: 'passed', terminal: false, deliverable: true };
     } else {
       const instructions = await discoverInstructions(workspace.worktreePath);
+      const contractRequired = project.runtime || fs.existsSync(path.join(workspace.worktreePath, '.ralph/project.json'));
       const pythonRequired = project.pythonEnvironment || project.prepareVenv || instructionsRequireVenv(instructions);
-      if (pythonRequired) {
+      if (pythonRequired || contractRequired) {
         phase = 'environment_preflight';
         job.status = phase;
-        job.environmentPreflight = { status: 'preparing', category: 'infrastructure' };
+        job.environmentPreflight = { status: 'preparing', category: 'infrastructure', ...(contractRequired ? { runtime: 'node' } : {}) };
         store.save(job);
       }
       const environment = await prepareEnvironment(workspace.worktreePath, project, {
         instructions, isCancelled: dependencies.environmentIsCancelled, requirePythonReadiness: true,
         onProcess: claim => { job.environmentProcess = claim; store.save(job); },
       });
-      if (pythonRequired) {
+      if (pythonRequired || contractRequired) {
         job.environmentPreflight = environment;
         store.save(job);
       }
       let environmentCancelled;
       try { environmentCancelled = dependencies.environmentIsCancelled?.() === true; }
       catch { environmentCancelled = true; }
-      if (environmentCancelled) throw require('./python-preflight').blocked('cancelled');
+      if (environmentCancelled) {
+        if (contractRequired) throw require('./project-preflight').blocked('cancelled', 'Project preparation cancelled before worker admission.');
+        throw require('./python-preflight').blocked('cancelled');
+      }
+      const preparedProject = environment?.verification ? { ...project, verification: environment.verification } : project;
       const task = correction
-        ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(project, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
-        : buildTask(project, candidate, instructions);
+        ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(preparedProject, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
+        : buildTask(preparedProject, candidate, instructions);
       const service = createService({ config: storeConfig, ...dependencies.ralphOptions,
         recordBaseline: sha => {
           if (!job.ralph.baselineSha) { job.ralph.baselineSha = sha; store.save(job); }
@@ -621,7 +633,7 @@ async function run(argv, dependencies = {}) {
         && typeof lastAttempt.verification.stdout === 'string'
         && typeof lastAttempt.verification.stderr === 'string') {
         // A complete failed verifier result is durable evidence too. This
-        // lets R1 report its fixed, sanitized verdict without copying output.
+        // retains the failed verifier evidence for the owner dashboard.
         recordVerification(job, result.task ? result.task.verification : task.verification, lastAttempt.verification);
       }
       // `passed` is terminal to the scheduler.  Persisting it before the
@@ -713,7 +725,7 @@ async function run(argv, dependencies = {}) {
   } catch (error) {
     if (job) {
       try {
-        if (error.code === 'PYTHON_PREFLIGHT_BLOCKED') {
+        if (['PYTHON_PREFLIGHT_BLOCKED', 'PROJECT_PREFLIGHT_BLOCKED'].includes(error.code)) {
           job.environmentPreflight = error.outcome;
           job.status = 'blocked_infrastructure';
           recordFailure(job, 'environment_preflight', error, store.now);
