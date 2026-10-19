@@ -119,6 +119,12 @@ test('daemon restart marks interrupted child terminal and recovers its R1 parent
     const recovered = store.readTask(child.id, 'done');
     assert.equal(recovered.status, 'failed');
     assert.equal(recovered.reason, 'daemon_restarted');
+    for (const item of [child, ambiguous]) {
+      const records = fs.readFileSync(store.executionPath(item.id), 'utf8').trim().split('\n').map(JSON.parse);
+      const recovery = records.find(record => record.event === 'recovery');
+      assert.equal(recovery.parentId, item.r1Child.parentJobId);
+      assert.match(recovery.message, /exit details are unknown/);
+    }
     assert.equal(store.readTask(parent.id, 'pending').phase, 'recovering');
     assert.equal(fs.readdirSync(store.paths.pending).filter(name => name.startsWith(child.id)).length, 0);
     assert.equal(store.readTask(orphan.id, 'done').reason, 'r1_child_unauthorized');

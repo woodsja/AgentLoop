@@ -59,6 +59,7 @@ async function harness(t, mode = 'fresh') {
     paths: { config: registry }, config: { allowedProjects: configuredProjects({ demo: { root: checkout, worktreeRoot: project.worktreeRoot } }, registry) },
     enqueueTask(task) { const value = { ...task, id: `t-${String(stages.pending.size + stages.running.size + stages.done.size + 1).padStart(8, '0')}` }; stages.pending.set(value.id, value); return value; },
     appendLogLine() {},
+    appendExecution() {},
     writeTask(task, stage) { stages[stage].set(task.id, structuredClone(task)); },
     readTask(id, stage) { const value = stages[stage].get(id); if (!value) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return structuredClone(value); },
     listTasks(stage) { return [...stages[stage].values()]; },
@@ -305,17 +306,17 @@ test('changed owner policy rebuilds a retained environment without removed distr
 });
 
 test('real Python preflight subprocess bounds megabyte output while retaining transport diagnostics', async () => {
-  const { execFile } = require('node:child_process');
+  const { execFile } = require('../src/execution-log');
   const runner = path.join(__dirname, '..', 'src', 'python-preflight-runner.js');
   const flood = "process.stdout.write('x'.repeat(1024 * 1024)); process.stderr.write('é'.repeat(64 * 1024)); process.stderr.write('Temporary failure in name resolution'); process.exitCode = 7;";
   const result = await new Promise(resolve => {
     const child = execFile(process.execPath, [runner, process.execPath, '-e', flood], {
-      encoding: 'utf8', maxBuffer: 16384, timeout: 12000,
+      encoding: 'utf8', executionPreviewBytes: 4096, timeout: 12000,
     }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
     child.stdin.end('start\n');
   });
   assert.equal(result.error?.code, 7, `runner must preserve actual exit code, not ${result.error?.code}`);
-  assert.equal(result.stdout, '');
+  assert.equal(result.stdout, 'x'.repeat(4096));
   assert.ok(Buffer.byteLength(result.stderr) <= 4096, 'forwarded diagnostic output must fit buffer');
   assert.match(result.stderr, /Temporary failure in name resolution$/);
 });

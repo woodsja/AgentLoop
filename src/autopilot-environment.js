@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const { execFile } = require('./execution-log');
 const { preparePython, blocked } = require('./python-preflight');
 
 function run(command, args, cwd, executeFile) {

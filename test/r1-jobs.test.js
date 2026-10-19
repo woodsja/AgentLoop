@@ -29,7 +29,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
   const config = path.join(root, 'config.json'), fixture = path.join(root, 'fixture.json');
   const worktreeRoot = path.join(root, 'worktrees');
   const project = { enabled: true, repo: 'example/repo', checkout, worktreeRoot, baseBranch: 'main', worker: 'codex', reviewPolicy: 'always', maxAttempts: 1,
-    stateDir: path.join(root, 'r1-state'), verification: `node -e "if(require('fs').readFileSync('answer','utf8')!=='42')process.exit(1);console.log('deterministic test passed')"` };
+    stateDir: path.join(root, 'r1-state'), verification: `node -e "if(require('fs').readFileSync('answer','utf8')!=='42')process.exit(1);console.log('deterministic test passed'+'D'.repeat(100000)+'EXACT DIAGNOSTIC TAIL token=owner /tmp/context')"` };
   fs.writeFileSync(fixture, JSON.stringify({ root, project }));
   fs.writeFileSync(config, JSON.stringify({ dashboardPort: 0, allowedProjects: { demo: { root: checkout, worktrees: Object.fromEntries([1, 2, 3, 4].map(n => [`issue${n}`, path.join(worktreeRoot, `issue-${n}`)])) } } }));
   let child, output = '';
@@ -63,6 +63,10 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const context = JSON.parse(fs.readFileSync(path.join(root, 'reviews'), 'utf8').trim());
     assert.equal(context.verification.command, project.verification);
     assert.equal(context.verification.commit, context.headCommit);
+    const fullOutput = 'deterministic test passed'+'D'.repeat(100000)+'EXACT DIAGNOSTIC TAIL token=owner /tmp/context\n';
+    assert.equal(context.verification.stdout, fullOutput);
+    const checkpoint = jobId => JSON.parse(fs.readFileSync(path.join(root,'queue/tasks/running',jobId+'.json')));
+    assert.equal(checkpoint(id).r1.verification.stdout,fullOutput);
     assert.equal((await get(second)).phase, 'queued');
     fs.writeFileSync(path.join(root, 'review-release'), '');
     const completed = await until(async () => { const job = await get(id); return job.status === 'passed' && job; });
@@ -82,8 +86,8 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const third = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 3 })).value.id;
     const failed = await until(async () => { const job = await get(third); return job.status === 'blocked' && job; });
     assert.equal(failed.evidence.reviewHistory[0].status, 'failed');
-    assert.match(failed.evidence.reviewHistory[0].diagnostics, /could not be completed/);
-    assert.ok(!JSON.stringify(failed).includes('private'));
+    assert.equal(failed.evidence.reviewHistory[0].diagnostics, 'Fake reviewer failed: token=private');
+    assert.ok(JSON.stringify(failed).includes('token=private'));
     const blockedLog = (await request(port, `/api/log/${third}`)).value.lines;
     assert.equal(blockedLog.filter(line => /terminal outcome: blocked/.test(line)).length, 1, 'the transcript preserves the actual non-autonomous terminal status');
     await halt(); port = await launch();
@@ -102,6 +106,10 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const recovered = await until(async () => { const job = await get(interrupted); return job.status === 'blocked' && job; });
     assert.equal(recovered.evidence.reviewHistory[0].status, 'interrupted');
     assert.equal(fs.readFileSync(path.join(root, 'reviews'), 'utf8'), recorded);
+    const recoveredTask=JSON.parse(fs.readFileSync(path.join(root,'queue/tasks/done',interrupted+'.json')));
+    assert.equal(recoveredTask.r1.verification.stdout,fullOutput);
+    const persistedJob=JSON.parse(fs.readFileSync(path.join(project.stateDir,'issue-4.json')));
+    assert.equal(persistedJob.verification.stdout,fullOutput);
 
   } catch (error) { error.message += '\n' + output; throw error; }
   finally { if (child && child.exitCode === null) await halt(); fs.rmSync(root, { recursive: true, force: true }); }
@@ -141,7 +149,7 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   assert.equal(queued.length, 1);
 });
 
-test('public R1 verification summaries retain bounded failure facts without exposing untrusted logs', () => {
+test('R1 navigation summaries retain bounded failure facts alongside the complete raw journal', () => {
   const { verificationFailureSummary } = require('../src/r1-transcript-summary');
   const raw = [
     'credential=secret-should-never-be-logged reasoning: hidden private thinking',

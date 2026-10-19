@@ -1,8 +1,8 @@
 'use strict';
 
-// Public dashboard transcript: derive useful diagnostics from bounded,
-// allowlisted fields. Never print command text, raw test output, model output,
-// secrets, host paths, or arbitrary exception messages here.
+// Short navigation labels for the dashboard timeline. Complete command/output
+// and exception evidence lives in the owner execution journal; these labels
+// are never a substitute for that raw record.
 const PREFLIGHT_REASONS = new Set([
   'runtime_missing', 'sandbox_unavailable', 'lockfile_missing', 'lockfile_invalid',
   'lockfile_stale', 'manifest_mismatch', 'install_failed', 'audit_unavailable',
@@ -26,9 +26,8 @@ function verificationFailureSummary(verification) {
   else if (Number.isSafeInteger(verification.exitCode) && verification.exitCode !== 0) facts.push('exit nonzero');
   else if (verification.exitCode === null) facts.push('terminated by signal');
 
-  // Untrusted verification output can encode secrets even in precise numbers.
-  // Only display coarse failure buckets and allowlisted reason IDs. Never
-  // display test names, filenames, counts, or arbitrary command/output text.
+  // Keep the navigation label small. Test names, precise counts, commands and
+  // all output remain available verbatim in the owner execution journal.
   const output = [verification.stdout, verification.stderr]
     .filter(value => typeof value === 'string').join('\n').slice(-16000);
   const failed = lastNumber(output, 'fail');
@@ -36,9 +35,8 @@ function verificationFailureSummary(verification) {
   else if (failed >= 2 && failed <= 9) facts.push('reported tests: 2-9 failed');
   else if (failed >= 10) facts.push('reported tests: 10+ failed');
 
-  // This is a diagnostic hint, not an authoritative infrastructure verdict:
-  // project test output can still impersonate a known code, but an allowlisted
-  // reason cannot carry arbitrary secrets into the public transcript.
+  // A reported reason is a navigation hint, not an authoritative infrastructure
+  // verdict: project test output can impersonate a known code.
   const preflightPattern = /code:\s*['"]PROJECT_PREFLIGHT_BLOCKED['"][\s\S]{0,320}?reason:\s*['"]([a-z][a-z0-9_]{0,40})['"]/g;
   let reportedReason = null;
   for (const match of output.matchAll(preflightPattern)) {

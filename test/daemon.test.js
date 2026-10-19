@@ -865,3 +865,25 @@ test('loop roles can be independently selected and old engine-only requests rema
 test('null loop requests preserve default engine fallback', () => {
   assert.equal(daemon.loopEngines(null).workerEngine, 'codex');
 });
+
+test('HTTP access rejects rebinding Hosts and cross-site Origins and keeps legacy filenames', async t => {
+  const server = daemon.createHttpServer();
+  if (!await listenHttp(t, server)) return;
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const port = server.address().port;
+  const request = (headers, requestPath='/') => new Promise((resolve,reject) => {
+    const req = http.get({host:'127.0.0.1',port,path:requestPath,headers},res=>{
+      let body='';res.on('data',chunk=>body+=chunk);res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,body}));
+    });req.on('error',reject);
+  });
+  assert.equal((await request({host:`attacker.example:${port}`})).status,403);
+  assert.equal((await request({origin:'http://attacker.example'})).status,403);
+  assert.equal((await request({origin:'null'})).status,403);
+  assert.equal((await request({host:`localhost:${port}`,origin:`http://localhost:${port}`})).status,200);
+  const id='t-filename';
+  store.appendLogLine(id,'owner legacy output');
+  t.after(()=>fs.rmSync(store.executionPath(id,true),{force:true}));
+  const result=await request({},`/api/log/${id}?download=1&legacy=1`);
+  assert.equal(result.status,200);
+  assert.equal(result.headers['content-disposition'],`attachment; filename="${id}.ndjson"`);
+});

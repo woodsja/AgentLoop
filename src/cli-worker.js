@@ -131,7 +131,9 @@ function createCliWorker(options = {}) {
           if (partialLine) parseLine(partialLine);
           if (engine.usesOutputFile) {
             try {
-              resultText = fs.readFileSync(outputPath, 'utf8').trim() || lastText;
+              const bytes = fs.readFileSync(outputPath);
+              options.recordExecution?.('result-file', { role: 'worker', base64: bytes.toString('base64'), path: outputPath });
+              resultText = bytes.toString('utf8').trim() || lastText;
             } catch {
               resultText = lastText;
             }
