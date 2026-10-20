@@ -1,0 +1,145 @@
+microsoft
+Linux ralph-ubuntu 6.8.0-142-generic #142-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:24:27 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+/sys sysfs sysfs
+/proc proc proc
+/dev udev devtmpfs
+/dev/pts devpts devpts
+/run tmpfs tmpfs
+/sys/firmware/efi/efivars efivarfs efivarfs
+/ /dev/mapper/ubuntu--vg-ubuntu--lv ext4
+/sys/kernel/security securityfs securityfs
+/dev/shm tmpfs tmpfs
+/run/lock tmpfs tmpfs
+/sys/fs/cgroup cgroup2 cgroup2
+/sys/fs/pstore pstore pstore
+/sys/fs/bpf bpf bpf
+/proc/sys/fs/binfmt_misc systemd-1 autofs
+/dev/hugepages hugetlbfs hugetlbfs
+/dev/mqueue mqueue mqueue
+/sys/kernel/debug debugfs debugfs
+/sys/kernel/tracing tracefs tracefs
+/sys/fs/fuse/connections fusectl fusectl
+/sys/kernel/config configfs configfs
+/boot /dev/sda2 ext4
+/boot/efi /dev/sda1 vfat
+/proc/sys/fs/binfmt_misc binfmt_misc binfmt_misc
+/run/user/1000 tmpfs tmpfs
+lo               UNKNOWN        127.0.0.1/8 ::1/128
+eth0             UP             192.168.77.10/24 fe80::215:5dff:fe00:2a02/64
+default via 192.168.77.1 dev eth0 proto static
+192.168.77.0/24 dev eth0 proto kernel scope link src 192.168.77.10
+Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
+udp   UNCONN 0      0         127.0.0.54:53         0.0.0.0:*
+udp   UNCONN 0      0      127.0.0.53%lo:53         0.0.0.0:*
+tcp   LISTEN 0      511        127.0.0.1:5757       0.0.0.0:*    users:(("MainThread",pid=1019206,fd=21))
+tcp   LISTEN 0      4096       127.0.0.1:8080       0.0.0.0:*    users:(("tunnel-client",pid=890917,fd=3))
+tcp   LISTEN 0      4096      127.0.0.54:53         0.0.0.0:*
+tcp   LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*
+tcp   LISTEN 0      128        127.0.0.1:42373      0.0.0.0:*    users:(("codex",pid=885755,fd=36))
+tcp   LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*
+tcp   LISTEN 0      4096            [::]:22            [::]:*
+Netid State  Recv-Q Send-Q                                                                           Local Address:Port    Peer Address:PortProcess
+u_seq LISTEN 0      4096                                                                         /run/udev/control 187                * 0
+u_str LISTEN 0      4096   /tmp/codex-daemon-1000/70ba80460b6f7290b80ee534178e312098a7bc0cf679b67acab366afb81fbd7a 3399977            * 0    users:(("codex",pid=957904,fd=31))
+u_dgr UNCONN 0      0                                                                /run/user/1000/systemd/notify 9197               * 0    users:(("systemd",pid=1018,fd=12))
+u_str LISTEN 0      4096                                                                        /run/user/1000/bus 9208               * 0    users:(("dbus-daemon",pid=522293,fd=3),("systemd",pid=1018,fd=36))
+u_str LISTEN 0      4096                                                            /run/user/1000/gnupg/S.dirmngr 9209               * 0    users:(("systemd",pid=1018,fd=51))
+u_str LISTEN 0      4096                                                  /run/user/1000/gnupg/S.gpg-agent.browser 9211               * 0    users:(("systemd",pid=1018,fd=50))
+u_str LISTEN 0      4096                                                    /run/user/1000/gnupg/S.gpg-agent.extra 9213               * 0    users:(("systemd",pid=1018,fd=49))
+u_str LISTEN 0      4096                                                          /run/user/1000/gnupg/S.gpg-agent 9215               * 0    users:(("systemd",pid=1018,fd=25))
+u_str LISTEN 0      4096                                                            /run/user/1000/gnupg/S.keyboxd 12289              * 0    users:(("systemd",pid=1018,fd=52))
+u_str LISTEN 0      4096                                                          /run/user/1000/pk-debconf-socket 12291              * 0    users:(("systemd",pid=1018,fd=37))
+u_str LISTEN 0      4096                                                 /run/user/1000/snapd-session-agent.socket 12293              * 0    users:(("systemd",pid=1018,fd=48))
+u_str LISTEN 0      4096                                                      /run/user/1000/gnupg/S.gpg-agent.ssh 12301              * 0    users:(("systemd",pid=1018,fd=41))
+u_str LISTEN 0      4096                                                            /run/systemd/io.systemd.sysext 6415               * 0
+u_dgr UNCONN 0      0                                                                                            * 3292948            * 0
+u_str LISTEN 0      4096                                                               /run/dbus/system_bus_socket 10649              * 0
+u_str LISTEN 0      4096                                                                 /run/lxd-installer.socket 10652              * 0
+u_str LISTEN 0      4096                                                   /run/systemd/resolve/io.systemd.Resolve 3292277            * 0
+u_str LISTEN 0      4096                                                                         /run/snapd.socket 9627               * 0
+u_str LISTEN 0      4096                                           /run/systemd/resolve/io.systemd.Resolve.Monitor 3292278            * 0
+u_str LISTEN 0      4096                                                                    /run/snapd-snap.socket 9628               * 0
+u_str LISTEN 0      4096                                                                        /run/uuidd/request 7665               * 0
+u_str LISTEN 0      4096                                /home/woodsja/.codex/app-server-daemon/daemon-updater.sock 3399999            * 0    users:(("codex",pid=522398,fd=10))
+u_str LISTEN 0      4096                                                            /run/user/1000/systemd/private 3285562            * 0    users:(("systemd",pid=1018,fd=22))
+u_str LISTEN 0      512                                                        /run/user/1000/cc-socks/837189.sock 3121779            * 0    users:(("claude",pid=837189,fd=14))
+u_str LISTEN 0      512                                                                 /tmp/cc-socks/1246345.sock 4447287            * 0    users:(("claude",pid=1246345,fd=17))
+u_str LISTEN 0      4096                                                                      /run/systemd/private 3289832            * 0
+u_str LISTEN 0      4096                                                   /run/systemd/journal/io.systemd.journal 3291308            * 0
+u_str LISTEN 0      4096                                                /run/systemd/userdb/io.systemd.DynamicUser 3019               * 0
+u_str LISTEN 0      4096                                                        /run/systemd/io.systemd.ManagedOOM 3020               * 0
+u_str LISTEN 0      4096                                                                  /run/lvm/lvmpolld.socket 1917               * 0
+u_dgr UNCONN 0      0                                                                  /run/systemd/journal/syslog 1920               * 0
+u_str LISTEN 0      4096                                                                /run/systemd/fsck.progress 1922               * 0
+u_str LISTEN 0      4096                                                               /run/systemd/journal/stdout 183                * 0
+u_str LISTEN 0      4096                                                     @/org/kernel/linux/storage/multipathd 1919               * 0
+u_str LISTEN 0      4096                                                              @ISCSIADM_ABSTRACT_NAMESPACE 10651              * 0
+    PID COMMAND
+   1018 systemd
+ 837189 claude
+ 885755 codex
+ 890917 tunnel-client
+/dev/vmbus:
+total 0
+drwxr-xr-x  2 root root      80 Oct  3 01:22 .
+drwxr-xr-x 20 root root    4060 Oct  3 01:22 ..
+crw-------  1 root root 10, 262 Oct  3 01:22 hv_kvp
+crw-------  1 root root 10, 261 Oct  3 01:22 hv_vss
+
+/media:
+total 8
+drwxr-xr-x  2 root root 4096 Sep  9 06:29 .
+drwxr-xr-x 23 root root 4096 Sep 28 01:55 ..
+
+/mnt:
+total 8
+drwxr-xr-x  2 root root 4096 Sep  9 06:29 .
+drwxr-xr-x 23 root root 4096 Sep 28 01:55 ..
+
+/proc/sys/fs/binfmt_misc:
+total 0
+drwxr-xr-x 2 root root 0 Oct  3 01:22 .
+dr-xr-xr-x 1 root root 0 Oct  3 01:22 ..
+-rw-r--r-- 1 root root 0 Oct  3 01:22 python3.12
+--w------- 1 root root 0 Oct  3 01:22 register
+-rw-r--r-- 1 root root 0 Oct  3 01:22 status
+2026-10-17T05:41:59.912138+00:00
+$ systemd-detect-virt
+$ uname -a
+$ findmnt -rn -o TARGET,SOURCE,FSTYPE
+$ ip -br address
+$ ip route
+$ ss -lntup
+$ ss -lxnp
+$ ps -p 890917,885755,1018,837189 -o pid,comm
+$ ls -la /proc/sys/fs/binfmt_misc /mnt /media /dev/vmbus
+WSL_INTEROP=<unset>
+WSL_DISTRO_NAME=<unset>
+SSH_AUTH_SOCK=<unset>
+SSH_AGENT_PID=<unset>
+GPG_AGENT_INFO=<unset>
+DISPLAY=<unset>
+WAYLAND_DISPLAY=<unset>
+DOCKER_HOST=<unset>
+/dev/vsock exists=False
+/dev/kvm exists=False
+/run/docker.sock exists=False
+/run/containerd/containerd.sock exists=False
+/mnt/c/Windows/System32/cmd.exe exists=False
+{"port": 22, "connect": "accepted", "banner": "SSH-2.0-OpenSSH_for_Windows_9.5\r\n"}
+{"port": 80, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 135, "connect": "accepted"}
+{"port": 139, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 443, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 445, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 3389, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 5985, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 5986, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 2179, "connect": "accepted"}
+{"port": 2375, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 2376, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 3000, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 5000, "connect": "accepted", "headers": "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nDate: Sat, 17 Oct 2026 05:41:59 GMT\r\nContent-Length: 18\r\n\r\n"}
+{"port": 5357, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 8080, "connect": "TimeoutError", "detail": "timed out"}
+{"port": 9000, "connect": "TimeoutError", "detail": "timed out"}

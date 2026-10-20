@@ -115,32 +115,17 @@ test('prunes stale metadata after an issue worktree disappears unexpectedly', as
   assert.equal(git(project.checkout, ['branch', '--list', workspace.branch]).trim(), '');
 });
 
-test('loads instructions and prepares a repo-local venv inside the issue worktree', async () => {
+test('instruction-only legacy Python setup fails with migration guidance and remains cleanable', async () => {
   const project = makeRepository();
   fs.writeFileSync(path.join(project.origin, 'AGENTS.md'), 'Run checks through the repository .venv.\n');
   git(project.origin, ['add', 'AGENTS.md']);
   git(project.origin, ['commit', '-m', 'add workspace instructions']);
-
   const workspace = await prepareIssueWorkspace(project, { number: 15, title: 'Prepare environment' });
   const instructions = readRepositoryInstructions(workspace.worktreePath);
-  const environment = await prepareRepositoryEnvironment(workspace.worktreePath, { prepareVenv: false }, {
-    instructions,
-    execFile: (file, args, options, callback) => {
-      assert.equal(file, 'python3');
-      assert.deepEqual(args, ['-m', 'venv', '.venv']);
-      assert.equal(options.cwd, workspace.worktreePath);
-      fs.mkdirSync(path.join(workspace.worktreePath, '.venv'));
-      callback(null);
-    },
-  });
-
-  assert.deepEqual(instructions, [{ path: 'AGENTS.md', content: 'Run checks through the repository .venv.\n' }]);
-  assert.equal(environment.venvPath, path.join(workspace.worktreePath, '.venv'));
-  assert.equal(fs.existsSync(environment.venvPath), true);
-
+  await assert.rejects(prepareRepositoryEnvironment(workspace.worktreePath, {}, { instructions }), /committed uv.lock/);
+  assert.equal(fs.existsSync(path.join(workspace.worktreePath, '.venv')), false);
   await cleanupIssueWorkspace(project, workspace);
   assert.equal(fs.existsSync(workspace.worktreePath), false);
-  assert.equal(fs.existsSync(environment.venvPath), false);
 });
 
 test('fetches origin before creating a worktree, so the base is not a stale local remote ref', async () => {

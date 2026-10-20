@@ -1,0 +1,27 @@
+Non-destructive VM-boundary snapshot (2026-10-17 UTC)
+2026-10-17T05:16:46Z
+virtualization: microsoft
+kernel: 6.8.0-142-generic
+mounts: wslinterop: absent
+cmdexe_mounted: no
+ssh_agent_forwarded: no
+docker_socket_present: no
+vsock_device_present: no
+gateway: default via 192.168.77.1 dev eth0 proto static
+guest_listeners: 127.0.0.1:5757 127.0.0.1:8080 127.0.0.54:53 0.0.0.0:22 127.0.0.1:42373 127.0.0.53%lo:53 [::]:22
+Targeted read-only TCP-connect inventory of guest NAT gateway 192.168.77.1 (open means connect accepted; absence is not proof of isolation)
+gateway_port_22=reachable
+gateway_port_80=not_connected
+gateway_port_135=reachable
+gateway_port_139=not_connected
+gateway_port_443=not_connected
+gateway_port_445=not_connected
+gateway_port_3389=not_connected
+gateway_port_5985=not_connected
+gateway_port_5986=not_connected
+gateway_port_2375=not_connected
+gateway_port_2376=not_connected
+gateway_port_3000=not_connected
+gateway_port_5000=reachable
+gateway_port_8080=not_connected
+gateway_port_9000=not_connected

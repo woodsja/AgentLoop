@@ -102,3 +102,30 @@ This implements [ADR 0001](decisions/0001-agentloop-trust-boundary.md). It chang
 no live settings, mounts, host integrations or deployment. Actual VM-to-host
 checks and reversible live migration belong to #87. A commit, passing local tests,
 or merge does not establish deployment verification.
+
+## Migrating an existing project
+
+Commit the common contract and native lockfile to the project's reviewed base
+first. `add owner/repository` recognizes a unique legacy repository alias (such
+as `ralph` or `finance-dashboard`) and keeps that name, checkout, worktree root,
+base branch, labels, worker/critic/model preferences, retry policy, CI workflow,
+unknown owner fields and explicit `autoMerge` choice. The contract supplies
+verification during execution; the legacy owner verification field is retained.
+Only obsolete `prepareVenv`/`pythonEnvironment` setup fields are retired during
+approved migration. Repository facts cannot select delivery policy.
+
+An active legacy entry is refused without changes. The owner must separately
+stage it (`enabled: false`, and inactive registry activation if present), after
+checking active jobs and taking an exact backup of both owner files and durable
+state. Do not stage a live project merely to run a rehearsal: copy its settings
+and repositories to isolated locations, then stage those copies. Existing job
+history must stay intact. Conflicting aliases, roots or store entries require
+reconciliation; `add` never renames or replaces them automatically.
+
+Run `add`, inspect its complete preview, then `check`, inspect the infrastructure
+receipt and baseline results, and finally `activate` with separate approval.
+Activation changes admission only. `recover` rolls back interrupted paired writes;
+it does not undo a completed activation. For a completed rehearsal rollback,
+stop the isolated consumer and restore the exact two config backups, retaining
+state and raw logs. Live rollback and daemon restart remain separate owner
+operations. See [the #87 evidence and open gates](verification/issue-87.md).

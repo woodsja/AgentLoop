@@ -2,18 +2,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFile } = require('./execution-log');
 const { preparePython } = require('./python-preflight');
 const { blocked, readContract } = require('./project-preflight');
-
-function run(command, args, cwd, executeFile) {
-  return new Promise((resolve, reject) => {
-    executeFile(command, args, { cwd, shell: false, encoding: 'utf8', maxBuffer: 1024 * 1024 }, error => {
-      if (error) reject(new Error('Repository environment preparation failed: unable to create the required .venv'));
-      else resolve();
-    });
-  });
-}
 
 function instructionsRequireVenv(instructions) {
   if (!Array.isArray(instructions)) return false;
@@ -26,11 +16,9 @@ function instructionsRequireVenv(instructions) {
 }
 
 async function prepareRepositoryEnvironment(projectPath, project, {
-  execFile: executeFile = execFile,
   instructions = [],
   isCancelled,
   onProcess,
-  requirePythonReadiness = false,
   timeoutMs,
   recordExecution,
   spawn,
@@ -47,17 +35,10 @@ async function prepareRepositoryEnvironment(projectPath, project, {
     const prepare = contract.runtime === 'python' ? preparePython : require('./project-preflight').prepareNode;
     return prepare(root, project, { isCancelled, onProcess, timeoutMs, recordExecution, spawn });
   }
-  if (project.pythonEnvironment) return require('./legacy-python-preflight').preparePython(path.resolve(projectPath), project.pythonEnvironment, { execFile: executeFile, isCancelled, onProcess });
-  if (requirePythonReadiness && (project.prepareVenv || instructionsRequireVenv(instructions))) {
-    throw blocked('contract_missing', 'Python readiness requires .ralph/project.json, pyproject.toml and a committed uv.lock. Migrate the legacy Python configuration to runtime python before retrying.');
+  if (project.pythonEnvironment || project.prepareVenv || instructionsRequireVenv(instructions)) {
+    throw blocked('contract_missing', 'Python setup requires .ralph/project.json, pyproject.toml and a committed uv.lock. Run project add to migrate the staged legacy registration; bare prepareVenv and instruction-only setup are retired.');
   }
-  if (!project.prepareVenv && !instructionsRequireVenv(instructions)) return { venvPath: null };
-  const venvPath = path.join(path.resolve(projectPath), '.venv');
-  if (fs.existsSync(venvPath) && !fs.statSync(venvPath).isDirectory()) {
-    throw new Error('Repository environment preparation failed: required .venv exists but is not a directory');
-  }
-  if (!fs.existsSync(venvPath)) await run('python3', ['-m', 'venv', '.venv'], projectPath, executeFile);
-  return { venvPath };
+  return { venvPath: null };
 }
 
 module.exports = { instructionsRequireVenv, prepareRepositoryEnvironment };

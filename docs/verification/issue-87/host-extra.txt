@@ -1,0 +1,21 @@
+Sat Oct 17 05:44:33 UTC 2026
+Could not open a connection to your authentication agent.
+Failed to connect to bus: No medium found
+    182 kworker/R-hv_vm
+    183 kworker/R-hv_vm
+    184 kworker/R-hv_pr
+    185 kworker/R-hv_su
+    531 hv_balloon
+ 424733 sshd
+ 424792 sshd
+ 836931 sshd
+ 837031 sshd
+ 837472 sshd
+ 837521 sshd
+ 890766 sshd
+ 890866 sshd
+ 890917 tunnel-client
+crw------- 1 root root 10, 262 Oct  3 01:22 /dev/vmbus/hv_kvp
+crw------- 1 root root 10, 261 Oct  3 01:22 /dev/vmbus/hv_vss
+user_can_write_hv_kvp=1
+user_can_write_hv_vss=1

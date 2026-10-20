@@ -51,10 +51,11 @@ redaction, including setup, verification and failure output. Existing durable jo
 records and transcripts survive recreation and workspace cleanup.
 
 The obsolete `pythonEnvironment` wheel policy now produces explicit migration
-guidance. Legacy prepareVenv/instruction-only R1 projects require the shared
-contract before admission. The older non-R1 helper can still create/reuse a bare
-venv; that helper is not a readiness receipt. This change edits no live project
-configuration or existing VM installation. Finance migration remains #87 work.
+guidance. Legacy prepareVenv/instruction-only projects require the shared
+contract before preparation. The bare-venv creation/reuse fallback was retired
+after the #87 three-repository rehearsal. Owner config files are not rewritten
+by loading them; staged migration removes obsolete setup fields with approval.
+See [migration evidence](verification/issue-87.md).
 
 The accepted [trust boundary](decisions/0001-agentloop-trust-boundary.md) calls
 for ordinary disposable-VM execution. There is no mandatory bubblewrap, nested
