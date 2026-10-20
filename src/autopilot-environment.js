@@ -47,7 +47,8 @@ async function prepareRepositoryEnvironment(projectPath, project, {
     const prepare = contract.runtime === 'python' ? preparePython : require('./project-preflight').prepareNode;
     return prepare(root, project, { isCancelled, onProcess, timeoutMs, recordExecution, spawn });
   }
-  if (project.pythonEnvironment || (requirePythonReadiness && (project.prepareVenv || instructionsRequireVenv(instructions)))) {
+  if (project.pythonEnvironment) return require('./legacy-python-preflight').preparePython(path.resolve(projectPath), project.pythonEnvironment, { execFile: executeFile, isCancelled, onProcess });
+  if (requirePythonReadiness && (project.prepareVenv || instructionsRequireVenv(instructions))) {
     throw blocked('contract_missing', 'Python readiness requires .ralph/project.json, pyproject.toml and a committed uv.lock. Migrate the legacy Python configuration to runtime python before retrying.');
   }
   if (!project.prepareVenv && !instructionsRequireVenv(instructions)) return { venvPath: null };
