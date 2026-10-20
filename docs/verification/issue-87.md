@@ -210,3 +210,11 @@ review, retry and CI fields as omitted. A dedicated regression tests that case.
 The three-repository rehearsal is repeated against final snapshots with exact
 policy-object comparisons; final receipts below supersede the initial expansion
 rehearsal receipts above.
+
+## October 20 integration gate corrections
+
+The previous rehearsal rows document *isolated, copied* configurations, not a migration of the live owner-controlled stores. The Finance copy in that rehearsal had `autoMerge: false`; the current live `/home/woodsja/tools/ralph/autopilot-projects.json` instead has `finance-dashboard.autoMerge: true` (inspected on October 20). Thus the rehearsal does **not** establish preservation of current live Finance merge policy. The live setting must be copied exactly at deployment/migration. Existing active Finance must not be rejected during this staging phase: the legacy Python validation and preparation implementation remains available until Step 6 has migrated and verified that live project. Retirement of legacy sources remains a *post-migration* task, not a claim of this PR.
+
+The isolated successful snapshot receipts above are historical; the attempted final repetition had no complete receipts saved in this document, so it is **unverified** rather than superseding the initial table. These local snapshots do not establish current remote exact-head CI, live migration, or a production recovery drill. GitHub CI, independent review and runtime state must be checked against the actual final commit before merging. The host inventory was nondestructive and does not establish hypervisor-side firewall or AF_VSOCK isolation. A value of `1` in the host-extra `user_can_write_hv_*` shell probes was a failing test exit status, **not** a Boolean statement that the guest user could write to those devices.
+
+The Windows host remains reachable from the guest; ports 22, 135, 2179 and 5000 require identification and an explicit owner decision before any firewall or host settings change. No live configuration files, daemon, project activation, or Windows setting was changed by the rehearsal.
