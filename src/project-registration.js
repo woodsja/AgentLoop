@@ -73,6 +73,21 @@ function diagnosticProjects(configPath) {
   return Object.entries(config.allowedProjects || {}).filter(([, p]) => p?.onboarding).map(([name, p]) => ({ name, ...p.onboarding }));
 }
 
+// Admission must target a real origin branch at its exact published commit.
+// Unqualified rev-parse can resolve tags or stale local-only commits.
+async function verifiedBase(git, branch) {
+  await git(['check-ref-format', '--branch', branch]);
+  const local = `refs/heads/${branch}`, remote = `refs/remotes/origin/${branch}`;
+  for (const ref of [local, remote]) {
+    try { await git(['show-ref', '--verify', ref]); }
+    catch { throw new Error(`Base branch ${branch} requires existing local and origin branch refs; tags and missing remote branches are not supported.`); }
+  }
+  const localSha = (await git(['rev-parse', '--verify', `${local}^{commit}`])).trim();
+  const remoteSha = (await git(['rev-parse', '--verify', `${remote}^{commit}`])).trim();
+  if (localSha !== remoteSha) throw new Error(`Base branch changed or diverges from origin/${branch}; fetch, reconcile and repeat project check.`);
+  return localSha;
+}
+
 async function projectCommand(action, repo, options) {
   const { configPath, projectsPath, record, approve } = options;
   if (path.resolve(configPath) === path.resolve(projectsPath)) throw new Error('Owner config and autopilot config must be different files.');
@@ -103,7 +118,7 @@ async function projectCommand(action, repo, options) {
       if (action === 'activate') {
         if (prior.onboarding.readiness?.status !== 'ready' || prior.onboarding.readiness.runtime !== prior.runtime) throw new Error('Run project check successfully before activation.');
         const { command } = preparationCommands(prior.checkout, options);
-        const sha = (await command('git', ['rev-parse', `${prior.baseBranch}^{commit}`], 'repository_invalid')).trim();
+        const sha = await verifiedBase(args => command('git', ['-C', prior.checkout, ...args], 'repository_invalid'), prior.baseBranch);
         if (sha !== prior.onboarding.commit) throw new Error('Base branch changed; repeat project check before activation.');
         record('preview', { project: prior });
         if (!await approve('Activate issue admission with the displayed owner settings?')) throw new Error('Activation cancelled by owner.');
@@ -122,6 +137,7 @@ async function projectCommand(action, repo, options) {
         const target = `${worktree}-${crypto.randomUUID()}`;
         fs.mkdirSync(prior.worktreeRoot, { recursive: true });
         try {
+        await verifiedBase(args => command('git', ['-C', prior.checkout, ...args], 'repository_invalid'), prior.baseBranch);
           await command('git', ['worktree', 'add', '--detach', target, prior.baseBranch], 'repository_invalid');
           prior.onboarding.commit = (await command('git', ['-C', target, 'rev-parse', 'HEAD'], 'repository_invalid')).trim();
           prior.onboarding.readiness = { status: 'preparing' };
@@ -171,8 +187,7 @@ async function projectCommand(action, repo, options) {
     const origin = (await git(['remote', 'get-url', 'origin'])).trim();
     if (origin !== (options.source || `https://github.com/${repo}.git`)) throw new Error(`Checkout origin conflicts: ${origin}`);
     const branch = options.baseBranch || (await git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])).trim().replace(/^origin\//, '');
-    await git(['check-ref-format', '--branch', branch]);
-    const commit = (await git(['rev-parse', `${branch}^{commit}`])).trim();
+    const commit = await verifiedBase(git, branch);
     if ((await git(['rev-parse', 'HEAD'])).trim() !== commit || (await git(['status', '--porcelain'])).trim()) throw new Error('Checkout must be clean at the selected committed base branch. Preserve owner work and retry.');
     const target = path.join(worktreeRoot, `inspection-${crypto.randomUUID()}`);
     fs.mkdirSync(worktreeRoot, { recursive: true });

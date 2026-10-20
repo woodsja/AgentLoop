@@ -171,6 +171,36 @@ test('SIGTERM during a real check preserves complete diagnostics, stops setup an
   const records = fs.readFileSync(path.join(f.root, 'state/logs', file), 'utf8').trim().split('\n').map(JSON.parse);
   const output = Buffer.concat(records.filter(r => r.event === 'output' && r.stream === 'stdout').map(r => Buffer.from(r.base64, 'base64'))).toString();
   assert.match(output, /Y{30000}/); assert.equal(records.at(-1).event, 'onboarding_failure');
-  fs.writeFileSync(path.join(p.checkout, 'check.js'), 'process.exit(0)'); commit(p.checkout);
+  fs.writeFileSync(path.join(f.source, 'check.js'), 'process.exit(0)'); commit(f.source);
+  git(p.checkout, ['fetch', 'origin']); git(p.checkout, ['merge', '--ff-only', 'origin/main']);
   assert.equal((await f.run('check')).onboarding.readiness.status, 'ready');
+});
+
+
+test('onboarding rejects local-only base commits and tag refs', async t => {
+  const f = fixture(t);
+  await f.run('add');
+  const p = json(f.options.projectsPath)['owner--repository'];
+  fs.writeFileSync(path.join(p.checkout, 'local-only'), 'local-only'); commit(p.checkout);
+  await assert.rejects(f.run('check'), /diverges from origin/);
+  const saved = json(f.options.projectsPath)['owner--repository'];
+  assert.equal(saved.enabled, false);
+  await assert.rejects(f.run('activate'), /project check/);
+});
+
+test('registration refuses a tag supplied as a base branch', async t => {
+  const f = fixture(t);
+  git(f.source, ['tag', 'v1.0']);
+  await assert.rejects(f.run('add', { baseBranch: 'v1.0' }), /requires existing local and origin branch refs|repository_invalid/);
+  assert.equal(json(f.options.projectsPath)['owner--repository'], undefined);
+});
+
+test('activation refuses local branch divergence after successful readiness', async t => {
+  const f = fixture(t);
+  await f.run('add'); await f.run('check');
+  const p = json(f.options.projectsPath)['owner--repository'];
+  // Keep the ready commit on disk while moving the local branch away from origin.
+  fs.writeFileSync(path.join(p.checkout, 'local-only'), 'unpublished change'); commit(p.checkout);
+  await assert.rejects(f.run('activate'), /diverges from origin/);
+  assert.equal(json(f.options.projectsPath)['owner--repository'].enabled, false);
 });
