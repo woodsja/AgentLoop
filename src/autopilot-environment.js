@@ -35,7 +35,9 @@ async function prepareRepositoryEnvironment(projectPath, project, {
     const prepare = contract.runtime === 'python' ? preparePython : require('./project-preflight').prepareNode;
     return prepare(root, project, { isCancelled, onProcess, timeoutMs, recordExecution, spawn });
   }
-  if (project.pythonEnvironment || project.prepareVenv || instructionsRequireVenv(instructions)) {
+  // Keep legacy, currently active owner policies available until controlled migration.
+  if (project.pythonEnvironment) return require('./legacy-python-preflight').preparePython(path.resolve(projectPath), project.pythonEnvironment, { isCancelled, onProcess });
+  if (project.prepareVenv || instructionsRequireVenv(instructions)) {
     throw blocked('contract_missing', 'Python setup requires .ralph/project.json, pyproject.toml and a committed uv.lock. Run project add to migrate the staged legacy registration; bare prepareVenv and instruction-only setup are retired.');
   }
   return { venvPath: null };

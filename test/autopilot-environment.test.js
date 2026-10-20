@@ -10,9 +10,8 @@ for (const existing of [false, true]) test(`retired bare venv setup cannot produ
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'retired-venv-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   if (existing) fs.mkdirSync(path.join(root, '.venv'));
-  for (const project of [{ prepareVenv: true }, { pythonEnvironment: {} }]) {
-    await assert.rejects(prepareRepositoryEnvironment(root, project), error => error.outcome?.reason === 'contract_missing');
-  }
+  await assert.rejects(prepareRepositoryEnvironment(root, { prepareVenv: true }), error => error.outcome?.reason === 'contract_missing');
+  await assert.rejects(prepareRepositoryEnvironment(root, { pythonEnvironment: {} }), error => error.code === 'PYTHON_PREFLIGHT_BLOCKED' && error.outcome?.reason === 'policy');
   const instructions = [{ path: 'AGENTS.md', content: "Use this repository's .venv for checks." }];
   assert.equal(instructionsRequireVenv(instructions), true);
   await assert.rejects(prepareRepositoryEnvironment(root, {}, { instructions }), /committed uv.lock/);

@@ -37,7 +37,7 @@ function validateProject(projectName, project) {
 
   if (Object.hasOwn(project, 'runtime') && !['node', 'python'].includes(project.runtime)) throw new TypeError('runtime must be node or python');
 
-  if (Object.hasOwn(project, 'pythonEnvironment')) throw new TypeError('Replace legacy pythonEnvironment with runtime python and commit .ralph/project.json, pyproject.toml and uv.lock.');
+  if (Object.hasOwn(project, 'pythonEnvironment')) require('./legacy-python-preflight').validatePythonPolicy(project.pythonEnvironment);
 
   // An omitted policy behaves as `none`, which requires a persisted skip
   // explanation before the PR can be presented for merge. Until deterministic
