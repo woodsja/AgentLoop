@@ -587,7 +587,7 @@ async function run(argv, dependencies = {}) {
         store.save(job);
       }
       const environment = await prepareEnvironment(workspace.worktreePath, project, {
-        instructions, isCancelled: dependencies.environmentIsCancelled, requirePythonReadiness: true,
+        instructions, isCancelled: dependencies.environmentIsCancelled,
         onProcess: claim => { job.environmentProcess = claim; store.save(job); },
       });
       if (pythonRequired || contractRequired) {

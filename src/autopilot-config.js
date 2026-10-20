@@ -144,7 +144,6 @@ function loadProjectConfig(projectName, options = {}) {
     // Keep the normal autonomous run bounded, while allowing an explicit
     // project policy to choose a different retry limit.
     maxAttempts: project.maxAttempts ?? 2,
-    prepareVenv: project.prepareVenv ?? false,
     ...(project.implementationStrategy ? { implementationStrategy: project.implementationStrategy } : {}),
   };
 }

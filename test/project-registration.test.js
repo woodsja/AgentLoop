@@ -204,3 +204,58 @@ test('activation refuses local branch divergence after successful readiness', as
   await assert.rejects(f.run('activate'), /diverges from origin/);
   assert.equal(json(f.options.projectsPath)['owner--repository'].enabled, false);
 });
+
+for (const runtime of ['node', 'python']) test(`${runtime}: migrate a staged legacy alias without replacing owner preferences`, async t => {
+  const f = fixture(t, runtime);
+  const checkout = path.join(f.root, 'legacy-checkout');
+  git(f.root, ['clone', '-q', f.source, checkout]);
+  const old = { enabled: false, repo: 'owner/repository', checkout, worktreeRoot: path.join(f.root, 'legacy-worktrees'), baseBranch: 'main',
+    worker: 'claude', reviewModel: 'opus', reviewPolicy: 'always', autoMerge: true, maxAttempts: 4, ciWorkflow: 'Owner checks',
+    readyLabel: 'owner-ready', humanLabel: 'owner-human', verification: 'owner legacy check', prepareVenv: runtime === 'python', custom: { keep: true } };
+  write(f.options.projectsPath, { ...json(f.options.projectsPath), legacyAlias: old });
+  const config = json(f.options.configPath);
+  config.allowedProjects.legacyAlias = { root: checkout, worktreeRoot: old.worktreeRoot, worktrees: {}, ownerField: 'keep' };
+  write(f.options.configPath, config);
+  const before = [f.options.configPath, f.options.projectsPath].map(p => fs.readFileSync(p, 'utf8'));
+  await assert.rejects(f.run('add', { approve: async () => false }), /cancelled/);
+  assert.deepEqual([f.options.configPath, f.options.projectsPath].map(p => fs.readFileSync(p, 'utf8')), before);
+  await assert.rejects(f.run('add', { afterWrite: i => { if (i === 0) throw new Error('migration disk failure'); } }), /migration disk failure/);
+  assert.deepEqual([f.options.configPath, f.options.projectsPath].map(p => fs.readFileSync(p, 'utf8')), before);
+  const migrated = await f.run('add');
+  const { prepareVenv, ...preferences } = old;
+  for (const [key, value] of Object.entries(preferences)) assert.deepEqual(migrated[key], value, key);
+  assert.equal(migrated.prepareVenv, undefined); assert.equal(migrated.runtime, runtime);
+  assert.equal(json(f.options.projectsPath)['owner--repository'], undefined);
+  assert.equal(json(f.options.configPath).allowedProjects.legacyAlias.ownerField, 'keep');
+  assert.equal(migrated.onboarding.activation, 'inactive');
+  assert.equal((await f.run('check')).onboarding.readiness.status, 'ready');
+  assert.equal((await f.run('activate')).autoMerge, true);
+});
+
+test('legacy migration refuses active projects, conflicting aliases and registry roots without any write', async t => {
+  const f = fixture(t);
+  const old = { enabled: true, repo: 'owner/repository', checkout: f.source, worktreeRoot: path.join(f.root, 'worktrees'), baseBranch: 'main' };
+  write(f.options.projectsPath, { legacyAlias: old });
+  write(f.options.configPath, { allowedProjects: { legacyAlias: f.source } });
+  const before = [f.options.configPath, f.options.projectsPath].map(p => fs.readFileSync(p, 'utf8'));
+  await assert.rejects(f.run('add'), /active/);
+  assert.deepEqual([f.options.configPath, f.options.projectsPath].map(p => fs.readFileSync(p, 'utf8')), before);
+  write(f.options.projectsPath, { legacyAlias: { ...old, enabled: false }, another: old });
+  await assert.rejects(f.run('add'), /aliases/);
+  write(f.options.projectsPath, { legacyAlias: { ...old, enabled: false } });
+  write(f.options.configPath, { allowedProjects: { legacyAlias: f.root } });
+  await assert.rejects(f.run('add'), /Conflicting/);
+});
+
+test('legacy migration preserves omitted policy fields rather than changing effective defaults', async t => {
+  const f = fixture(t);
+  const checkout = path.join(f.root, 'legacy-defaults');
+  git(f.root, ['clone', '-q', f.source, checkout]);
+  const prior = { enabled: false, repo: 'owner/repository', checkout, worktreeRoot: path.join(f.root, 'worktrees'), baseBranch: 'main',
+    readyLabel: 'owner-ready', humanLabel: 'owner-human', verification: 'owner-check', autoMerge: false };
+  write(f.options.projectsPath, { legacy: prior });
+  write(f.options.configPath, { allowedProjects: { legacy: checkout } });
+  const actual = await f.run('add');
+  assert.deepEqual(Object.fromEntries(Object.keys(prior).map(k => [k, actual[k]])), prior);
+  for (const key of ['worker', 'reviewModel', 'reviewPolicy', 'maxAttempts', 'ciWorkflow']) assert.equal(Object.hasOwn(actual, key), false, key);
+});

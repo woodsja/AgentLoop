@@ -100,15 +100,24 @@ async function projectCommand(action, repo, options) {
     }
     if (fs.existsSync(`${files[0]}.project-transaction`)) throw new Error('Interrupted registration requires project recover before retry.');
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repo || '')) throw new Error('Use an owner/repository identifier.');
-    const name = repo.toLowerCase().replace('/', '--');
+    const canonicalName = repo.toLowerCase().replace('/', '--');
     let expected = files.map(file => fs.readFileSync(file, 'utf8'));
     const config = JSON.parse(expected[0]), projects = JSON.parse(expected[1]);
     config.allowedProjects ||= {};
+    const matches = Object.entries(projects).filter(([, p]) => p.repo?.toLowerCase() === repo.toLowerCase());
+    if (matches.length > 1 || (matches.length && matches[0][0] !== canonicalName && projects[canonicalName])) throw new Error('Conflicting repository aliases; reconcile owner settings before migration.');
+    const name = matches[0]?.[0] || canonicalName;
     const prior = projects[name], registered = config.allowedProjects[name];
-    const aliases = Object.entries(projects).filter(([key, p]) => key !== name && p.repo?.toLowerCase() === repo.toLowerCase());
-    if (aliases.length) throw new Error(`Repository already configured as ${aliases[0][0]}; preserve its owner settings.`);
-    if (Boolean(prior) !== Boolean(registered) || (prior && (!prior.onboarding || !registered.onboarding
-      || prior.repo?.toLowerCase() !== repo.toLowerCase() || prior.checkout !== registered.root || prior.worktreeRoot !== registered.worktreeRoot))) throw new Error('Conflicting existing owner registration; reconcile both stores without replacing owner edits.');
+    const legacy = prior && !prior.onboarding;
+    const registeredRoot = typeof registered === 'string' ? registered : registered?.root;
+    const samePath = (left, right) => typeof left === 'string' && typeof right === 'string'
+      && fs.realpathSync(path.resolve(path.dirname(files[0]), left)) === fs.realpathSync(path.resolve(path.dirname(files[0]), right));
+    if (Boolean(prior) !== Boolean(registered) || (prior && (
+      prior.repo?.toLowerCase() !== repo.toLowerCase() || !samePath(prior.checkout, registeredRoot)
+      || (registered.worktreeRoot && path.resolve(prior.worktreeRoot) !== path.resolve(registered.worktreeRoot))
+      || (!legacy && !registered.onboarding)))) throw new Error('Conflicting existing owner registration; reconcile both stores without replacing owner edits.');
+    if (legacy && (prior.enabled !== false || registered.activation === 'active')) throw new Error('Existing project is active; owner must explicitly stage it before migration. No activation decision was changed.');
+    if (legacy && action !== 'add') throw new Error('Migrate the staged legacy registration with project add first.');
     const save = () => {
       transaction(files, [config, projects], { ...options, expected });
       expected = files.map(file => fs.readFileSync(file, 'utf8'));
@@ -170,9 +179,9 @@ async function projectCommand(action, repo, options) {
       save();
       return prior;
     }
-    if (prior) { record('preview', { project: prior, duplicate: true }); return prior; }
-    const checkout = path.resolve(options.checkoutRoot, name);
-    const worktreeRoot = path.resolve(options.worktreeRoot, name);
+    if (prior && !legacy) { record('preview', { project: prior, duplicate: true }); return prior; }
+    const checkout = legacy ? path.resolve(prior.checkout) : path.resolve(options.checkoutRoot, name);
+    const worktreeRoot = legacy ? path.resolve(prior.worktreeRoot) : path.resolve(options.worktreeRoot, name);
     const { command } = preparationCommands(path.dirname(checkout), options);
     fs.mkdirSync(path.dirname(checkout), { recursive: true });
     if (!fs.existsSync(checkout)) {
@@ -185,15 +194,15 @@ async function projectCommand(action, repo, options) {
     }
     const git = args => command('git', ['-C', checkout, ...args], 'repository_invalid');
     const origin = (await git(['remote', 'get-url', 'origin'])).trim();
-    if (origin !== (options.source || `https://github.com/${repo}.git`)) throw new Error(`Checkout origin conflicts: ${origin}`);
-    const branch = options.baseBranch || (await git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])).trim().replace(/^origin\//, '');
+    if (origin.replace(/^git@github.com:/, 'https://github.com/').replace(/\.git$/, '').toLowerCase() !== (options.source || `https://github.com/${repo}.git`).replace(/\.git$/, '').toLowerCase()) throw new Error(`Checkout origin conflicts: ${origin}`);
+    const branch = (legacy ? prior.baseBranch : options.baseBranch) || (await git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])).trim().replace(/^origin\//, '');
     const commit = await verifiedBase(git, branch);
     if ((await git(['rev-parse', 'HEAD'])).trim() !== commit || (await git(['status', '--porcelain'])).trim()) throw new Error('Checkout must be clean at the selected committed base branch. Preserve owner work and retry.');
     const target = path.join(worktreeRoot, `inspection-${crypto.randomUUID()}`);
     fs.mkdirSync(worktreeRoot, { recursive: true });
     await git(['worktree', 'add', '--detach', target, commit]);
     record('workspace', { path: target, retained: true });
-    const contract = readContract(target);
+    const contract = readContract(target, legacy ? prior.runtime : undefined);
     if (!fs.existsSync(path.join(checkout, contract.lockfile))) throw new Error(`Missing ${contract.lockfile}; commit a native lockfile matching project metadata and retry.`);
     const lock = await git(['show', `HEAD:${contract.lockfile}`]);
     if (lock !== fs.readFileSync(path.join(checkout, contract.lockfile), 'utf8')) throw new Error(`Commit ${contract.lockfile} before registration.`);
@@ -205,22 +214,25 @@ async function projectCommand(action, repo, options) {
     } else await git(['show', 'HEAD:pyproject.toml']);
     const verification = contract.runtime === 'node' ? `npm run ${contract.verification}` : contract.verification;
     const onboarding = { registration: 'staged', activation: 'inactive', readiness: { status: 'unchecked' }, commit, worktree: target, logId: options.logId };
-    const project = { enabled: false, repo, checkout, worktreeRoot, baseBranch: branch, runtime: contract.runtime,
+    const project = legacy ? { ...prior, runtime: contract.runtime, onboarding } : { enabled: false, repo, checkout, worktreeRoot, baseBranch: branch,
       readyLabel: options.readyLabel || 'ready-for-agent', humanLabel: 'ready-for-human', worker: options.worker || 'codex',
-      maxAttempts: 2, verification, ciWorkflow: options.ciWorkflow || 'CI', reviewPolicy: 'always', reviewModel: 'opus', autoMerge: false, onboarding };
+      maxAttempts: 2, verification, ciWorkflow: options.ciWorkflow || 'CI', reviewPolicy: 'always', reviewModel: 'opus', autoMerge: false, runtime: contract.runtime, onboarding };
+    // Legacy owner fields, including verification and every delivery preference,
+    // survive migration. The contract supplies checks at execution time.
+    if (legacy) { delete project.prepareVenv; delete project.pythonEnvironment; }
     const preview = { ...project, contract, install: contract.runtime === 'node' ? 'npm ci --foreground-scripts --no-audit --no-fund' : 'uv sync --locked',
       check: contract.runtime === 'python' ? `export VIRTUAL_ENV="$PWD/.venv"; export PATH="$PWD/.venv/bin:$PATH"; ${verification}` : verification,
       testScript: contract.runtime === 'node' ? read(path.join(target, 'package.json')).scripts[contract.verification] : contract.verification,
       pythonEnvironment: contract.runtime === 'python' ? `${target}/.venv` : null,
       worktree: target, models: config.models || {}, enginePaths: config.enginePaths || {},
-      tools: Object.fromEntries(['git', 'node', 'npm', 'uv', 'python3', project.worker, 'claude'].map(tool => [tool, require('./engines').findOnPath(tool)])) };
+      tools: Object.fromEntries(['git', 'node', 'npm', 'uv', 'python3', project.worker || 'codex', 'claude'].map(tool => [tool, require('./engines').findOnPath(tool)])) };
     delete preview.onboarding;
     onboarding.preview = preview;
     record('preview', preview);
     if (options.isCancelled?.()) throw new Error('Registration cancelled.');
     if (!await approve('Register this repository STAGED with these settings?') || options.isCancelled?.()) throw new Error('Registration cancelled by owner.');
     projects[name] = project;
-    config.allowedProjects[name] = { root: checkout, worktreeRoot, activation: 'inactive', onboarding };
+    config.allowedProjects[name] = { ...(typeof registered === 'object' ? registered : {}), root: checkout, worktreeRoot, activation: 'inactive', onboarding };
     save();
     return project;
   });

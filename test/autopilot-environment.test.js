@@ -1,5 +1,4 @@
 'use strict';
-
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -7,52 +6,20 @@ const os = require('node:os');
 const path = require('node:path');
 const { instructionsRequireVenv, prepareRepositoryEnvironment } = require('../src/autopilot-environment');
 
-test('creates a repo-local venv only when the project requires one', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-autopilot-env-'));
-  try {
-    const calls = [];
-    await prepareRepositoryEnvironment(root, { prepareVenv: true }, { execFile: (file, args, options, callback) => {
-      calls.push({ file, args, options }); fs.mkdirSync(path.join(root, '.venv')); callback(null);
-    } });
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].args, ['-m', 'venv', '.venv']);
-    await prepareRepositoryEnvironment(root, { prepareVenv: true }, { execFile: () => assert.fail('existing venv is reused') });
-    await prepareRepositoryEnvironment(root, { prepareVenv: false }, { execFile: () => assert.fail('venv is not required') });
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+for (const existing of [false, true]) test(`retired bare venv setup cannot produce readiness (existing=${existing})`, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'retired-venv-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  if (existing) fs.mkdirSync(path.join(root, '.venv'));
+  await assert.rejects(prepareRepositoryEnvironment(root, { prepareVenv: true }), error => error.outcome?.reason === 'contract_missing');
+  await assert.rejects(prepareRepositoryEnvironment(root, { pythonEnvironment: {} }), error => error.code === 'PYTHON_PREFLIGHT_BLOCKED' && error.outcome?.reason === 'policy');
+  const instructions = [{ path: 'AGENTS.md', content: "Use this repository's .venv for checks." }];
+  assert.equal(instructionsRequireVenv(instructions), true);
+  await assert.rejects(prepareRepositoryEnvironment(root, {}, { instructions }), /committed uv.lock/);
+  assert.equal(fs.existsSync(path.join(root, '.venv')), existing);
 });
 
-test('honors a repository instruction requiring a local .venv', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-autopilot-env-instructions-'));
-  try {
-    const calls = [];
-    const instructions = [{ path: 'AGENTS.md', content: 'Run pytest through this repository\'s own .venv.' }];
-    assert.equal(instructionsRequireVenv(instructions), true);
-    const result = await prepareRepositoryEnvironment(root, { prepareVenv: false }, {
-      instructions,
-      execFile: (file, args, options, callback) => {
-        calls.push({ file, args, options });
-        fs.mkdirSync(path.join(root, '.venv'));
-        callback(null);
-      },
-    });
-    assert.equal(result.venvPath, path.join(root, '.venv'));
-    assert.deepEqual(calls[0].args, ['-m', 'venv', '.venv']);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('refuses a non-directory path where the required repository .venv belongs', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-autopilot-env-invalid-'));
-  try {
-    fs.writeFileSync(path.join(root, '.venv'), 'not a virtual environment');
-    await assert.rejects(
-      prepareRepositoryEnvironment(root, { prepareVenv: true }),
-      /exists but is not a directory/,
-    );
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+test('uncontracted non-Python projects retain ordinary execution', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ordinary-project-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.deepEqual(await prepareRepositoryEnvironment(root, {}), { venvPath: null });
 });

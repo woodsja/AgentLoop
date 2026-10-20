@@ -4,12 +4,6 @@ const { findOnPath } = require('./engines');
 const { readContract, blocked } = require('./project-preflight');
 const { preparationCommands } = require('./project-preflight-command');
 
-// The former owner wheel inventory is deliberately unsupported. Preserve an
-// actionable migration error rather than silently accepting obsolete policy.
-function validatePythonPolicy() {
-  throw blocked('contract_missing', 'Replace legacy pythonEnvironment with runtime python and commit .ralph/project.json, pyproject.toml and uv.lock.');
-}
-
 async function preparePython(root, project, options = {}) {
   const contract = readContract(root, project.runtime || 'python');
   const metadata = path.join(root, 'pyproject.toml'), lockPath = path.join(root, contract.lockfile);
@@ -45,4 +39,4 @@ async function preparePython(root, project, options = {}) {
   check();
   return { status: 'ready', category: 'infrastructure', runtime: 'python', baseline, verification, at: new Date().toISOString() };
 }
-module.exports = { preparePython, validatePythonPolicy };
+module.exports = { preparePython };
