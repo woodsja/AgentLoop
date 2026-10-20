@@ -2736,6 +2736,15 @@ async function handleRequest(req, res) {
 
   // Project paths are intentionally not part of the dashboard contract.  The
   // browser can select only administrator-configured project names.
+  if (req.method === 'GET' && requestPath === '/api/project-onboarding') {
+    const projects = require('./project-registration').diagnosticProjects(store.paths.config);
+    const runs = fs.existsSync(store.paths.logs) ? fs.readdirSync(store.paths.logs)
+      .filter(name => /^onboarding-[A-Za-z0-9_-]+\.execution\.ndjson$/.test(name))
+      .map(name => ({ logId: name.replace('.execution.ndjson', '') })) : [];
+    sendJson(res, 200, { projects, runs });
+    return;
+  }
+
   if (req.method === 'GET' && requestPath === '/api/projects') {
     sendJson(res, 200, { projects: Object.keys(store.config.allowedProjects || {}).sort() });
     return;
