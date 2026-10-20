@@ -35,9 +35,9 @@ function validateProject(projectName, project) {
     throw new TypeError(`prepareVenv for project ${projectName} must be a boolean`);
   }
 
-  if (Object.hasOwn(project, 'runtime') && project.runtime !== 'node') throw new TypeError('runtime must be node; Python contracts follow in #85');
+  if (Object.hasOwn(project, 'runtime') && !['node', 'python'].includes(project.runtime)) throw new TypeError('runtime must be node or python');
 
-  if (Object.hasOwn(project, 'pythonEnvironment')) require('./python-preflight').validatePythonPolicy(project.pythonEnvironment);
+  if (Object.hasOwn(project, 'pythonEnvironment')) require('./legacy-python-preflight').validatePythonPolicy(project.pythonEnvironment);
 
   // An omitted policy behaves as `none`, which requires a persisted skip
   // explanation before the PR can be presented for merge. Until deterministic

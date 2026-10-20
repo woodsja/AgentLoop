@@ -133,3 +133,19 @@ test('mixed-engine implementation is explicit and validates its owner policy', (
   assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...good, worker: 'claude' } }) }), /Codex worker/);
   assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...good, reviewPolicy: 'none' } }) }), /independent review/);
 });
+
+test('owner runtime supports the shared Node and Python contract only', () => {
+  for (const runtime of ['node', 'python']) assert.doesNotThrow(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...validProject(), runtime } }) }));
+  assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...validProject(), runtime: 'ruby' } }) }), /runtime must be node or python/);
+});
+
+
+test('legacy Finance Python policy stays loadable until the staged migration (#87)', () => {
+  const policy = { interpreter: '/usr/bin/python3', timeoutMs: 30000, indexUrl: 'https://pypi.org/simple', commands: [],
+    dependencies: ['pytest', 'ruff'].map(name => ({ name, version: '1.0', wheel: `${name}-1.0-py3-none-any.whl`, sha256: 'a'.repeat(64) })) };
+  const configPath = writeConfig({ finance: { ...validProject(), pythonEnvironment: policy } });
+  const project = loadProjectConfig('finance', { configPath });
+  assert.deepEqual(project.pythonEnvironment, policy);
+  const invalid = { ...policy, indexUrl: 'http://untrusted.invalid/simple' };
+  assert.throws(() => loadProjectConfig('finance', { configPath: writeConfig({ finance: { ...validProject(), pythonEnvironment: invalid } }) }));
+});

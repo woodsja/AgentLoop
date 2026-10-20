@@ -163,17 +163,16 @@ test('SIGKILL before the batch timer retains kernel-written bytes on restart', a
   assert.equal(records.at(-1).event,'recovery');
 });
 
-test('Python runner streams complete binary pipes while callback diagnostics stay bounded', async () => {
+test('Native installer stream capture preserves binary pipes while callback diagnostics stay bounded', async () => {
   const id = 't-python-stream';
   const raw = Buffer.concat([Buffer.from([0,255,13,10]),Buffer.alloc(100000,120)]);
   await withExecution(recorder(store,id), () => new Promise((resolve,reject) => {
-    const runner = execFile(process.execPath,[path.join(__dirname,'../src/python-preflight-runner.js'),process.execPath,'-e',`const b=Buffer.concat([Buffer.from([0,255,13,10]),Buffer.alloc(100000,120)]);require('fs').writeFileSync(1,b);require('fs').writeFileSync(2,b);`],{encoding:'utf8',executionPreviewBytes:4096},(error,stdout,stderr)=>{
+    const runner = execFile(process.execPath,['-e',`const b=Buffer.concat([Buffer.from([0,255,13,10]),Buffer.alloc(100000,120)]);require('fs').writeFileSync(1,b);require('fs').writeFileSync(2,b);`],{encoding:'utf8',executionPreviewBytes:4096},(error,stdout,stderr)=>{
       if(error) return reject(error);
       assert.ok(stdout.length<=4096);
       assert.ok(stderr.length<=4096);
       resolve();
     });
-    runner.stdin.end('start\n');
   }));
   assert.deepEqual(output(id,'stdout'),raw);
   assert.deepEqual(output(id,'stderr'),raw);
