@@ -64,7 +64,7 @@ const codex = {
   // Codex writes its final message to a file rather than emitting it as an event.
   usesOutputFile: true,
 
-  args({ model, outputPath, workspaceRoot = null, role = 'one-shot' }) {
+  args({ model, outputPath, role = 'one-shot' }) {
     const critic = role === 'critic';
     return [
       // Global flags: must precede the exec subcommand. Turns off the apps and
@@ -78,13 +78,6 @@ const codex = {
         '--ignore-user-config', '--ignore-rules',
         '--config', 'approval_policy="never"',
         '--config', 'sandbox_workspace_write.network_access=false',
-      ] : workspaceRoot ? [
-        '--ignore-user-config',
-        '--cd', workspaceRoot,
-        '--config', 'default_permissions="ralph_worktree"',
-        '--config', 'permissions.ralph_worktree={extends=":workspace",filesystem={":slash_tmp"="read",":tmpdir"="read"},network={enabled=false}}',
-        '--config', `projects.${JSON.stringify(workspaceRoot)}.trust_level="untrusted"`,
-        '--config', 'approval_policy="never"',
       ] : [
         '--sandbox', 'workspace-write',
         '--config', 'sandbox_workspace_write.network_access=false',
