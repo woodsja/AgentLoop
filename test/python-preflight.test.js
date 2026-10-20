@@ -92,7 +92,7 @@ for (const mode of ['red-tests', 'missing-lock', 'restart-dead', 'restart-ambigu
     const checkout = fixture(t);
     if (mode === 'missing-lock') {
       fs.unlinkSync(path.join(checkout, 'uv.lock'));
-      execFileSync('git', ['-C', checkout, 'commit', '-qam', 'remove lock']);
+      execFileSync('git', ['-C', checkout, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', 'remove lock']);
     }
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-node-state-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
