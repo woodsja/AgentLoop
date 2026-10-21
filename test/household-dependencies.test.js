@@ -21,3 +21,9 @@ test('all review, verification, CI and merge gates fail closed',()=>{
  const good=stored(2);
  for(const delta of [{terminalState:'failed'},{project:'wrong'},{merge:{...good.merge,issueClosed:false}},{review:{...good.review,findings:[{summary:'bug'}]}},{ci:{state:'red',headCommit:good.delivery.commit}},{verification:{...good.verification,commit:'bad'}},{review:null}]) assert.deepEqual(pick([{...good,...delta}], [candidates[0]]),[]);
 });
+
+test('missing commit and permissive None declaration are never admitted',()=>{
+ const bad={...stored(2),delivery:{}};
+ assert.deepEqual(pick([bad],[candidates[0]]),[]);
+ assert.deepEqual(pick([], [issue(2,'## Blocked by\nNone yet, but #1 first')]),[]);
+});

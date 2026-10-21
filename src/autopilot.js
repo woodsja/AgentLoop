@@ -210,7 +210,7 @@ async function run(argv, dependencies = {}) {
   if (!dryRun) await cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, dependencies.captureFailedWork);
   const discovered = await discover(project);
   const recorded = store.list();
-  const admitted = project.repo === 'woodsja/household-purchases'
+  const admitted = project.repo.toLowerCase() === 'woodsja/household-purchases'
     ? householdEligible(discovered, recorded, projectName, project.repo, write) : discovered;
   const selection = selectIssueForJobs(admitted, recorded, choose);
 
