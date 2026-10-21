@@ -274,14 +274,69 @@ async function reconcileIssueClosure(project, issueNumber, { execFile: executeFi
     || !Number.isSafeInteger(issueNumber) || issueNumber < 1 || typeof executeFile !== 'function') {
     throw new TypeError('GitHub issue reconciliation requires a project and issue number');
   }
+  const endpoint = `repos/${project.repo}/issues/${issueNumber}`;
+  const sameIssue = value => {
+    if (!isPlainObject(value) || value.number !== issueNumber
+      || typeof value.repository_url !== 'string' || Object.hasOwn(value, 'pull_request')) return false;
+    try {
+      // GitHub may redirect a transferred issue. Its original number alone
+      // cannot prove that the returned issue still belongs to this repository.
+      const url = new URL(value.repository_url);
+      const repoPath = url.pathname.toLowerCase().replace(/\/+$/, '');
+      const expectedRepo = project.repo.toLowerCase();
+      // GH_HOST is the GitHub CLI's explicit Enterprise host override.
+      const ghHost = String(process.env.GH_HOST || 'github.com').toLowerCase();
+      const allowedApiHosts = ghHost === 'github.com' ? ['api.github.com'] : [ghHost, `api.${ghHost}`];
+      return url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash
+        && (url.port === '' || url.port === '443') && allowedApiHosts.includes(url.hostname.toLowerCase())
+        && (repoPath === `/repos/${expectedRepo}` || repoPath === `/api/v3/repos/${expectedRepo}`);
+    } catch { return false; }
+  };
+  // A merged PR may already have closed its linked issue. Read GitHub's current
+  // state instead of re-issuing a write whose now-redundant PATCH can return 422.
+  const observeState = async () => {
+    let response;
+    try {
+      response = JSON.parse(await runGh(['api', endpoint], executeFile, 'GitHub issue reconciliation'));
+    } catch (error) {
+      if (error.message.includes('GitHub issue reconciliation failed:')) throw error;
+      throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`, { cause: error });
+    }
+    if (!sameIssue(response) || !['open', 'closed'].includes(response.state)) {
+      throw new Error('GitHub issue reconciliation failed: GitHub did not confirm issue identity and state');
+    }
+    return response.state;
+  };
+  if (await observeState() === 'closed') return { number: issueNumber, state: 'closed' };
   let response;
   try {
-    response = JSON.parse(await runGh(['api', '--method', 'PATCH', `repos/${project.repo}/issues/${issueNumber}`, '-f', 'state=closed'], executeFile, 'GitHub issue reconciliation'));
+    response = JSON.parse(await runGh(['api', '--method', 'PATCH', endpoint, '-f', 'state=closed'], executeFile, 'GitHub issue reconciliation'));
   } catch (error) {
-    if (error.message.includes('GitHub issue reconciliation failed:')) throw error;
-    throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`);
+    // GitHub may close the issue while the PATCH is in flight. Only treat an
+    // unsuccessful write as complete when a *fresh* read confirms closure.
+    // A still-open, malformed or unavailable observation remains a failure.
+    const initial = error.message.includes('GitHub issue reconciliation failed:')
+      ? error : new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`, { cause: error });
+    let observed;
+    try { observed = await observeState(); }
+    catch (readError) {
+      // Preserve both independent failures in the owner's durable diagnostics.
+      const failure = new Error(`${initial.message}; subsequent GitHub issue observation failed: ${readError.message}`, { cause: initial });
+      failure.code = readError.code ?? initial.code;
+      failure.statusCode = readError.statusCode ?? initial.statusCode;
+      // Keep the observation's own stack and nested cause independently from
+      // the original failed write for durable owner-visible diagnostics.
+      failure.observationError = readError;
+      throw failure;
+    }
+    // The caller persists the original failure alongside its recovered outcome.
+    if (observed === 'closed') return { number: issueNumber, state: 'closed', reconciledAfterError: initial };
+    const failure = new Error(`${initial.message}; subsequent GitHub issue observation confirmed the issue remains open`, { cause: initial });
+    failure.code = initial.code;
+    failure.statusCode = initial.statusCode;
+    throw failure;
   }
-  if (!isPlainObject(response) || response.number !== issueNumber || response.state !== 'closed') {
+  if (!sameIssue(response) || response.state !== 'closed') {
     throw new Error('GitHub issue reconciliation failed: GitHub did not confirm issue closure');
   }
   return { number: issueNumber, state: 'closed' };

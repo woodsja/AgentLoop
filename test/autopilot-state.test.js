@@ -467,3 +467,71 @@ test('merge records require full identity, persist, reconcile issue closure, and
     assert.throws(() => createJobStore(directory).load(7), /invalid merge state/);
   }
 });
+
+test('failure journal preserves both HTTP classifications and does not affect successful merge budgets', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store);
+  const original = Object.assign(new Error('GitHub PATCH rejected (HTTP 422)'),
+    { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 422 });
+  const latest = Object.assign(new Error('GitHub GET unavailable (HTTP 502)', { cause: original }),
+    { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 502 });
+  const runsBefore = job.runs;
+  const correctionsBefore = job.correctiveCycles;
+  const reviewCorrectionsBefore = job.reviewCorrectiveCycles;
+  recordFailure(job, 'issue-closure-reconciled', latest);
+  job.status = 'merged';
+  markTerminal(job, 'merged');
+  store.save(job);
+  const saved = store.load(7);
+  assert.equal(saved.status, 'merged');
+  assert.equal(saved.terminalState, 'merged');
+  assert.equal(saved.runs, runsBefore);
+  assert.equal(saved.correctiveCycles, correctionsBefore);
+  assert.equal(saved.reviewCorrectiveCycles, reviewCorrectionsBefore);
+  assert.equal(saved.failures[0].exception.statusCode, 502);
+  assert.equal(saved.failures[0].exception.code, 'AUTOPILOT_GITHUB_TRANSPORT');
+  const cause = saved.failures[0].exception.cause;
+  assert.equal(cause.name, 'Error');
+  assert.equal(cause.message, original.message);
+  assert.equal(cause.code, original.code);
+  assert.equal(cause.statusCode, 422);
+  assert.match(cause.stack, /autopilot-state.test.js/);
+  const journal = fs.readFileSync(saved.executionJournal.file, 'utf8');
+  assert.ok(journal.includes('GitHub PATCH rejected (HTTP 422)'));
+  assert.ok(journal.includes('GitHub GET unavailable (HTTP 502)'));
+});
+
+test('nested error cause stacks are preserved in owner-readable durable state', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store);
+  const parse = new SyntaxError('Invalid GitHub PATCH JSON');
+  const write = Object.assign(new Error('PATCH body malformed', { cause: parse }),
+    { code: 'AUTOPILOT_GITHUB_PARSE' });
+  const read = Object.assign(new Error('GET failed (HTTP 502)', { cause: write }),
+    { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 502 });
+  recordFailure(job, 'issue-closure', read);
+  store.save(job);
+  const exception = store.load(7).failures[0].exception;
+  assert.equal(exception.cause.message, write.message);
+  assert.match(exception.cause.stack, /autopilot-state.test.js/);
+  assert.equal(exception.cause.cause.message, parse.message);
+  assert.match(exception.cause.cause.stack, /autopilot-state.test.js/);
+});
+
+test('durable failure evidence retains the separate observation error and its nested cause', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store);
+  const patchError = Object.assign(new Error('PATCH returned 422'), { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 422 });
+  const parseError = new SyntaxError('Malformed GET JSON');
+  const readError = new Error('GitHub read malformed', { cause: parseError });
+  const failure = new Error('PATCH failed; follow-up GET failed', { cause: patchError });
+  failure.observationError = readError;
+  recordFailure(job, 'issue-closure', failure);
+  store.save(job);
+  const evidence = store.load(7).failures[0].exception;
+  assert.equal(evidence.cause.statusCode, 422);
+  assert.equal(evidence.observationError.message, readError.message);
+  assert.match(evidence.observationError.stack, /autopilot-state.test.js/);
+  assert.equal(evidence.observationError.cause.message, parseError.message);
+  assert.match(evidence.observationError.cause.stack, /autopilot-state.test.js/);
+});

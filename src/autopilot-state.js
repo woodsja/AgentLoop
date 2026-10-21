@@ -309,10 +309,24 @@ function validateJob(job, filePath) {
   return job;
 }
 
+// Preserve the complete captured Error chain, including nested stacks, while
+// safely representing cycles without recursively visiting the same error.
+function errorEvidence(error, visited = new WeakSet()) {
+  const evidence = {
+    name: error.name, message: error.message, stack: error.stack ?? null, code: error.code ?? null,
+    ...(Number.isInteger(error.statusCode) ? { statusCode: error.statusCode } : {}),
+  };
+  if (visited.has(error)) return { ...evidence, circular: true };
+  visited.add(error);
+  if (error.cause instanceof Error) evidence.cause = errorEvidence(error.cause, visited);
+  if (error.observationError instanceof Error) evidence.observationError = errorEvidence(error.observationError, visited);
+  return evidence;
+}
+
 function recordFailure(job, phase, error, now = () => new Date().toISOString()) {
   const message = error instanceof Error ? error.message : String(error);
   job.failures.push({ at: now(), run: job.runs, phase, message: diagnosticText(message),
-    ...(error instanceof Error ? { exception: { name: error.name, message: error.message, stack: error.stack ?? null, code: error.code ?? null } } : {}),
+    ...(error instanceof Error ? { exception: errorEvidence(error) } : {}),
   });
   if (job.failures.length > MAX_FAILURES) job.failures.splice(0, job.failures.length - MAX_FAILURES);
   return job;

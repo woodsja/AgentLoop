@@ -128,7 +128,8 @@ test('observes exact PR identity, merges with GitHub expected-head protection, a
   const responses = [
     JSON.stringify({ number: 42, url: 'https://github.com/example/repo/pull/42', state: 'OPEN', headRefName: 'ralph/issue-42', headRefOid: 'deadbeef', baseRefName: 'ralph-dev', mergeCommit: null }),
     JSON.stringify({ merged: true, sha: 'mergecafe' }),
-    JSON.stringify({ number: 9, state: 'closed' }),
+    JSON.stringify({ number: 9, state: 'open', repository_url: 'https://api.github.com/repos/example/repo' }),
+    JSON.stringify({ number: 9, state: 'closed', repository_url: 'https://api.github.com/repos/example/repo' }),
   ];
   const executeFile = (file, args, options, callback) => { calls.push([file, args]); assertUnattendedGhOptions(options); callback(null, responses.shift(), ''); };
   const project = { repo: 'example/repo' };
@@ -140,6 +141,7 @@ test('observes exact PR identity, merges with GitHub expected-head protection, a
   assert.deepEqual(calls.map(([, args]) => args), [
     ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergeCommit'],
     ['api', '--method', 'PUT', 'repos/example/repo/pulls/42/merge', '-f', 'sha=deadbeef'],
+    ['api', 'repos/example/repo/issues/9'],
     ['api', '--method', 'PATCH', 'repos/example/repo/issues/9', '-f', 'state=closed'],
   ]);
 });
@@ -205,4 +207,196 @@ test('collects deterministic failed job and log diagnostics without re-running w
     execFile: () => { throw new Error('gh must not be called'); },
   });
   assert.match(empty, /no logs are available/);
+});
+
+const issueState = (number, state, repository = 'example/repo') => ({
+  number, state, repository_url: `https://api.github.com/repos/${repository}`,
+});
+
+test('issue closure: an already closed GitHub issue is confirmed without a redundant PATCH', async () => {
+  const commands = [];
+  const executeFile = (file, args, options, callback) => {
+    assert.equal(file, 'gh');
+    assertUnattendedGhOptions(options);
+    commands.push(args);
+    if (args.includes('PATCH')) return callback(new Error('Unexpected PATCH'), '', 'gh: Validation Failed (HTTP 422)');
+    callback(null, JSON.stringify(issueState(4, 'closed')), '');
+  };
+  assert.deepEqual(await reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), { number: 4, state: 'closed' });
+  assert.deepEqual(commands, [['api', 'repos/example/repo/issues/4']]);
+});
+
+test('issue closure: a 422 after GitHub closed it concurrently is reconciled by a verified GET', async () => {
+  const commands = [];
+  let reads = 0;
+  const executeFile = (file, args, options, callback) => {
+    assert.equal(file, 'gh');
+    assertUnattendedGhOptions(options);
+    commands.push(args);
+    if (args[2] === 'PATCH') {
+      return callback(Object.assign(new Error('Validation Failed'), { code: 1 }), '', 'gh: Validation Failed (HTTP 422)');
+    }
+    reads += 1;
+    callback(null, JSON.stringify(issueState(4, reads === 1 ? 'open' : 'closed')), '');
+  };
+  const outcome = await reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile });
+  assert.equal(outcome.number, 4);
+  assert.equal(outcome.state, 'closed');
+  assert.ok(outcome.reconciledAfterError instanceof Error);
+  assert.match(outcome.reconciledAfterError.message, /Validation Failed \(HTTP 422\)/);
+  assert.equal(outcome.reconciledAfterError.code, 'AUTOPILOT_GITHUB_TRANSPORT');
+  assert.equal(outcome.reconciledAfterError.statusCode, 422);
+  assert.deepEqual(commands.map(args => args[2] || 'GET'), ['GET', 'PATCH', 'GET']);
+});
+
+test('issue closure: 422 with issue still open, malformed identity, or malformed GitHub is never approved', async () => {
+  for (const after of [issueState(4, 'open'), issueState(999, 'closed'), 'malformed']) {
+    let reads = 0;
+    const executeFile = (file, args, options, callback) => {
+      assert.equal(file, 'gh');
+      assertUnattendedGhOptions(options);
+      if (args[2] === 'PATCH') {
+        return callback(Object.assign(new Error('Validation Failed'), { code: 1 }), '', 'gh: Validation Failed (HTTP 422)');
+      }
+      reads += 1;
+      const value = reads === 1 ? issueState(4, 'open') : after;
+      callback(null, value === 'malformed' ? '{bad' : JSON.stringify(value), '');
+    };
+    await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }),
+      /GitHub issue reconciliation failed/);
+  }
+});
+
+test('issue closure rejects transferred issue identity, even if same issue number and closed', async () => {
+  let patchCalled = false;
+  const executeFile = (file, args, options, callback) => {
+    assertUnattendedGhOptions(options);
+    if (args[2] === 'PATCH') patchCalled = true;
+    callback(null, JSON.stringify(issueState(4, 'closed', 'other/repository')), '');
+  };
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), /issue identity and state/);
+  assert.equal(patchCalled, false);
+});
+
+test('issue closure rejects a PR-shaped response at the issues endpoint', async () => {
+  const executeFile = (file, args, options, callback) => callback(null,
+    JSON.stringify({ ...issueState(4, 'closed'), pull_request: { url: 'https://api.github.com/repos/example/repo/pulls/4' } }), '');
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), /issue identity and state/);
+});
+
+test('issue closure rejects a successful PATCH response with another repository identity', async () => {
+  let reads = 0;
+  const executeFile = (file, args, options, callback) => {
+    if (args[2] === 'PATCH') return callback(null, JSON.stringify(issueState(4, 'closed', 'other/repository')), '');
+    reads += 1;
+    callback(null, JSON.stringify(issueState(4, 'open')), '');
+  };
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), /did not confirm issue closure/);
+  assert.equal(reads, 1);
+});
+
+test('issue closure preserves original PATCH HTTP 422 and subsequent read failure diagnostics', async () => {
+  for (const post of [issueState(4, 'closed', 'foreign/repo'), 'malformed', 'network']) {
+    let reads = 0;
+    const executeFile = (file, args, options, callback) => {
+      if (args[2] === 'PATCH') {
+        return callback(Object.assign(new Error('GitHub 422'), { code: 1 }), '', 'gh: Validation Failed (HTTP 422)');
+      }
+      reads += 1;
+      if (reads === 1) return callback(null, JSON.stringify(issueState(4, 'open')), '');
+      if (post === 'network') {
+        return callback(Object.assign(new Error('disconnected'), { code: 1 }), '', 'gh: temporary GitHub outage (HTTP 502)');
+      }
+      callback(null, post === 'malformed' ? '{bad' : JSON.stringify(post), '');
+    };
+    await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
+      error.message.includes('Validation Failed (HTTP 422)')
+      && (error.message.includes('identity') || error.message.includes('malformed') || error.message.includes('outage'))
+      && (post === 'network' ? error.statusCode === 502 && error.cause?.statusCode === 422 : error.statusCode === 422));
+  }
+});
+
+test('issue closure initial GET errors fail closed without any PATCH', async () => {
+  for (const value of ['{bad', 'network']) {
+    const calls = [];
+    const executeFile = (file, args, options, callback) => {
+      calls.push(args);
+      if (value === 'network') {
+        callback(Object.assign(new Error('temporarily unavailable'), { code: 1 }), '', 'gh: API unavailable (HTTP 503)');
+      } else callback(null, value, '');
+    };
+    await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }),
+      /GitHub issue reconciliation failed/);
+    assert.deepEqual(calls, [['api', 'repos/example/repo/issues/4']]);
+  }
+});
+
+
+test('issue closure preserves malformed PATCH body error and failed read error together', async () => {
+  let reads = 0;
+  const executeFile = (file, args, options, callback) => {
+    assertUnattendedGhOptions(options);
+    if (args[2] === 'PATCH') return callback(null, '{bad', '');
+    reads += 1;
+    if (reads === 1) return callback(null, JSON.stringify(issueState(4, 'open')), '');
+    callback(Object.assign(new Error('Service unavailable'), { code: 1 }), '', 'gh: temporary GitHub outage (HTTP 502)');
+  };
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
+    error.message.includes('GitHub issue reconciliation failed: gh returned malformed JSON')
+    && error.message.includes('subsequent GitHub issue observation failed')
+    && error.message.includes('temporary GitHub outage (HTTP 502)')
+    && error.code === 'AUTOPILOT_GITHUB_TRANSPORT' && error.statusCode === 502);
+});
+
+test('issue closure keeps HTTP failure classification when read confirms issue remains open', async () => {
+  const executeFile = (file, args, options, callback) => {
+    assertUnattendedGhOptions(options);
+    if (args[2] === 'PATCH') {
+      return callback(Object.assign(new Error('Rejected'), { code: 1, statusCode: 422 }), '',
+        'gh: Validation Failed (HTTP 422)');
+    }
+    callback(null, JSON.stringify(issueState(4, 'open')), '');
+  };
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
+    error.code === 'AUTOPILOT_GITHUB_TRANSPORT' && error.statusCode === 422
+    && error.message.includes('Validation Failed (HTTP 422)')
+    && error.message.includes('issue remains open'));
+});
+
+test('issue closure accepts only the configured HTTPS GitHub API host and exact repository endpoint', async () => {
+  const invalidUrls = [
+    'https://evil.example/repos/example/repo',
+    'https://api.github.com/x/repos/example/repo',
+    'http://api.github.com/repos/example/repo',
+    'https://api.github.com/repos/example/repo-fake',
+  ];
+  for (const repository_url of invalidUrls) {
+    let patched = false;
+    const executeFile = (file, args, options, callback) => {
+      if (args[2] === 'PATCH') patched = true;
+      callback(null, JSON.stringify({ ...issueState(4, 'closed'), repository_url }), '');
+    };
+    await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }),
+      /issue identity and state/, repository_url);
+    assert.equal(patched, false);
+  }
+});
+
+test('failed PATCH and failed follow-up GET keep both original errors, stacks, and causes', async () => {
+  let reads = 0;
+  const executeFile = (file, args, options, callback) => {
+    assertUnattendedGhOptions(options);
+    if (args[2] === 'PATCH') {
+      return callback(Object.assign(new Error('GitHub PATCH 422'), { code: 1, statusCode: 422 }), '',
+        'gh: Validation Failed (HTTP 422)');
+    }
+    reads += 1;
+    callback(null, reads === 1 ? JSON.stringify(issueState(4, 'open')) : '{bad', '');
+  };
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
+    error.message.includes('Validation Failed (HTTP 422)')
+    && error.cause?.statusCode === 422
+    && error.observationError?.message.includes('malformed JSON')
+    && error.observationError?.cause instanceof SyntaxError
+    && typeof error.observationError.cause.stack === 'string');
 });
