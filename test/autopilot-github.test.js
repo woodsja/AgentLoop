@@ -362,3 +362,22 @@ test('issue closure keeps HTTP failure classification when read confirms issue r
     && error.message.includes('Validation Failed (HTTP 422)')
     && error.message.includes('issue remains open'));
 });
+
+test('issue closure accepts only the configured HTTPS GitHub API host and exact repository endpoint', async () => {
+  const invalidUrls = [
+    'https://evil.example/repos/example/repo',
+    'https://api.github.com/x/repos/example/repo',
+    'http://api.github.com/repos/example/repo',
+    'https://api.github.com/repos/example/repo-fake',
+  ];
+  for (const repository_url of invalidUrls) {
+    let patched = false;
+    const executeFile = (file, args, options, callback) => {
+      if (args[2] === 'PATCH') patched = true;
+      callback(null, JSON.stringify({ ...issueState(4, 'closed'), repository_url }), '');
+    };
+    await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }),
+      /issue identity and state/, repository_url);
+    assert.equal(patched, false);
+  }
+});

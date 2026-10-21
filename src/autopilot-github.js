@@ -283,8 +283,13 @@ async function reconcileIssueClosure(project, issueNumber, { execFile: executeFi
       // cannot prove that the returned issue still belongs to this repository.
       const url = new URL(value.repository_url);
       const repoPath = url.pathname.toLowerCase().replace(/\/+$/, '');
-      return ['https:', 'http:'].includes(url.protocol)
-        && repoPath.endsWith(`/repos/${project.repo.toLowerCase()}`);
+      const expectedRepo = project.repo.toLowerCase();
+      // GH_HOST is the GitHub CLI's explicit Enterprise host override.
+      const ghHost = String(process.env.GH_HOST || 'github.com').toLowerCase();
+      const allowedApiHosts = ghHost === 'github.com' ? ['api.github.com'] : [ghHost, `api.${ghHost}`];
+      return url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash
+        && (url.port === '' || url.port === '443') && allowedApiHosts.includes(url.hostname.toLowerCase())
+        && (repoPath === `/repos/${expectedRepo}` || repoPath === `/api/v3/repos/${expectedRepo}`);
     } catch { return false; }
   };
   // A merged PR may already have closed its linked issue. Read GitHub's current

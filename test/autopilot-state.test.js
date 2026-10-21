@@ -490,9 +490,30 @@ test('failure journal preserves both HTTP classifications and does not affect su
   assert.equal(saved.reviewCorrectiveCycles, reviewCorrectionsBefore);
   assert.equal(saved.failures[0].exception.statusCode, 502);
   assert.equal(saved.failures[0].exception.code, 'AUTOPILOT_GITHUB_TRANSPORT');
-  assert.deepEqual(saved.failures[0].exception.cause,
-    { name: 'Error', message: original.message, code: original.code, statusCode: 422 });
+  const cause = saved.failures[0].exception.cause;
+  assert.equal(cause.name, 'Error');
+  assert.equal(cause.message, original.message);
+  assert.equal(cause.code, original.code);
+  assert.equal(cause.statusCode, 422);
+  assert.match(cause.stack, /autopilot-state.test.js/);
   const journal = fs.readFileSync(saved.executionJournal.file, 'utf8');
   assert.ok(journal.includes('GitHub PATCH rejected (HTTP 422)'));
   assert.ok(journal.includes('GitHub GET unavailable (HTTP 502)'));
+});
+
+test('nested error cause stacks are preserved in owner-readable durable state', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store);
+  const parse = new SyntaxError('Invalid GitHub PATCH JSON');
+  const write = Object.assign(new Error('PATCH body malformed', { cause: parse }),
+    { code: 'AUTOPILOT_GITHUB_PARSE' });
+  const read = Object.assign(new Error('GET failed (HTTP 502)', { cause: write }),
+    { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 502 });
+  recordFailure(job, 'issue-closure', read);
+  store.save(job);
+  const exception = store.load(7).failures[0].exception;
+  assert.equal(exception.cause.message, write.message);
+  assert.match(exception.cause.stack, /autopilot-state.test.js/);
+  assert.equal(exception.cause.cause.message, parse.message);
+  assert.match(exception.cause.cause.stack, /autopilot-state.test.js/);
 });
