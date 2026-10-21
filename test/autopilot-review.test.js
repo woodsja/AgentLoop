@@ -237,3 +237,18 @@ test('review excerpts never break a multibyte UTF-8 character at their head or t
   assert.ok(!data.deterministic_verification.stderr.includes('\uFFFD'), 'excerpt must not insert Unicode replacement characters');
   assert.match(data.deterministic_verification.stderr, /END OF TESTS/);
 });
+
+test('JSON-escaped terminal output also fits the bounded independent review prompt', async () => {
+  const escape = String.fromCharCode(27);
+  const stdout = escape.repeat(90000) + '\nTEST RUN FINISHED\n';
+  const verification = { ...verificationEvidence, stdout };
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  const verdict = await adapter(commands(), claude)({ project, issue, pullRequest, headCommit: sha, verification, ci: { state: 'green' } });
+  assert.equal(verdict.verdict, 'PASS');
+  const json = claude.calls[0][3].prompt.split('<untrusted_review_data_json>\n')[1].split('\n</untrusted_review_data_json>')[0];
+  const data = JSON.parse(json);
+  assert.ok(Buffer.byteLength(JSON.stringify(data.deterministic_verification), 'utf8') <= 48 * 1024);
+  assert.match(data.deterministic_verification.stdout, /TEST RUN FINISHED/);
+  assert.match(data.deterministic_verification.stdout, /sha256:[a-f0-9]{64}/);
+  assert.equal(verification.stdout, stdout);
+});

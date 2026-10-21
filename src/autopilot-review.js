@@ -137,11 +137,17 @@ function outputForReview(value, limit) {
 }
 function verificationForReview(verification) {
   const excerpt = { ...verification };
-  if (typeof verification.stdout === 'string' && byteLength(verification.stdout) > MAX_REVIEW_STDOUT_BYTES) {
-    excerpt.stdout = outputForReview(verification.stdout, MAX_REVIEW_STDOUT_BYTES);
-  }
-  if (typeof verification.stderr === 'string' && byteLength(verification.stderr) > MAX_REVIEW_STDERR_BYTES) {
-    excerpt.stderr = outputForReview(verification.stderr, MAX_REVIEW_STDERR_BYTES);
+  if (byteLength(JSON.stringify(excerpt)) <= MAX_CONTEXT_BYTES) return excerpt;
+  // JSON escaping can expand terminal controls, so shrink the excerpts until
+  // the serialized review evidence fits. Never alter the original job record.
+  for (const ratio of [1, 0.5, 0.25, 0.125, 0.0625]) {
+    if (typeof verification.stdout === 'string') {
+      excerpt.stdout = outputForReview(verification.stdout, Math.floor(MAX_REVIEW_STDOUT_BYTES * ratio));
+    }
+    if (typeof verification.stderr === 'string') {
+      excerpt.stderr = outputForReview(verification.stderr, Math.floor(MAX_REVIEW_STDERR_BYTES * ratio));
+    }
+    if (byteLength(JSON.stringify(excerpt)) <= MAX_CONTEXT_BYTES) break;
   }
   return excerpt;
 }
