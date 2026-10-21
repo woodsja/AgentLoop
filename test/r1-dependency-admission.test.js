@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createR1Jobs } = require('../src/r1-jobs');
+const { run: runAutopilot } = require('../src/autopilot');
 const { createJob, createJobStore, recordVerification, recordDelivery, recordCiState, beginReviewAttempt, recordReview, recordMerge, recordIssueReconciled, markTerminal } = require('../src/autopilot-state');
 const { configuredProjects } = require('../src/project-registry');
 
@@ -103,7 +104,6 @@ test('R1 daemon must not consume ready labels belonging to the separately schedu
   assert.equal(f.selected[0].issue, 8);
 });
 
-
 test('separate Household autopilot retains admission to issues after R1 yields', async t => {
   const f = fixture(t);
   f.projects.other.repo = 'woodsja/household-purchases';
@@ -125,8 +125,7 @@ test('separate Household autopilot retains admission to issues after R1 yields',
   markTerminal(job, 'merged');
   state.save(job);
   const candidates = [{ number: 2, title: 'Import purchase data', body: '## Blocked by\n- #1: Foundation' }];
-  const { run } = require('../src/autopilot');
-  const selected = await run(['--project', 'other', '--dry-run'], {
+  const selected = await runAutopilot(['--project', 'other', '--dry-run'], {
     loadProjectConfig: () => f.projects.other,
     discoverReadyIssues: async () => candidates,
     jobStore: state,
