@@ -121,22 +121,29 @@ function outputForReview(value, limit) {
   const complete = String(value ?? '');
   const data = Buffer.from(complete, 'utf8');
   if (data.length <= limit) return complete;
-  const first = Math.floor(limit / 4);
-  const last = Math.floor(limit / 2);
+  // Keep a little of the beginning and most of the ending, where test
+  // summaries and final diagnostics usually appear. Cut at UTF-8 boundaries.
+  let first = Math.floor(limit / 4);
+  let lastStart = data.length - Math.floor(limit / 2);
+  while (first < data.length && (data[first] & 0xc0) === 0x80) first -= 1;
+  while (lastStart < data.length && (data[lastStart] & 0xc0) === 0x80) lastStart += 1;
   const digest = crypto.createHash('sha256').update(data).digest('hex');
   return [
     '[Review excerpt of ' + data.length + ' original bytes; sha256:' + digest + '. Full output remains in the durable owner-visible execution log.]',
     '[Beginning of captured output]', data.subarray(0, first).toString('utf8'),
     '[Middle omitted from reviewer prompt only]',
-    '[End of captured output]', data.subarray(data.length - last).toString('utf8'),
+    '[End of captured output]', data.subarray(lastStart).toString('utf8'),
   ].join('\n');
 }
 function verificationForReview(verification) {
-  return {
-    ...verification,
-    stdout: outputForReview(verification.stdout, MAX_REVIEW_STDOUT_BYTES),
-    stderr: outputForReview(verification.stderr, MAX_REVIEW_STDERR_BYTES),
-  };
+  const excerpt = { ...verification };
+  if (typeof verification.stdout === 'string' && byteLength(verification.stdout) > MAX_REVIEW_STDOUT_BYTES) {
+    excerpt.stdout = outputForReview(verification.stdout, MAX_REVIEW_STDOUT_BYTES);
+  }
+  if (typeof verification.stderr === 'string' && byteLength(verification.stderr) > MAX_REVIEW_STDERR_BYTES) {
+    excerpt.stderr = outputForReview(verification.stderr, MAX_REVIEW_STDERR_BYTES);
+  }
+  return excerpt;
 }
 
 function buildReviewPrompt({ repo, pullRequest, headCommit, issue, standards, verification, ci, diff }) {

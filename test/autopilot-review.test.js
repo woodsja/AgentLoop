@@ -226,3 +226,14 @@ test('oversized failed verification is still rejected before a model is invoked'
   await assert.rejects(adapter(commands(), claude)({ project, issue, pullRequest, headCommit: sha, verification, ci: { state: 'green' } }), /verification/);
   assert.equal(claude.calls.length, 0);
 });
+
+test('review excerpts never break a multibyte UTF-8 character at their head or tail boundaries', async () => {
+  const unicode = String.fromCodePoint(0x2705);
+  const verification = { ...verificationEvidence, stderr: 'x' + unicode.repeat(15000) + '\nEND OF TESTS\n' };
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  await adapter(commands(), claude)({ project, issue, pullRequest, headCommit: sha, verification, ci: { state: 'green' } });
+  const json = claude.calls[0][3].prompt.split('<untrusted_review_data_json>\n')[1].split('\n</untrusted_review_data_json>')[0];
+  const data = JSON.parse(json);
+  assert.ok(!data.deterministic_verification.stderr.includes('\uFFFD'), 'excerpt must not insert Unicode replacement characters');
+  assert.match(data.deterministic_verification.stderr, /END OF TESTS/);
+});
