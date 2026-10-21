@@ -149,3 +149,11 @@ test('legacy Finance Python policy stays loadable until the staged migration (#8
   const invalid = { ...policy, indexUrl: 'http://untrusted.invalid/simple' };
   assert.throws(() => loadProjectConfig('finance', { configPath: writeConfig({ finance: { ...validProject(), pythonEnvironment: invalid } }) }));
 });
+
+test('dependency parsing is an explicit validated owner project policy', () => {
+  const project = { ...validProject(), dependencyFormat: 'household-blocked-by' };
+  assert.equal(loadProjectConfig('demo', { configPath: writeConfig({ demo: project }) }).dependencyFormat, 'household-blocked-by');
+  for (const dependencyFormat of [null, 'none', 'unknown', '', 123]) {
+    assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...project, dependencyFormat } }) }), /dependencyFormat/);
+  }
+});

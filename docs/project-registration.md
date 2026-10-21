@@ -148,3 +148,14 @@ recorded merge and issue reconciliation. Merely closing the GitHub issue is
 insufficient. Blocked labelled issues remain labelled; independent ready issues
 can proceed, and a later ordinary admission scan rechecks dependencies. This
 mechanism does not apply to Household Purchases' separate autopilot yet.
+
+## Optional autopilot prerequisite format
+
+Set `dependencyFormat: "household-blocked-by"` in the owner's project
+configuration to enable dependency checks on the existing issue section
+`## Blocked by`, followed by `None` or one to eight `- #N: title` lines.
+Only smaller-numbered same-repository issues are permitted. Admission requires
+a durable merged job with passing exact-commit verification, CI, and Claude
+review. Missing or malformed declarations fail closed. Other projects without
+the setting retain their existing selection behavior. Historical manual merges
+require separate explicit reconciliation; do not invent job evidence.

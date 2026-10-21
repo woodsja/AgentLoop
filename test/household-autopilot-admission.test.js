@@ -2,8 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { run } = require('../src/autopilot');
-const household = { enabled: true, repo: 'Woodsja/household-purchases', readyLabel: 'ready-for-agent', worker: 'codex', reviewPolicy: 'always', autoMerge: true };
-const unrelated = { ...household, repo: 'example/other' };
+const household = { enabled: true, repo: 'Woodsja/household-purchases', readyLabel: 'ready-for-agent', worker: 'codex', reviewPolicy: 'always', autoMerge: true, dependencyFormat: 'household-blocked-by' };
+const { dependencyFormat, ...otherConfig } = household;
+const unrelated = { ...otherConfig, repo: 'example/other' };
 const issue = { number: 2, title: 'M1: import', body: '## What to build\nImport synthetic data\n\n## Blocked by\n- #1: M0: foundation\n\n## Activation\nPlanning backlog only' };
 function deps(project, output) {
   return { loadProjectConfig: () => project, discoverReadyIssues: async () => [issue],
@@ -28,5 +29,13 @@ test('real autopilot dry run accepts issue #2 after durable approved merge #1', 
   const injected = deps(household, output);
   injected.jobStore.list = () => [approved];
   const result = await run(['--project', 'woodsja--household-purchases', '--dry-run'], injected);
+  assert.equal(result.number, 2);
+});
+
+test('dependency rules are selected by owner policy rather than a repository name', async () => {
+  const output = [];
+  const unconfiguredHousehold = { ...household };
+  delete unconfiguredHousehold.dependencyFormat;
+  const result = await run(['--project', 'woodsja--household-purchases', '--dry-run'], deps(unconfiguredHousehold, output));
   assert.equal(result.number, 2);
 });

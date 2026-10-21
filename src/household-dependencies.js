@@ -1,4 +1,5 @@
 'use strict';
+
 const { approvedMerge } = require('./r1-dependencies');
 
 // Household planning issues use a distinct, documented metadata section.
@@ -20,14 +21,15 @@ function prerequisites(issue) {
   if (new Set(ids).size !== ids.length) throw new Error('duplicate prerequisites');
   return ids;
 }
+
 function eligible(issues, jobs, projectName, repo, log = () => {}) {
   return issues.filter(issue => {
     let ids;
     try { ids = prerequisites(issue); }
-    catch(error) { log(`Issue #${issue.number} blocked: ${error.message}`); return false; }
-    const missing=ids.filter(id => !jobs.some(job => approvedMerge(job, id, projectName, repo)));
-    if(missing.length) log(`Issue #${issue.number} blocked by unresolved ${missing.map(id=>'#'+id).join(', ')}`);
-    return missing.length===0;
+    catch (error) { log(issue.number, `Issue #${issue.number} blocked: ${error.message}`); return false; }
+    const missing = ids.filter(id => !jobs.some(job => approvedMerge(job, id, projectName, repo)));
+    if (missing.length) log(issue.number, `Issue #${issue.number} blocked by unresolved ${missing.map(id => '#' + id).join(', ')}`);
+    return missing.length === 0;
   });
 }
-module.exports={prerequisites,eligible};
+module.exports = { prerequisites, eligible };
