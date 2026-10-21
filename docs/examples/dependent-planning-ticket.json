@@ -1,0 +1,15 @@
+{
+  "id": "mga-dependent-preview-example",
+  "kind": "ticket",
+  "repo": "woodsja/AgentLoop",
+  "title": "Document owner review of planning drafts (dependency example)",
+  "sourceSpec": "#103",
+  "conversation": "ChatGPT planning conversation: autopilot:woodsja/AgentLoop#104, acceptance criterion for an R1 dependency example",
+  "summary": "Provide an example of a dependent planning ticket. This example is a planning artifact and does not authorize implementation or publication to a real account.",
+  "acceptanceCriteria": [
+    "The rendered draft has a single R1 dependency line referencing issue 104.",
+    "Publication and retry operations never apply labels or enqueue work."
+  ],
+  "blockers": [104],
+  "labels": []
+}
