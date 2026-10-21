@@ -41,6 +41,12 @@ function autonomous(project) {
     && ['always', 'risk'].includes(project.reviewPolicy));
 }
 
+// This dependency format opts into the separately scheduled Household
+// autopilot. It must be the only consumer of that project's ready label.
+function ownedByHouseholdAutopilot(project) {
+  return project?.dependencyFormat === 'household-blocked-by';
+}
+
 const digest = issue => crypto.createHash('sha256').update(String((issue && issue.body) || '')).digest('hex');
 
 function hasSpecification(issue) {
@@ -435,7 +441,9 @@ function createR1Jobs(store, options = {}) {
       for (const name of Object.keys(store.config.allowedProjects || {}).sort()) {
         let project;
         try { project = load(name); } catch { continue; }
-        if (!autonomous(project)) continue;
+        // Keep Household issue admission exclusive to its scheduled autopilot;
+        // racing this scanner would prematurely fail and unlabel blocked issues.
+        if (!autonomous(project) || ownedByHouseholdAutopilot(project)) continue;
         const jobs = createJobStore(resolveStateDir(name, project)).list();
         // An issue waiting for a specification is admitted again only after
         // its description changes.
