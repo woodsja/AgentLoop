@@ -129,3 +129,19 @@ it does not undo a completed activation. For a completed rehearsal rollback,
 stop the isolated consumer and restore the exact two config backups, retaining
 state and raw logs. Live rollback and daemon restart remain separate owner
 operations. See [the #87 evidence and open gates](verification/issue-87.md).
+
+## R1 issue prerequisite admission (#27)
+
+For the autonomous `ralph` project only, an issue may declare a dedicated line,
+`Depends on: #12, #15`. List one to eight unique, **smaller-numbered** issues
+in the same repository. Dependencies are not inferred from prose; malformed
+metadata and self/forward references block admission with a diagnostic. This
+smaller-number rule prevents cycles without a separate graph scheduler.
+
+A labelled issue is admitted only when all its prerequisites have durable
+successful merge evidence in the same project's existing R1 job store: exact
+verified commit, green CI, independent Claude PASS without findings, and a
+recorded merge and issue reconciliation. Merely closing the GitHub issue is
+insufficient. Blocked labelled issues remain labelled; independent ready issues
+can proceed, and a later ordinary admission scan rechecks dependencies. This
+mechanism does not apply to Household Purchases' separate autopilot yet.

@@ -17,6 +17,7 @@ const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
 const { createR1LoopImplementation } = require('./r1-loop-implementation');
 const { captureFailedR1Job, bindR1Parent } = require('./r1-failed-work');
+const { eligibleIssues } = require('./r1-dependencies');
 const { verificationFailureSummary } = require('./r1-transcript-summary');
 
 // Owner evidence is verbatim; UI text escaping is a rendering concern.
@@ -441,7 +442,9 @@ function createR1Jobs(store, options = {}) {
           .filter(task => task.workflow === 'r1' && task.project === name && task.status === 'needs_specification')
           .map(task => [task.issue, task.specificationDigest]));
         const issues = (await discover(project)).filter(issue => waiting.get(issue.number) !== digest(issue));
-        const selection = selectIssueForJobs(issues, jobs, selectReadyIssue);
+        const admitted = name === 'ralph'
+          ? eligibleIssues(issues, jobs, name, project.repo, message => console.error(message)) : issues;
+        const selection = selectIssueForJobs(admitted, jobs, selectReadyIssue);
         if (!selection) continue;
         return submit({ project: name, issue: selection.issue.number, title: selection.issue.title, source: 'runner' });
       }
