@@ -239,7 +239,10 @@ test('issue closure: a 422 after GitHub closed it concurrently is reconciled by 
     reads += 1;
     callback(null, JSON.stringify(issueState(4, reads === 1 ? 'open' : 'closed')), '');
   };
-  assert.deepEqual(await reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), { number: 4, state: 'closed' });
+  const outcome = await reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile });
+  assert.equal(outcome.number, 4);
+  assert.equal(outcome.state, 'closed');
+  assert.match(outcome.reconciledAfterError, /Validation Failed \(HTTP 422\)/);
   assert.deepEqual(commands.map(args => args[2] || 'GET'), ['GET', 'PATCH', 'GET']);
 });
 
@@ -322,4 +325,20 @@ test('issue closure initial GET errors fail closed without any PATCH', async () 
       /GitHub issue reconciliation failed/);
     assert.deepEqual(calls, [['api', 'repos/example/repo/issues/4']]);
   }
+});
+
+
+test('issue closure preserves malformed PATCH body error and failed read error together', async () => {
+  let reads = 0;
+  const executeFile = (file, args, options, callback) => {
+    assertUnattendedGhOptions(options);
+    if (args[2] === 'PATCH') return callback(null, '{bad', '');
+    reads += 1;
+    if (reads === 1) return callback(null, JSON.stringify(issueState(4, 'open')), '');
+    callback(Object.assign(new Error('Service unavailable'), { code: 1 }), '', 'gh: temporary GitHub outage (HTTP 502)');
+  };
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
+    error.message.includes('GitHub issue reconciliation failed: gh returned malformed JSON')
+    && error.message.includes('subsequent GitHub issue observation failed')
+    && error.message.includes('temporary GitHub outage (HTTP 502)'));
 });

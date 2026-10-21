@@ -310,18 +310,20 @@ async function reconcileIssueClosure(project, issueNumber, { execFile: executeFi
     // GitHub may close the issue while the PATCH is in flight. Only treat an
     // unsuccessful write as complete when a *fresh* read confirms closure.
     // A still-open, malformed or unavailable observation remains a failure.
+    const initial = error.message.includes('GitHub issue reconciliation failed:')
+      ? error : new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`, { cause: error });
     let observed;
     try { observed = await observeState(); }
     catch (readError) {
       // Preserve both independent failures in the owner's durable diagnostics.
-      const failure = new Error(`${error.message}; subsequent GitHub issue observation failed: ${readError.message}`, { cause: error });
-      failure.code = error.code;
-      failure.statusCode = error.statusCode;
+      const failure = new Error(`${initial.message}; subsequent GitHub issue observation failed: ${readError.message}`, { cause: initial });
+      failure.code = initial.code;
+      failure.statusCode = initial.statusCode;
       throw failure;
     }
-    if (observed === 'closed') return { number: issueNumber, state: 'closed' };
-    if (error.message.includes('GitHub issue reconciliation failed:')) throw error;
-    throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`);
+    // The caller persists the original failure alongside its recovered outcome.
+    if (observed === 'closed') return { number: issueNumber, state: 'closed', reconciledAfterError: initial.message };
+    throw new Error(`${initial.message}; subsequent GitHub issue observation confirmed the issue remains open`, { cause: initial });
   }
   if (!sameIssue(response) || response.state !== 'closed') {
     throw new Error('GitHub issue reconciliation failed: GitHub did not confirm issue closure');

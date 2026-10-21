@@ -2063,6 +2063,26 @@ test('autoMerge merges only the exact approved PR once and recovers a remote mer
 
 });
 
+test('autoMerge retains recovered GitHub issue PATCH failure in the durable evidence', async () => {
+  const store = temporaryStore();
+  const issue = approvedMergeJob(store, 96);
+  const recoveredError = 'GitHub issue reconciliation failed: gh: Validation Failed (HTTP 422)';
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [issue], observePullRequestCi: greenCi,
+    observePullRequest: async () => ({ ...openExpectedPr(`ralph/issue-${issue.number}-merge-${issue.number}`),
+      state: 'MERGED', mergeCommit: 'merge-sha' }),
+    reconcileIssueClosure: async () => ({ number: issue.number, state: 'closed', reconciledAfterError: recoveredError }),
+  }));
+  const saved = createJobStore(store.directory).load(issue.number);
+  assert.equal(saved.terminalState, 'merged');
+  assert.equal(saved.merge.issueClosed, true);
+  assert.ok(saved.failures.some(f => f.phase === 'issue-closure-reconciled'
+    && f.message === recoveredError), 'owner-visible job failure history retains the exact recovered PATCH error');
+  const rawJournal = fs.readFileSync(path.join(store.directory, `issue-${issue.number}.execution.ndjson`), 'utf8');
+  assert.match(rawJournal, /Validation Failed \(HTTP 422\)/);
+});
+
 test('crash recovery records a remote MERGED PR at the expected head without ever calling merge', async () => {
   const recovered = temporaryStore(); const recoveredIssue = approvedMergeJob(recovered, 82);
   const branch = `ralph/issue-${recoveredIssue.number}-merge-${recoveredIssue.number}`;
