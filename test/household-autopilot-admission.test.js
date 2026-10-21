@@ -20,3 +20,13 @@ test('other repositories retain their previous issue selection', async () => {
   const result = await run(['--project', 'other', '--dry-run'], deps(unrelated, output));
   assert.equal(result.number, 2);
 });
+
+test('real autopilot dry run accepts issue #2 after durable approved merge #1', async () => {
+  const output = [];
+  const sha = 'a'.repeat(40);
+  const approved = { issue: {number:1}, project: 'woodsja--household-purchases', repo: 'woodsja/household-purchases', terminal:true, terminalState:'merged', delivery:{commit:sha}, merge:{commit:'b'.repeat(40),repo:'woodsja/household-purchases',approvedHead:sha,issueClosed:true}, ci:{state:'green',headCommit:sha}, review:{reviewer:'claude:opus',verdict:'PASS',commit:sha,findings:[]}, verification:{command:'npm run check',commit:sha,passed:true,exitCode:0,timedOut:false,stdout:'',stderr:''} };
+  const injected = deps(household, output);
+  injected.jobStore.list = () => [approved];
+  const result = await run(['--project', 'woodsja--household-purchases', '--dry-run'], injected);
+  assert.equal(result.number, 2);
+});

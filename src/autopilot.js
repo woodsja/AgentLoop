@@ -211,7 +211,7 @@ async function run(argv, dependencies = {}) {
   const discovered = await discover(project);
   const recorded = store.list();
   const admitted = project.repo.toLowerCase() === 'woodsja/household-purchases'
-    ? householdEligible(discovered, recorded, projectName, project.repo, write) : discovered;
+    ? householdEligible(discovered, recorded, projectName, project.repo.toLowerCase(), write) : discovered;
   const selection = selectIssueForJobs(admitted, recorded, choose);
 
   if (!selection) {

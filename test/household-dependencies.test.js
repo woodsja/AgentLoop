@@ -19,7 +19,7 @@ test('blocked issue cannot starve independent issue; merged record releases next
 });
 test('all review, verification, CI and merge gates fail closed',()=>{
  const good=stored(2);
- for(const delta of [{terminalState:'failed'},{project:'wrong'},{merge:{...good.merge,issueClosed:false}},{review:{...good.review,findings:[{summary:'bug'}]}},{ci:{state:'red',headCommit:good.delivery.commit}},{verification:{...good.verification,commit:'bad'}},{review:null}]) assert.deepEqual(pick([{...good,...delta}], [candidates[0]]),[]);
+ for(const delta of [{terminalState:'failed'},{project:'wrong'},{merge:{...good.merge,issueClosed:false}},{review:{...good.review,findings:[{summary:'bug'}]}},{ci:{state:'red',headCommit:good.delivery.commit}},{verification:{...good.verification,commit:'bad'}},{review:null},{review:{...good.review,commit:'wrong'}},{review:{...good.review,verdict:'NEEDS_CHANGES'}},{review:{...good.review,reviewer:'codex'}},{merge:{...good.merge,approvedHead:'wrong'}},{merge:{...good.merge,repo:'elsewhere/repo'}},{ci:{...good.ci,headCommit:'wrong'}},{repo:'elsewhere/repo'}]) assert.deepEqual(pick([{...good,...delta}], [candidates[0]]),[]);
 });
 
 test('missing commit and permissive None declaration are never admitted',()=>{
