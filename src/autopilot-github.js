@@ -443,6 +443,7 @@ async function collectCiFailureDiagnostics(project, observation, { execFile: exe
 }
 
 module.exports = {
+  runGh,
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,
