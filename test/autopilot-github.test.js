@@ -342,3 +342,18 @@ test('issue closure preserves malformed PATCH body error and failed read error t
     && error.message.includes('subsequent GitHub issue observation failed')
     && error.message.includes('temporary GitHub outage (HTTP 502)'));
 });
+
+test('issue closure keeps HTTP failure classification when read confirms issue remains open', async () => {
+  const executeFile = (file, args, options, callback) => {
+    assertUnattendedGhOptions(options);
+    if (args[2] === 'PATCH') {
+      return callback(Object.assign(new Error('Rejected'), { code: 1, statusCode: 422 }), '',
+        'gh: Validation Failed (HTTP 422)');
+    }
+    callback(null, JSON.stringify(issueState(4, 'open')), '');
+  };
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
+    error.code === 'AUTOPILOT_GITHUB_TRANSPORT' && error.statusCode === 422
+    && error.message.includes('Validation Failed (HTTP 422)')
+    && error.message.includes('issue remains open'));
+});

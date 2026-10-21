@@ -323,7 +323,10 @@ async function reconcileIssueClosure(project, issueNumber, { execFile: executeFi
     }
     // The caller persists the original failure alongside its recovered outcome.
     if (observed === 'closed') return { number: issueNumber, state: 'closed', reconciledAfterError: initial.message };
-    throw new Error(`${initial.message}; subsequent GitHub issue observation confirmed the issue remains open`, { cause: initial });
+    const failure = new Error(`${initial.message}; subsequent GitHub issue observation confirmed the issue remains open`, { cause: initial });
+    failure.code = initial.code;
+    failure.statusCode = initial.statusCode;
+    throw failure;
   }
   if (!sameIssue(response) || response.state !== 'closed') {
     throw new Error('GitHub issue reconciliation failed: GitHub did not confirm issue closure');
