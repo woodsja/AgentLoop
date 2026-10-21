@@ -10,7 +10,7 @@ function merged(number = 1) {
     ci: { state: 'green', headCommit: sha }, review: { reviewer: 'claude:opus', verdict: 'PASS', commit: sha, findings: [] },
     verification: { command: 'npm test', commit: sha, passed: true, exitCode: 0, timedOut: false, stdout: '', stderr: '' } };
 }
-const pick = (issues, jobs = [], log = []) => eligibleIssues(issues, jobs, 'ralph', 'woodsja/AgentLoop', value => log.push(value));
+const pick = (issues, jobs = [], log = []) => eligibleIssues(issues, jobs, 'ralph', 'woodsja/AgentLoop', (_issueNumber, value) => log.push(value));
 test('dependency-free issues retain previous admission behavior; unrelated prose is ignored', () => {
   assert.deepEqual(pick([issue(2, 'Blocked by #1'), issue(3)]).map(x => x.number), [2,3]);
 });
@@ -32,7 +32,7 @@ test('closed, failed, stale, foreign or unreviewed jobs never satisfy prerequisi
 });
 test('malformed, duplicate, self, forward and oversized dependency metadata fails closed with diagnostic', () => {
  const cases = ['Depends on:','Depends on: #1 and #2','Depends on: #1, #1','Depends on: #8','Depends on: #9',
-  'Depends on: #0','Depends on: #1\nDepends on: #2','Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9', 'Depends on: other/repo#1', 'Depends on #1', '**Depends on:** #1', '- Depends on: #1', 'Depends-on: #1'];
+  'Depends on: #0','Depends on: #1\nDepends on: #2','Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9', 'Depends on: other/repo#1', 'Depends on #1', '**Depends on:** #1', '- Depends on: #1', 'Depends-on: #1', '## Depends on: #1', '1. Depends on: #1', '+ Depends on: #1', '__Depends on:__ #1', '`Depends on: #1`', 'Depends: #1', 'Depends upon: #1'];
  for(const marker of cases){const log=[];assert.deepEqual(pick([issue(8,marker)], [merged()],log),[],marker);assert.ok(log[0]?.includes('blocked'),marker)}
  assert.deepEqual(dependencies(issue(8,'Depends on: #1, #2')), [1,2]);
 });
@@ -63,4 +63,13 @@ test('more than eight valid smaller-numbered prerequisites is rejected', () => {
   const diagnostic = [];
   assert.deepEqual(pick([issue(20, 'Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9')], [], diagnostic), []);
   assert.ok(diagnostic[0]?.includes('metadata blocked'));
+});
+
+test('wrong issue number and failed verification never count as approved evidence', () => {
+  const approvedOne = merged();
+  for (const job of [merged(2), { ...approvedOne, verification: { ...approvedOne.verification, passed: false } },
+    { ...approvedOne, verification: { ...approvedOne.verification, exitCode: 1 } },
+    { ...approvedOne, verification: { ...approvedOne.verification, timedOut: true } }]) {
+    assert.equal(pick([issue(3, 'Depends on: #1')], [job]).length, 0);
+  }
 });

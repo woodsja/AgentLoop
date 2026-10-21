@@ -6,7 +6,7 @@ const { hasPassingVerification } = require('./autopilot-state');
 // issue prose or GitHub's closed flag as evidence of completion.
 function dependencies(issue) {
   const text = String(issue.body || '');
-  const lines = text.split(/\r?\n/).filter(line => /^\s*(?:[-*>]\s*)?\*{0,2}Depends[\s-]+on\b/i.test(line));
+  const lines = text.split(/\r?\n/).filter(line => /^[^A-Za-z0-9]*(?:\d+[.)]\s*)?[^A-Za-z0-9]*Depends(?:[\s-]+on|\s+upon)?\b/i.test(line));
   if (lines.length > 1) throw new Error('multiple Depends on metadata lines');
   if (lines.length && !/^\s*Depends on\s*:/i.test(lines[0])) throw new Error('malformed Depends on marker; use: Depends on: #1');
   if (lines.length === 0) return [];
@@ -40,9 +40,9 @@ function eligibleIssues(issues, jobs, projectName, repo, diagnostic = () => {}) 
   return issues.filter(issue => {
     let ids;
     try { ids = dependencies(issue); }
-    catch (error) { diagnostic(`R1 issue #${issue.number} dependency metadata blocked: ${error.message}`); return false; }
+    catch (error) { diagnostic(issue.number, `R1 issue #${issue.number} dependency metadata blocked: ${error.message}`); return false; }
     const missing = ids.filter(id => !jobs.some(job => approved(job, id, projectName, repo)));
-    if (missing.length) diagnostic(`R1 issue #${issue.number} awaits independently approved merged prerequisites: ${missing.map(id => '#'+id).join(', ')}`);
+    if (missing.length) diagnostic(issue.number, `R1 issue #${issue.number} awaits independently approved merged prerequisites: ${missing.map(id => '#'+id).join(', ')}`);
     return missing.length === 0;
   });
 }

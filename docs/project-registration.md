@@ -134,7 +134,7 @@ operations. See [the #87 evidence and open gates](verification/issue-87.md).
 
 For the autonomous `ralph` project only, an issue may declare a dedicated line,
 `Depends on: #12, #15`. List one to eight unique, **smaller-numbered** issues
-in the same repository. Dependencies are not inferred from prose; malformed
+in the same repository. Use exactly a plain line with the colon, with no Markdown heading, list marker, or bold formatting. Near-miss forms block admission rather than being interpreted as prose. Dependencies are not inferred from unrelated prose; malformed
 metadata and self/forward references block admission with a diagnostic. This
 smaller-number rule prevents cycles without a separate graph scheduler.
 

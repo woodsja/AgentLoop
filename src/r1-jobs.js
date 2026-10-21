@@ -444,9 +444,9 @@ function createR1Jobs(store, options = {}) {
           .map(task => [task.issue, task.specificationDigest]));
         const issues = (await discover(project)).filter(issue => waiting.get(issue.number) !== digest(issue));
         const admitted = name === 'ralph'
-          ? eligibleIssues(issues, jobs, name, project.repo, message => {
-            if (dependencyDiagnostics.get(message.split(' ')[2]) === message) return;
-            dependencyDiagnostics.set(message.split(' ')[2], message);
+          ? eligibleIssues(issues, jobs, name, project.repo, (issueNumber, message) => {
+            if (dependencyDiagnostics.get(issueNumber) === message) return;
+            dependencyDiagnostics.set(issueNumber, message);
             console.error(message); // Captured by the owner-visible systemd service journal.
           }) : issues;
         const selection = selectIssueForJobs(admitted, jobs, selectReadyIssue);
