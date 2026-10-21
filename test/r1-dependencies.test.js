@@ -21,7 +21,8 @@ test('blocked earliest issue does not starve free issue; merged evidence unblock
 });
 test('closed, failed, stale, foreign or unreviewed jobs never satisfy prerequisites', () => {
   const target = [issue(3, 'Depends on: #1, #2')];
-  const x = merged();const y = merged(2);
+  const x = merged();
+  const y = merged(2);
   for (const bad of [null, {...x, terminalState:'failed'}, {...x, project:'elsewhere'}, {...x, repo:'elsewhere'},
     {...x, review:null}, {...x, review:{...x.review,commit:'wrong'}}, {...x, review:{...x.review,findings:[{summary:'bad'}]}},
     {...x, verification:{...x.verification,commit:'wrong'}}, {...x, merge:{...x.merge,issueClosed:false}}, {...x,ci:{state:'red',headCommit:x.delivery.commit}}]) {
@@ -34,4 +35,26 @@ test('malformed, duplicate, self, forward and oversized dependency metadata fail
   'Depends on: #0','Depends on: #1\nDepends on: #2','Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9', 'Depends on: other/repo#1'];
  for(const marker of cases){const log=[];assert.deepEqual(pick([issue(8,marker)], [merged()],log),[],marker);assert.ok(log[0]?.includes('blocked'),marker)}
  assert.deepEqual(dependencies(issue(8,'Depends on: #1, #2')), [1,2]);
+});
+
+test('valid merge is not shadowed by failed retry, foreign job or malformed record', () => {
+  const valid = merged();
+  const foreign = { ...valid, project: 'finance-dashboard' };
+  const failed = { ...valid, terminalState: 'failed' };
+  assert.deepEqual(pick([issue(2, 'Depends on: #1')], [valid, foreign, failed, { repo: 'malformed' }]).map(x => x.number), [2]);
+});
+test('every required approval fact fails closed', () => {
+  const good = merged();
+  const mutations = [
+    { terminal: false }, { delivery: null }, { review: { ...good.review, reviewer: 'codex' } },
+    { review: { ...good.review, verdict: 'NEEDS_CHANGES' } },
+    { review: { ...good.review, findings: null } },
+    { ci: { ...good.ci, headCommit: 'bad' } },
+    { merge: { ...good.merge, approvedHead: 'bad' } },
+    { merge: { ...good.merge, repo: 'wrong/repo' } },
+    { merge: { ...good.merge, commit: null } },
+  ];
+  for (const changed of mutations) {
+    assert.deepEqual(pick([issue(2, 'Depends on: #1')], [{ ...good, ...changed }]), []);
+  }
 });
