@@ -158,5 +158,5 @@ eight `- #N` / `- #N: title` lines.
 Only smaller-numbered same-repository issues are permitted. Admission requires
 a durable merged job with passing exact-commit verification, CI, and Claude
 review. Missing or malformed declarations fail closed. Other projects without
-the setting retain their existing selection behavior. Historical manual merges
-require separate explicit reconciliation; do not invent job evidence.
+the setting retain their existing selection behavior. This format requires `reviewPolicy: "always"` and `autoMerge: true`.
+Historical manual merges require separate explicit reconciliation; do not invent job evidence.

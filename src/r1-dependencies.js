@@ -37,15 +37,15 @@ function approved(job, number, projectName, repo) {
   return true;
 }
 
-function eligibleIssues(issues, jobs, projectName, repo, diagnostic = () => {}, parse = dependencies) {
+function eligibleIssues(issues, jobs, projectName, repo, diagnostic = () => {}, parse = dependencies, label = 'R1') {
   return issues.filter(issue => {
     let ids;
     try { ids = parse(issue); }
-    catch (error) { diagnostic(issue.number, `R1 issue #${issue.number} dependency metadata blocked: ${error.message}`); return false; }
+    catch (error) { diagnostic(issue.number, `${label} issue #${issue.number} dependency metadata blocked: ${error.message}`); return false; }
     const missing = ids.filter(id => !jobs.some(job => approved(job, id, projectName, repo)));
-    if (missing.length) diagnostic(issue.number, `R1 issue #${issue.number} awaits independently approved merged prerequisites: ${missing.map(id => '#'+id).join(', ')}`);
+    if (missing.length) diagnostic(issue.number, `${label} issue #${issue.number} awaits independently approved merged prerequisites: ${missing.map(id => '#'+id).join(', ')}`);
     return missing.length === 0;
   });
 }
 
-module.exports = { dependencies, eligibleIssues, approvedMerge: approved };
+module.exports = { dependencies, eligibleIssues };

@@ -16,7 +16,7 @@ function prerequisites(issue) {
     const match = /^- #([1-9]\d*)(?::.*)?$/.exec(line);
     if (!match) throw new Error('invalid prerequisite bullet; expected - #N: title');
     const id = Number(match[1]);
-    if (!Number.isSafeInteger(id) || !Number.isSafeInteger(issue.number) || id >= issue.number) throw new Error('prerequisites must be smaller issue numbers');
+    if (!Number.isSafeInteger(id) || id >= issue.number) throw new Error('prerequisites must be smaller issue numbers');
     return id;
   });
   if (new Set(ids).size !== ids.length) throw new Error('duplicate prerequisites');
@@ -25,7 +25,7 @@ function prerequisites(issue) {
 
 // Reuse the R1 approved-merge admission predicate and diagnostics.
 function eligible(issues, jobs, projectName, repo, log = () => {}) {
-  return eligibleIssues(issues, jobs, projectName, repo, log, prerequisites);
+  return eligibleIssues(issues, jobs, projectName, repo, log, prerequisites, 'Household autopilot');
 }
 
 module.exports = { prerequisites, eligible };
