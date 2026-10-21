@@ -4,6 +4,7 @@
 const { spawn } = require('node:child_process');
 const { execFile } = require('./execution-log');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const { unattendedOptions } = require('./autopilot-subprocess');
 const { hasPassingVerification } = require('./autopilot-state');
 
@@ -111,11 +112,39 @@ function reviewerModel(project) {
   return model;
 }
 function formatStandards(standards) { return standards.length ? standards.map(({ path, content }) => `--- ${path} ---\n${content.trim()}`).join('\n\n') : 'No repository AGENTS.md instructions were present at the delivered commit.'; }
+// The durable verifier record is complete; only the independent review prompt
+// needs bounded excerpts. Preserve head/tail, original byte count and digest.
+// Fail-closed hasPassingVerification always examines the complete record.
+const MAX_REVIEW_STDOUT_BYTES = 20 * 1024;
+const MAX_REVIEW_STDERR_BYTES = 12 * 1024;
+function outputForReview(value, limit) {
+  const complete = String(value ?? '');
+  const data = Buffer.from(complete, 'utf8');
+  if (data.length <= limit) return complete;
+  const first = Math.floor(limit / 4);
+  const last = Math.floor(limit / 2);
+  const digest = crypto.createHash('sha256').update(data).digest('hex');
+  return [
+    '[Review excerpt of ' + data.length + ' original bytes; sha256:' + digest + '. Full output remains in the durable owner-visible execution log.]',
+    '[Beginning of captured output]', data.subarray(0, first).toString('utf8'),
+    '[Middle omitted from reviewer prompt only]',
+    '[End of captured output]', data.subarray(data.length - last).toString('utf8'),
+  ].join('\n');
+}
+function verificationForReview(verification) {
+  return {
+    ...verification,
+    stdout: outputForReview(verification.stdout, MAX_REVIEW_STDOUT_BYTES),
+    stderr: outputForReview(verification.stderr, MAX_REVIEW_STDERR_BYTES),
+  };
+}
+
 function buildReviewPrompt({ repo, pullRequest, headCommit, issue, standards, verification, ci, diff }) {
   if (!hasPassingVerification(verification, headCommit)) throw new Error('Claude review failed closed: passing deterministic verification for the exact delivered SHA is required');
   const issueText = bounded(`Issue #${issue.number}: ${issue.title}\n${issue.body}`, MAX_CONTEXT_BYTES, 'GitHub issue context');
   const standardsText = bounded(formatStandards(standards), MAX_CONTEXT_BYTES, 'repository standards guidance');
-  bounded(JSON.stringify(verification), MAX_CONTEXT_BYTES, 'deterministic verification evidence');
+  const reviewVerification = verificationForReview(verification);
+  bounded(JSON.stringify(reviewVerification), MAX_CONTEXT_BYTES, 'deterministic verification evidence');
   const ciText = bounded(JSON.stringify(ci || {}), MAX_CONTEXT_BYTES, 'CI evidence');
   // Keep every value obtained from GitHub, git, or configuration in a single
   // JSON data block.  In particular, a PR description or patch must not be
@@ -127,7 +156,7 @@ function buildReviewPrompt({ repo, pullRequest, headCommit, issue, standards, ve
     repository_standards: standardsText,
     issue_and_acceptance_criteria: issueText,
     ci_evidence: ciText,
-    deterministic_verification: verification,
+    deterministic_verification: reviewVerification,
     pr_diff: diff,
   }).replace(/[<>&]/g, character => ({ '<': '\\u003c', '>': '\\u003e', '&': '\\u0026' }[character])), MAX_DIFF_BYTES + (MAX_CONTEXT_BYTES * 4), 'review prompt data');
   return bounded([

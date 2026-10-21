@@ -186,3 +186,43 @@ test('Claude reviewer removes parent-session and GitHub authority markers from i
   const environment = reviewerEnvironment({ PATH: '/usr/bin', HTTPS_PROXY: 'http://proxy', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SSE_PORT: '9', GH_TOKEN: 'secret', GITHUB_TOKEN: 'secret' });
   assert.deepEqual(environment, { PATH: '/usr/bin', HTTPS_PROXY: 'http://proxy' });
 });
+
+test('oversized passing verification is reviewable as an identified excerpt without losing its SHA-bound verdict', async () => {
+  const stdout = 'BEGIN TEST OUTPUT\n' + 'ok 1 - representative passing test\n'.repeat(3500) + '# pass 3500\n# fail 0\n';
+  const verification = { ...verificationEvidence, stdout };
+  assert.ok(Buffer.byteLength(JSON.stringify(verification)) > 48 * 1024);
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  const response = await adapter(commands(), claude)({ project, issue, pullRequest, headCommit: sha, verification, ci: { state: 'green' } });
+  assert.equal(response.verdict, 'PASS');
+  assert.equal(response.commit, sha);
+  const json = claude.calls[0][3].prompt.split('<untrusted_review_data_json>\n')[1].split('\n</untrusted_review_data_json>')[0];
+  const data = JSON.parse(json);
+  assert.equal(data.deterministic_verification.commit, sha);
+  assert.equal(data.deterministic_verification.passed, true);
+  assert.equal(data.deterministic_verification.exitCode, 0);
+  assert.match(data.deterministic_verification.stdout, /BEGIN TEST OUTPUT/);
+  assert.match(data.deterministic_verification.stdout, /# pass 3500/);
+  assert.match(data.deterministic_verification.stdout, /sha256:[a-f0-9]{64}/);
+  assert.match(data.deterministic_verification.stdout, /full output.*durable.*log/i);
+  assert.ok(Buffer.byteLength(JSON.stringify(data.deterministic_verification)) < 48 * 1024);
+  assert.equal(verification.stdout, stdout, 'original verification must remain intact in durable job state');
+});
+
+test('large multibyte stderr is represented faithfully as bounded review evidence', async () => {
+  const verification = { ...verificationEvidence, stderr: 'CHECK START\n' + '✓ passing test\n'.repeat(7000) + 'CHECK END\n' };
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  await adapter(commands(), claude)({ project, issue, pullRequest, headCommit: sha, verification, ci: { state: 'green' } });
+  const json = claude.calls[0][3].prompt.split('<untrusted_review_data_json>\n')[1].split('\n</untrusted_review_data_json>')[0];
+  const data = JSON.parse(json);
+  assert.match(data.deterministic_verification.stderr, /CHECK START/);
+  assert.match(data.deterministic_verification.stderr, /CHECK END/);
+  assert.match(data.deterministic_verification.stderr, /sha256:[a-f0-9]{64}/);
+  assert.ok(Buffer.byteLength(JSON.stringify(data.deterministic_verification)) < 48 * 1024);
+});
+
+test('oversized failed verification is still rejected before a model is invoked', async () => {
+  const verification = { ...verificationEvidence, stdout: 'x'.repeat(120000), passed: false, exitCode: 1 };
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  await assert.rejects(adapter(commands(), claude)({ project, issue, pullRequest, headCommit: sha, verification, ci: { state: 'green' } }), /verification/);
+  assert.equal(claude.calls.length, 0);
+});
