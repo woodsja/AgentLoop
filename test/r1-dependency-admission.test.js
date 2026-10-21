@@ -91,7 +91,7 @@ test('R1 daemon must not consume ready labels belonging to the separately schedu
   f.projects.other.repo = 'woodsja/household-purchases';
   f.projects.other.dependencyFormat = 'household-blocked-by';
   f.projects.ralph.enabled = false;
-  f.setIssues([{ number: 3, title: 'Blocked downstream', body: '## Blocked by\n- #2: Import purchases' }]);
+  f.setIssues([{ number: 2, title: 'Ready household import', body: '## Blocked by\nNone' }]);
   await f.jobs.admit();
   assert.deepEqual(f.selected, [], 'R1 never admits issues explicitly assigned to the Household scheduler');
   // This exemption must not shut down admission for the original R1 project.
@@ -101,4 +101,39 @@ test('R1 daemon must not consume ready labels belonging to the separately schedu
   assert.equal(f.selected.length, 1);
   assert.equal(f.selected[0].project, 'ralph');
   assert.equal(f.selected[0].issue, 8);
+});
+
+
+test('separate Household autopilot retains admission to issues after R1 yields', async t => {
+  const f = fixture(t);
+  f.projects.other.repo = 'woodsja/household-purchases';
+  f.projects.other.dependencyFormat = 'household-blocked-by';
+  f.projects.ralph.enabled = false;
+  const state = createJobStore(f.projects.other.stateDir);
+  const job = createJob({ projectName: 'other', repo: f.projects.other.repo,
+    issue: { number: 1, title: 'Foundation' }, branch: 'ralph/issue-1-foundation',
+    worktreePath: null, now: () => new Date().toISOString() });
+  const sha = 'a'.repeat(40);
+  recordVerification(job, 'npm test', { passed: true, exitCode: 0, timedOut: false, stdout: '', stderr: '' });
+  recordDelivery(job, { commit: sha });
+  recordCiState(job, { state: 'green', headCommit: sha });
+  const attempt = beginReviewAttempt(job, undefined, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: sha });
+  recordReview(job, { reviewer: 'claude:opus', verdict: 'PASS', commit: sha, policy: 'always', findings: [], attempt });
+  recordMerge(job, { prNumber: 16, approvedHead: sha, commit: 'b'.repeat(40), repo: f.projects.other.repo });
+  recordIssueReconciled(job);
+  job.status = 'merged';
+  markTerminal(job, 'merged');
+  state.save(job);
+  const candidates = [{ number: 2, title: 'Import purchase data', body: '## Blocked by\n- #1: Foundation' }];
+  const { run } = require('../src/autopilot');
+  const selected = await run(['--project', 'other', '--dry-run'], {
+    loadProjectConfig: () => f.projects.other,
+    discoverReadyIssues: async () => candidates,
+    jobStore: state,
+    write: () => {},
+  });
+  assert.equal(selected.number, 2);
+  f.setIssues(candidates);
+  await f.jobs.admit();
+  assert.deepEqual(f.selected, [], 'only standalone autopilot may admit this project');
 });
