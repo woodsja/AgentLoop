@@ -17,6 +17,7 @@ const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
 const { createR1LoopImplementation } = require('./r1-loop-implementation');
 const { captureFailedR1Job, bindR1Parent } = require('./r1-failed-work');
+const { eligibleIssues } = require('./r1-dependencies');
 const { verificationFailureSummary } = require('./r1-transcript-summary');
 
 // Owner evidence is verbatim; UI text escaping is a rendering concern.
@@ -83,6 +84,7 @@ function createR1Jobs(store, options = {}) {
   const nextAdvance = new Map();
   let nextAdmission = 0;
   let admitting = null;
+  const dependencyDiagnostics = new Map();
   const active = new Map();
   const children = new Set();
   let closing = false;
@@ -441,7 +443,20 @@ function createR1Jobs(store, options = {}) {
           .filter(task => task.workflow === 'r1' && task.project === name && task.status === 'needs_specification')
           .map(task => [task.issue, task.specificationDigest]));
         const issues = (await discover(project)).filter(issue => waiting.get(issue.number) !== digest(issue));
-        const selection = selectIssueForJobs(issues, jobs, selectReadyIssue);
+        const blockedInScan = new Set();
+        const admitted = name === 'ralph'
+          ? eligibleIssues(issues, jobs, name, project.repo, (issueNumber, message) => {
+            blockedInScan.add(issueNumber);
+            if (dependencyDiagnostics.get(issueNumber) === message) return;
+            dependencyDiagnostics.set(issueNumber, message);
+            console.error(message); // Captured by the owner-visible systemd service journal.
+          }) : issues;
+        if (name === 'ralph') {
+          for (const issueNumber of dependencyDiagnostics.keys()) {
+            if (!blockedInScan.has(issueNumber)) dependencyDiagnostics.delete(issueNumber);
+          }
+        }
+        const selection = selectIssueForJobs(admitted, jobs, selectReadyIssue);
         if (!selection) continue;
         return submit({ project: name, issue: selection.issue.number, title: selection.issue.title, source: 'runner' });
       }
