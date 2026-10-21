@@ -85,3 +85,20 @@ test('non-Ralph autonomous projects retain prior admission behavior', async t =>
   assert.equal(fixtureState.selected[0].project, 'other');
   assert.equal(fixtureState.selected[0].issue, 2);
 });
+
+test('R1 daemon must not consume ready labels belonging to the separately scheduled Household autopilot', async t => {
+  const f = fixture(t);
+  f.projects.other.repo = 'woodsja/household-purchases';
+  f.projects.other.dependencyFormat = 'household-blocked-by';
+  f.projects.ralph.enabled = false;
+  f.setIssues([{ number: 3, title: 'Blocked downstream', body: '## Blocked by\n- #2: Import purchases' }]);
+  await f.jobs.admit();
+  assert.deepEqual(f.selected, [], 'R1 never admits issues explicitly assigned to the Household scheduler');
+  // This exemption must not shut down admission for the original R1 project.
+  f.projects.ralph.enabled = true;
+  f.setIssues([{ number: 8, title: 'Independent R1 work', body: 'Independent issue without prerequisites' }]);
+  await f.jobs.admit();
+  assert.equal(f.selected.length, 1);
+  assert.equal(f.selected[0].project, 'ralph');
+  assert.equal(f.selected[0].issue, 8);
+});

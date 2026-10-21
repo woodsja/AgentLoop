@@ -160,3 +160,8 @@ a durable merged job with passing exact-commit verification, CI, and Claude
 review. Missing or malformed declarations fail closed. Other projects without
 the setting retain their existing selection behavior. This format requires `reviewPolicy: "always"` and `autoMerge: true`.
 Historical manual merges require separate explicit reconciliation; do not invent job evidence.
+
+A project with `dependencyFormat: "household-blocked-by"` is owned by the
+separate autopilot issue poller: the R1 daemon's general one-minute admission
+scanner does not consume its `ready-for-agent` labels. Both admission paths must
+not compete for the same project's work. Other R1 projects remain unchanged.

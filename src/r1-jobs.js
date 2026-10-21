@@ -435,7 +435,10 @@ function createR1Jobs(store, options = {}) {
       for (const name of Object.keys(store.config.allowedProjects || {}).sort()) {
         let project;
         try { project = load(name); } catch { continue; }
-        if (!autonomous(project)) continue;
+        // Projects with a separate configured autopilot own their ready label.
+        // A second R1 admission path would race that scheduler and could
+        // prematurely execute, fail, and unlabel its blocked issues.
+        if (!autonomous(project) || project.dependencyFormat === 'household-blocked-by') continue;
         const jobs = createJobStore(resolveStateDir(name, project)).list();
         // An issue waiting for a specification is admitted again only after
         // its description changes.
