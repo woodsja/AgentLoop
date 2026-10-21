@@ -274,10 +274,33 @@ async function reconcileIssueClosure(project, issueNumber, { execFile: executeFi
     || !Number.isSafeInteger(issueNumber) || issueNumber < 1 || typeof executeFile !== 'function') {
     throw new TypeError('GitHub issue reconciliation requires a project and issue number');
   }
+  const endpoint = `repos/${project.repo}/issues/${issueNumber}`;
+  // A merged PR may already have closed its linked issue. Read GitHub's current
+  // state instead of re-issuing a write whose now-redundant PATCH can return 422.
+  const observeState = async () => {
+    let response;
+    try {
+      response = JSON.parse(await runGh(['api', endpoint], executeFile, 'GitHub issue reconciliation'));
+    } catch (error) {
+      if (error.message.includes('GitHub issue reconciliation failed:')) throw error;
+      throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`);
+    }
+    if (!isPlainObject(response) || response.number !== issueNumber
+      || !['open', 'closed'].includes(response.state)) {
+      throw new Error('GitHub issue reconciliation failed: GitHub did not confirm issue identity and state');
+    }
+    return response.state;
+  };
+  if (await observeState() === 'closed') return { number: issueNumber, state: 'closed' };
   let response;
   try {
-    response = JSON.parse(await runGh(['api', '--method', 'PATCH', `repos/${project.repo}/issues/${issueNumber}`, '-f', 'state=closed'], executeFile, 'GitHub issue reconciliation'));
+    response = JSON.parse(await runGh(['api', '--method', 'PATCH', endpoint, '-f', 'state=closed'], executeFile, 'GitHub issue reconciliation'));
   } catch (error) {
+    // GitHub may close the issue while the PATCH is in flight. Only treat an
+    // unsuccessful write as complete when a *fresh* read confirms closure.
+    // A still-open, malformed or unavailable observation remains a failure.
+    const observed = await observeState();
+    if (observed === 'closed') return { number: issueNumber, state: 'closed' };
     if (error.message.includes('GitHub issue reconciliation failed:')) throw error;
     throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`);
   }
