@@ -312,7 +312,14 @@ function validateJob(job, filePath) {
 function recordFailure(job, phase, error, now = () => new Date().toISOString()) {
   const message = error instanceof Error ? error.message : String(error);
   job.failures.push({ at: now(), run: job.runs, phase, message: diagnosticText(message),
-    ...(error instanceof Error ? { exception: { name: error.name, message: error.message, stack: error.stack ?? null, code: error.code ?? null } } : {}),
+    ...(error instanceof Error ? { exception: {
+      name: error.name, message: error.message, stack: error.stack ?? null, code: error.code ?? null,
+      ...(Number.isInteger(error.statusCode) ? { statusCode: error.statusCode } : {}),
+      ...(error.cause instanceof Error ? { cause: {
+        name: error.cause.name, message: error.cause.message, code: error.cause.code ?? null,
+        ...(Number.isInteger(error.cause.statusCode) ? { statusCode: error.cause.statusCode } : {}),
+      } } : {}),
+    } } : {}),
   });
   if (job.failures.length > MAX_FAILURES) job.failures.splice(0, job.failures.length - MAX_FAILURES);
   return job;

@@ -467,3 +467,32 @@ test('merge records require full identity, persist, reconcile issue closure, and
     assert.throws(() => createJobStore(directory).load(7), /invalid merge state/);
   }
 });
+
+test('failure journal preserves both HTTP classifications and does not affect successful merge budgets', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store);
+  const original = Object.assign(new Error('GitHub PATCH rejected (HTTP 422)'),
+    { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 422 });
+  const latest = Object.assign(new Error('GitHub GET unavailable (HTTP 502)', { cause: original }),
+    { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 502 });
+  const runsBefore = job.runs;
+  const correctionsBefore = job.correctiveCycles;
+  const reviewCorrectionsBefore = job.reviewCorrectiveCycles;
+  recordFailure(job, 'issue-closure-reconciled', latest);
+  job.status = 'merged';
+  markTerminal(job, 'merged');
+  store.save(job);
+  const saved = store.load(7);
+  assert.equal(saved.status, 'merged');
+  assert.equal(saved.terminalState, 'merged');
+  assert.equal(saved.runs, runsBefore);
+  assert.equal(saved.correctiveCycles, correctionsBefore);
+  assert.equal(saved.reviewCorrectiveCycles, reviewCorrectionsBefore);
+  assert.equal(saved.failures[0].exception.statusCode, 502);
+  assert.equal(saved.failures[0].exception.code, 'AUTOPILOT_GITHUB_TRANSPORT');
+  assert.deepEqual(saved.failures[0].exception.cause,
+    { name: 'Error', message: original.message, code: original.code, statusCode: 422 });
+  const journal = fs.readFileSync(saved.executionJournal.file, 'utf8');
+  assert.ok(journal.includes('GitHub PATCH rejected (HTTP 422)'));
+  assert.ok(journal.includes('GitHub GET unavailable (HTTP 502)'));
+});

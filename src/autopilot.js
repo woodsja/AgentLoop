@@ -322,10 +322,10 @@ async function run(argv, dependencies = {}) {
     phase = 'merge';
     const closeIssue = dependencies.reconcileIssueClosure || reconcileIssueClosure;
     const closure = await closeIssue(project, candidate.number, { execFile: dependencies.execFile });
-    if (typeof closure?.reconciledAfterError === 'string' && closure.reconciledAfterError) {
-      // Recovery does not erase a captured GitHub failure; preserve its exact
-      // stderr and the recovery decision in the durable job and raw journal.
-      recordFailure(job, 'issue-closure-reconciled', new Error(closure.reconciledAfterError), store.now);
+    if (closure?.reconciledAfterError instanceof Error) {
+      // Recovery does not erase the captured failure. Preserve its original
+      // message, HTTP classification and recovery decision in durable evidence.
+      recordFailure(job, 'issue-closure-reconciled', closure.reconciledAfterError, store.now);
     }
     recordIssueReconciled(job);
     job.status = 'merged';

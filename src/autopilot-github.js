@@ -317,12 +317,12 @@ async function reconcileIssueClosure(project, issueNumber, { execFile: executeFi
     catch (readError) {
       // Preserve both independent failures in the owner's durable diagnostics.
       const failure = new Error(`${initial.message}; subsequent GitHub issue observation failed: ${readError.message}`, { cause: initial });
-      failure.code = initial.code;
-      failure.statusCode = initial.statusCode;
+      failure.code = readError.code ?? initial.code;
+      failure.statusCode = readError.statusCode ?? initial.statusCode;
       throw failure;
     }
     // The caller persists the original failure alongside its recovered outcome.
-    if (observed === 'closed') return { number: issueNumber, state: 'closed', reconciledAfterError: initial.message };
+    if (observed === 'closed') return { number: issueNumber, state: 'closed', reconciledAfterError: initial };
     const failure = new Error(`${initial.message}; subsequent GitHub issue observation confirmed the issue remains open`, { cause: initial });
     failure.code = initial.code;
     failure.statusCode = initial.statusCode;

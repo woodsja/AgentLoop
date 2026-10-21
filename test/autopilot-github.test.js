@@ -242,7 +242,10 @@ test('issue closure: a 422 after GitHub closed it concurrently is reconciled by 
   const outcome = await reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile });
   assert.equal(outcome.number, 4);
   assert.equal(outcome.state, 'closed');
-  assert.match(outcome.reconciledAfterError, /Validation Failed \(HTTP 422\)/);
+  assert.ok(outcome.reconciledAfterError instanceof Error);
+  assert.match(outcome.reconciledAfterError.message, /Validation Failed \(HTTP 422\)/);
+  assert.equal(outcome.reconciledAfterError.code, 'AUTOPILOT_GITHUB_TRANSPORT');
+  assert.equal(outcome.reconciledAfterError.statusCode, 422);
   assert.deepEqual(commands.map(args => args[2] || 'GET'), ['GET', 'PATCH', 'GET']);
 });
 
@@ -308,7 +311,8 @@ test('issue closure preserves original PATCH HTTP 422 and subsequent read failur
     };
     await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
       error.message.includes('Validation Failed (HTTP 422)')
-      && (error.message.includes('identity') || error.message.includes('malformed') || error.message.includes('outage')));
+      && (error.message.includes('identity') || error.message.includes('malformed') || error.message.includes('outage'))
+      && (post === 'network' ? error.statusCode === 502 && error.cause?.statusCode === 422 : error.statusCode === 422));
   }
 });
 
@@ -340,7 +344,8 @@ test('issue closure preserves malformed PATCH body error and failed read error t
   await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
     error.message.includes('GitHub issue reconciliation failed: gh returned malformed JSON')
     && error.message.includes('subsequent GitHub issue observation failed')
-    && error.message.includes('temporary GitHub outage (HTTP 502)'));
+    && error.message.includes('temporary GitHub outage (HTTP 502)')
+    && error.code === 'AUTOPILOT_GITHUB_TRANSPORT' && error.statusCode === 502);
 });
 
 test('issue closure keeps HTTP failure classification when read confirms issue remains open', async () => {

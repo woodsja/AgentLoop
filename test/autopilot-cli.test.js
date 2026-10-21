@@ -2066,7 +2066,8 @@ test('autoMerge merges only the exact approved PR once and recovers a remote mer
 test('autoMerge retains recovered GitHub issue PATCH failure in the durable evidence', async () => {
   const store = temporaryStore();
   const issue = approvedMergeJob(store, 96);
-  const recoveredError = 'GitHub issue reconciliation failed: gh: Validation Failed (HTTP 422)';
+  const recoveredError = Object.assign(new Error('GitHub issue reconciliation failed: gh: Validation Failed (HTTP 422)'),
+    { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 422 });
   await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
     loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always' }),
     discoverReadyIssues: async () => [issue], observePullRequestCi: greenCi,
@@ -2078,7 +2079,10 @@ test('autoMerge retains recovered GitHub issue PATCH failure in the durable evid
   assert.equal(saved.terminalState, 'merged');
   assert.equal(saved.merge.issueClosed, true);
   assert.ok(saved.failures.some(f => f.phase === 'issue-closure-reconciled'
-    && f.message === recoveredError), 'owner-visible job failure history retains the exact recovered PATCH error');
+    && f.message === recoveredError.message
+    && f.exception?.code === recoveredError.code
+    && f.exception?.statusCode === recoveredError.statusCode),
+  'owner-visible job history retains the recovered PATCH error and its classification');
   const rawJournal = fs.readFileSync(path.join(store.directory, `issue-${issue.number}.execution.ndjson`), 'utf8');
   assert.match(rawJournal, /Validation Failed \(HTTP 422\)/);
 });
