@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { loadProjectConfig } = require('./autopilot-config');
+const { eligible: householdEligible } = require('./household-dependencies');
 const {
   discoverReadyIssues,
   selectReadyIssue,
@@ -207,7 +208,11 @@ async function run(argv, dependencies = {}) {
     return null;
   }
   if (!dryRun) await cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, dependencies.captureFailedWork);
-  const selection = selectIssueForJobs(await discover(project), store.list(), choose);
+  const discovered = await discover(project);
+  const recorded = store.list();
+  const admitted = project.repo === 'woodsja/household-purchases'
+    ? householdEligible(discovered, recorded, projectName, project.repo, write) : discovered;
+  const selection = selectIssueForJobs(admitted, recorded, choose);
 
   if (!selection) {
     const prefix = dryRun ? 'Dry run' : 'Autopilot';
