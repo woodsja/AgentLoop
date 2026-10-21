@@ -381,3 +381,22 @@ test('issue closure accepts only the configured HTTPS GitHub API host and exact 
     assert.equal(patched, false);
   }
 });
+
+test('failed PATCH and failed follow-up GET keep both original errors, stacks, and causes', async () => {
+  let reads = 0;
+  const executeFile = (file, args, options, callback) => {
+    assertUnattendedGhOptions(options);
+    if (args[2] === 'PATCH') {
+      return callback(Object.assign(new Error('GitHub PATCH 422'), { code: 1, statusCode: 422 }), '',
+        'gh: Validation Failed (HTTP 422)');
+    }
+    reads += 1;
+    callback(null, reads === 1 ? JSON.stringify(issueState(4, 'open')) : '{bad', '');
+  };
+  await assert.rejects(reconcileIssueClosure({ repo: 'example/repo' }, 4, { execFile: executeFile }), error =>
+    error.message.includes('Validation Failed (HTTP 422)')
+    && error.cause?.statusCode === 422
+    && error.observationError?.message.includes('malformed JSON')
+    && error.observationError?.cause instanceof SyntaxError
+    && typeof error.observationError.cause.stack === 'string');
+});

@@ -300,7 +300,7 @@ async function reconcileIssueClosure(project, issueNumber, { execFile: executeFi
       response = JSON.parse(await runGh(['api', endpoint], executeFile, 'GitHub issue reconciliation'));
     } catch (error) {
       if (error.message.includes('GitHub issue reconciliation failed:')) throw error;
-      throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`);
+      throw new Error(`GitHub issue reconciliation failed: gh returned malformed JSON: ${error.message}`, { cause: error });
     }
     if (!sameIssue(response) || !['open', 'closed'].includes(response.state)) {
       throw new Error('GitHub issue reconciliation failed: GitHub did not confirm issue identity and state');
@@ -324,6 +324,9 @@ async function reconcileIssueClosure(project, issueNumber, { execFile: executeFi
       const failure = new Error(`${initial.message}; subsequent GitHub issue observation failed: ${readError.message}`, { cause: initial });
       failure.code = readError.code ?? initial.code;
       failure.statusCode = readError.statusCode ?? initial.statusCode;
+      // Keep the observation's own stack and nested cause independently from
+      // the original failed write for durable owner-visible diagnostics.
+      failure.observationError = readError;
       throw failure;
     }
     // The caller persists the original failure alongside its recovered outcome.

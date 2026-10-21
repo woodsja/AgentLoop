@@ -517,3 +517,21 @@ test('nested error cause stacks are preserved in owner-readable durable state', 
   assert.equal(exception.cause.cause.message, parse.message);
   assert.match(exception.cause.cause.stack, /autopilot-state.test.js/);
 });
+
+test('durable failure evidence retains the separate observation error and its nested cause', () => {
+  const store = createJobStore(temporaryDirectory());
+  const job = newJob(store);
+  const patchError = Object.assign(new Error('PATCH returned 422'), { code: 'AUTOPILOT_GITHUB_TRANSPORT', statusCode: 422 });
+  const parseError = new SyntaxError('Malformed GET JSON');
+  const readError = new Error('GitHub read malformed', { cause: parseError });
+  const failure = new Error('PATCH failed; follow-up GET failed', { cause: patchError });
+  failure.observationError = readError;
+  recordFailure(job, 'issue-closure', failure);
+  store.save(job);
+  const evidence = store.load(7).failures[0].exception;
+  assert.equal(evidence.cause.statusCode, 422);
+  assert.equal(evidence.observationError.message, readError.message);
+  assert.match(evidence.observationError.stack, /autopilot-state.test.js/);
+  assert.equal(evidence.observationError.cause.message, parseError.message);
+  assert.match(evidence.observationError.cause.stack, /autopilot-state.test.js/);
+});

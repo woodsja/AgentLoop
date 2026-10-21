@@ -319,6 +319,7 @@ function errorEvidence(error, visited = new WeakSet()) {
   if (visited.has(error)) return { ...evidence, circular: true };
   visited.add(error);
   if (error.cause instanceof Error) evidence.cause = errorEvidence(error.cause, visited);
+  if (error.observationError instanceof Error) evidence.observationError = errorEvidence(error.observationError, visited);
   return evidence;
 }
 
