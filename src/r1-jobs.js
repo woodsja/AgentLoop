@@ -84,6 +84,7 @@ function createR1Jobs(store, options = {}) {
   const nextAdvance = new Map();
   let nextAdmission = 0;
   let admitting = null;
+  const dependencyDiagnostics = new Map();
   const active = new Map();
   const children = new Set();
   let closing = false;
@@ -443,7 +444,11 @@ function createR1Jobs(store, options = {}) {
           .map(task => [task.issue, task.specificationDigest]));
         const issues = (await discover(project)).filter(issue => waiting.get(issue.number) !== digest(issue));
         const admitted = name === 'ralph'
-          ? eligibleIssues(issues, jobs, name, project.repo, message => console.error(message)) : issues;
+          ? eligibleIssues(issues, jobs, name, project.repo, message => {
+            if (dependencyDiagnostics.get(message.split(' ')[2]) === message) return;
+            dependencyDiagnostics.set(message.split(' ')[2], message);
+            console.error(message); // Captured by the owner-visible systemd service journal.
+          }) : issues;
         const selection = selectIssueForJobs(admitted, jobs, selectReadyIssue);
         if (!selection) continue;
         return submit({ project: name, issue: selection.issue.number, title: selection.issue.title, source: 'runner' });

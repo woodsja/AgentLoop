@@ -32,7 +32,7 @@ test('closed, failed, stale, foreign or unreviewed jobs never satisfy prerequisi
 });
 test('malformed, duplicate, self, forward and oversized dependency metadata fails closed with diagnostic', () => {
  const cases = ['Depends on:','Depends on: #1 and #2','Depends on: #1, #1','Depends on: #8','Depends on: #9',
-  'Depends on: #0','Depends on: #1\nDepends on: #2','Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9', 'Depends on: other/repo#1'];
+  'Depends on: #0','Depends on: #1\nDepends on: #2','Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9', 'Depends on: other/repo#1', 'Depends on #1', '**Depends on:** #1', '- Depends on: #1', 'Depends-on: #1'];
  for(const marker of cases){const log=[];assert.deepEqual(pick([issue(8,marker)], [merged()],log),[],marker);assert.ok(log[0]?.includes('blocked'),marker)}
  assert.deepEqual(dependencies(issue(8,'Depends on: #1, #2')), [1,2]);
 });
@@ -57,4 +57,10 @@ test('every required approval fact fails closed', () => {
   for (const changed of mutations) {
     assert.deepEqual(pick([issue(2, 'Depends on: #1')], [{ ...good, ...changed }]), []);
   }
+});
+
+test('more than eight valid smaller-numbered prerequisites is rejected', () => {
+  const diagnostic = [];
+  assert.deepEqual(pick([issue(20, 'Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9')], [], diagnostic), []);
+  assert.ok(diagnostic[0]?.includes('metadata blocked'));
 });

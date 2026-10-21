@@ -6,15 +6,17 @@ const { hasPassingVerification } = require('./autopilot-state');
 // issue prose or GitHub's closed flag as evidence of completion.
 function dependencies(issue) {
   const text = String(issue.body || '');
-  const lines = text.split(/\r?\n/).filter(line => /^\s*Depends on\s*:/i.test(line));
+  const lines = text.split(/\r?\n/).filter(line => /^\s*(?:[-*>]\s*)?\*{0,2}Depends[\s-]+on\b/i.test(line));
   if (lines.length > 1) throw new Error('multiple Depends on metadata lines');
+  if (lines.length && !/^\s*Depends on\s*:/i.test(lines[0])) throw new Error('malformed Depends on marker; use: Depends on: #1');
   if (lines.length === 0) return [];
   const value = lines[0].replace(/^\s*Depends on\s*:/i, '').trim();
   if (!/^#[1-9]\d*(?:\s*,\s*#[1-9]\d*){0,7}$/.test(value)) {
     throw new Error('invalid Depends on metadata; expected: Depends on: #1, #2 (up to eight)');
   }
   const ids = value.split(',').map(part => Number(part.trim().slice(1)));
-  if (ids.some(id => !Number.isSafeInteger(id) || id >= issue.number)
+  if (!Number.isSafeInteger(issue.number) || issue.number < 1
+    || ids.some(id => !Number.isSafeInteger(id) || id >= issue.number)
     || new Set(ids).size !== ids.length) {
     throw new Error('Depends on must list distinct, smaller same-repository issue numbers');
   }
