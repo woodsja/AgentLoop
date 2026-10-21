@@ -443,12 +443,19 @@ function createR1Jobs(store, options = {}) {
           .filter(task => task.workflow === 'r1' && task.project === name && task.status === 'needs_specification')
           .map(task => [task.issue, task.specificationDigest]));
         const issues = (await discover(project)).filter(issue => waiting.get(issue.number) !== digest(issue));
+        const blockedInScan = new Set();
         const admitted = name === 'ralph'
           ? eligibleIssues(issues, jobs, name, project.repo, (issueNumber, message) => {
+            blockedInScan.add(issueNumber);
             if (dependencyDiagnostics.get(issueNumber) === message) return;
             dependencyDiagnostics.set(issueNumber, message);
             console.error(message); // Captured by the owner-visible systemd service journal.
           }) : issues;
+        if (name === 'ralph') {
+          for (const issueNumber of dependencyDiagnostics.keys()) {
+            if (!blockedInScan.has(issueNumber)) dependencyDiagnostics.delete(issueNumber);
+          }
+        }
         const selection = selectIssueForJobs(admitted, jobs, selectReadyIssue);
         if (!selection) continue;
         return submit({ project: name, issue: selection.issue.number, title: selection.issue.title, source: 'runner' });

@@ -32,7 +32,7 @@ test('closed, failed, stale, foreign or unreviewed jobs never satisfy prerequisi
 });
 test('malformed, duplicate, self, forward and oversized dependency metadata fails closed with diagnostic', () => {
  const cases = ['Depends on:','Depends on: #1 and #2','Depends on: #1, #1','Depends on: #8','Depends on: #9',
-  'Depends on: #0','Depends on: #1\nDepends on: #2','Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9', 'Depends on: other/repo#1', 'Depends on #1', '**Depends on:** #1', '- Depends on: #1', 'Depends-on: #1', '## Depends on: #1', '1. Depends on: #1', '+ Depends on: #1', '__Depends on:__ #1', '`Depends on: #1`', 'Depends: #1', 'Depends upon: #1'];
+  'Depends on: #0','Depends on: #1\nDepends on: #2','Depends on: #1, #2, #3, #4, #5, #6, #7, #8, #9', 'Depends on: other/repo#1', 'Depends on #1', '**Depends on:** #1', '- Depends on: #1', 'Depends-on: #1', '## Depends on: #1', '1. Depends on: #1', '+ Depends on: #1', '__Depends on:__ #1', '`Depends on: #1`', 'Depends: #1', 'Depends upon: #1', 'Dependencies: #1', 'Dependency: #1', 'Depend on: #1', 'Dependson: #1', '2 Depends on: #1'];
  for(const marker of cases){const log=[];assert.deepEqual(pick([issue(8,marker)], [merged()],log),[],marker);assert.ok(log[0]?.includes('blocked'),marker)}
  assert.deepEqual(dependencies(issue(8,'Depends on: #1, #2')), [1,2]);
 });
@@ -71,5 +71,13 @@ test('wrong issue number and failed verification never count as approved evidenc
     { ...approvedOne, verification: { ...approvedOne.verification, exitCode: 1 } },
     { ...approvedOne, verification: { ...approvedOne.verification, timedOut: true } }]) {
     assert.equal(pick([issue(3, 'Depends on: #1')], [job]).length, 0);
+  }
+});
+
+test('a missing or malformed issue body fails closed', () => {
+  for (const body of [undefined, null, 12, {}]) {
+    const diagnostics = [];
+    assert.deepEqual(pick([{ number: 2, body }], [], diagnostics), []);
+    assert.match(diagnostics[0], /metadata blocked/);
   }
 });

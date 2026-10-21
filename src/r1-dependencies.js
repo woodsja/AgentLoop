@@ -5,8 +5,9 @@ const { hasPassingVerification } = require('./autopilot-state');
 // Only a dedicated metadata line creates an admission dependency. Never parse
 // issue prose or GitHub's closed flag as evidence of completion.
 function dependencies(issue) {
-  const text = String(issue.body || '');
-  const lines = text.split(/\r?\n/).filter(line => /^[^A-Za-z0-9]*(?:\d+[.)]\s*)?[^A-Za-z0-9]*Depends(?:[\s-]+on|\s+upon)?\b/i.test(line));
+  if (typeof issue.body !== 'string') throw new Error('issue body missing or malformed');
+  const text = issue.body;
+  const lines = text.split(/\r?\n/).filter(line => /^[^A-Za-z0-9]*(?:\d+[.)]?\s*)?[^A-Za-z0-9]*Depend[a-z]*(?:[\s-]+[a-z]+)?\b/i.test(line));
   if (lines.length > 1) throw new Error('multiple Depends on metadata lines');
   if (lines.length && !/^\s*Depends on\s*:/i.test(lines[0])) throw new Error('malformed Depends on marker; use: Depends on: #1');
   if (lines.length === 0) return [];
