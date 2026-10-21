@@ -46,6 +46,15 @@ function validateProject(projectName, project) {
     throw new TypeError(`reviewPolicy for project ${projectName} must be none, risk, or always`);
   }
 
+  if (Object.hasOwn(project, 'dependencyFormat') && project.dependencyFormat !== 'household-blocked-by') {
+    throw new TypeError(`dependencyFormat for project ${projectName} must be household-blocked-by`);
+  }
+
+  if (project.dependencyFormat === 'household-blocked-by'
+    && (project.reviewPolicy !== 'always' || project.autoMerge !== true)) {
+    throw new TypeError(`dependencyFormat for project ${projectName} requires reviewPolicy always and autoMerge true`);
+  }
+
   if (Object.hasOwn(project, 'reviewModel') && !['sonnet', 'opus'].includes(project.reviewModel)) {
     throw new TypeError(`reviewModel for project ${projectName} must be sonnet or opus`);
   }

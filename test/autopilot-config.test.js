@@ -149,3 +149,19 @@ test('legacy Finance Python policy stays loadable until the staged migration (#8
   const invalid = { ...policy, indexUrl: 'http://untrusted.invalid/simple' };
   assert.throws(() => loadProjectConfig('finance', { configPath: writeConfig({ finance: { ...validProject(), pythonEnvironment: invalid } }) }));
 });
+
+test('dependency parsing is an explicit validated owner project policy', () => {
+  const project = { ...validProject(), autoMerge: true, dependencyFormat: 'household-blocked-by' };
+  assert.equal(loadProjectConfig('demo', { configPath: writeConfig({ demo: project }) }).dependencyFormat, 'household-blocked-by');
+  for (const dependencyFormat of [null, 'none', 'unknown', '', 123]) {
+    assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...project, dependencyFormat } }) }), /dependencyFormat/);
+  }
+});
+
+test('dependency policy requires independent always review and automatic merge', () => {
+  const baseline = { ...validProject(), dependencyFormat: 'household-blocked-by', autoMerge: true };
+  assert.doesNotThrow(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: baseline }) }));
+  for (const change of [{ reviewPolicy: 'risk' }, { reviewPolicy: 'none' }, { autoMerge: false }]) {
+    assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...baseline, ...change } }) }), /requires reviewPolicy always and autoMerge true/);
+  }
+});
