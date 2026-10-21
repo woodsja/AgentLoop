@@ -37,10 +37,10 @@ function approved(job, number, projectName, repo) {
   return true;
 }
 
-function eligibleIssues(issues, jobs, projectName, repo, diagnostic = () => {}) {
+function eligibleIssues(issues, jobs, projectName, repo, diagnostic = () => {}, parse = dependencies) {
   return issues.filter(issue => {
     let ids;
-    try { ids = dependencies(issue); }
+    try { ids = parse(issue); }
     catch (error) { diagnostic(issue.number, `R1 issue #${issue.number} dependency metadata blocked: ${error.message}`); return false; }
     const missing = ids.filter(id => !jobs.some(job => approved(job, id, projectName, repo)));
     if (missing.length) diagnostic(issue.number, `R1 issue #${issue.number} awaits independently approved merged prerequisites: ${missing.map(id => '#'+id).join(', ')}`);

@@ -14,7 +14,7 @@ test('real autopilot dry run blocks Household Purchases without merged #1', asyn
   const output = [];
   const result = await run(['--project', 'woodsja--household-purchases', '--dry-run'], deps(household, output));
   assert.equal(result, null);
-  assert.ok(output.some(line => /blocked by unresolved #1/.test(line)));
+  assert.ok(output.some(line => /awaits independently approved merged prerequisites: #1/.test(line)));
 });
 test('other repositories retain their previous issue selection', async () => {
   const output = [];

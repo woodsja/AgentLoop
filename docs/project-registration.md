@@ -146,14 +146,15 @@ successful merge evidence in the same project's existing R1 job store: exact
 verified commit, green CI, independent Claude PASS without findings, and a
 recorded merge and issue reconciliation. Merely closing the GitHub issue is
 insufficient. Blocked labelled issues remain labelled; independent ready issues
-can proceed, and a later ordinary admission scan rechecks dependencies. This
-mechanism does not apply to Household Purchases' separate autopilot yet.
+can proceed, and a later ordinary admission scan rechecks dependencies. The `Depends on:` syntax applies only to Ralph R1 admission. Household Purchases
+uses the separately configured `## Blocked by` format described below.
 
 ## Optional autopilot prerequisite format
 
 Set `dependencyFormat: "household-blocked-by"` in the owner's project
 configuration to enable dependency checks on the existing issue section
-`## Blocked by`, followed by `None` or one to eight `- #N: title` lines.
+`## Blocked by`, followed by `None` (optionally `None.`) or one to
+eight `- #N` / `- #N: title` lines.
 Only smaller-numbered same-repository issues are permitted. Admission requires
 a durable merged job with passing exact-commit verification, CI, and Claude
 review. Missing or malformed declarations fail closed. Other projects without

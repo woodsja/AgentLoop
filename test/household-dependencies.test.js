@@ -9,7 +9,12 @@ const pick = (jobs, issues = candidates) =>eligible(issues,jobs,'woodsja--househ
 test('reads existing household planning metadata; fails closed on invalid syntax', () =>{
  assert.deepEqual(prerequisites(candidates[0]),[2]);
  assert.deepEqual(prerequisites(issue(2,'## Blocked by\n- #1: Foundation')),[1]);
- for(const body of ['','## Blocked by\n- #2, #3','## Blocked by\n- #3: self','## Blocked by\n- #1\n- #1','## Blocked by\n- other/repo#1']) assert.deepEqual(pick([], [issue(3,body)]),[]);
+ for (const body of ['', '## Blocked by\n- #2, #3', '## Blocked by\n- #1\n- #1', '## Blocked by\n- other/repo#1', '## Blocked by\n- #1\n## Blocked by\n- #2', '## Blocked by\n- #1\nnot a bullet', '## Blocked by\n' + Array.from({length:9},(_,i)=>'- #'+(i+1)).join('\n')]) {
+    assert.throws(() => prerequisites(issue(20, body)));
+  }
+  assert.throws(() => prerequisites(issue(3, '## Blocked by\n- #3: self')));
+  assert.throws(() => prerequisites({ number: 2, body: null }));
+  assert.throws(() => prerequisites({ number: 0, body: '## Blocked by\nNone' }));
 });
 test('blocked issue cannot starve independent issue; merged record releases next', () =>{
  const free=issue(5,'## Blocked by\nNone');

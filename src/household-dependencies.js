@@ -1,9 +1,10 @@
 'use strict';
 
-const { approvedMerge } = require('./r1-dependencies');
+const { eligibleIssues } = require('./r1-dependencies');
 
 // Household planning issues use a distinct, documented metadata section.
 function prerequisites(issue) {
+  if (!Number.isSafeInteger(issue.number) || issue.number < 1) throw new Error('issue number must be a positive integer');
   if (typeof issue.body !== 'string') throw new Error('issue body must be provided');
   const sections = issue.body.split(/\r?\n(?=## )/);
   const blocked = sections.filter(section => /^## Blocked by\s*\r?\n/i.test(section));
@@ -22,14 +23,9 @@ function prerequisites(issue) {
   return ids;
 }
 
+// Reuse the R1 approved-merge admission predicate and diagnostics.
 function eligible(issues, jobs, projectName, repo, log = () => {}) {
-  return issues.filter(issue => {
-    let ids;
-    try { ids = prerequisites(issue); }
-    catch (error) { log(issue.number, `Issue #${issue.number} blocked: ${error.message}`); return false; }
-    const missing = ids.filter(id => !jobs.some(job => approvedMerge(job, id, projectName, repo)));
-    if (missing.length) log(issue.number, `Issue #${issue.number} blocked by unresolved ${missing.map(id => '#' + id).join(', ')}`);
-    return missing.length === 0;
-  });
+  return eligibleIssues(issues, jobs, projectName, repo, log, prerequisites);
 }
+
 module.exports = { prerequisites, eligible };
