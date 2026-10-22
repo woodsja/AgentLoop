@@ -254,3 +254,40 @@ test('Node project preparation retains explicit shorter deadline and cancellatio
       && error.outcome.reason === 'timeout', 'an explicit shorter timeout takes precedence over the default');
   } finally { Date.now = originalNow; }
 });
+
+// This is the incident seam: real Node project preparation executes a locked
+// installation and its entire baseline check through the actual child runner.
+// Only the parent clock is virtual; commands, process claims and logs remain real.
+test('full Node project preparation accepts a six-minute baseline and blocks over fifteen minutes', async t => {
+  const { spawn } = require('node:child_process');
+  for (const elapsedMs of [6 * 60 * 1000, 15 * 60 * 1000 + 1]) {
+    const root = fixture(t, "console.log('healthy long baseline')");
+    const originalNow = Date.now;
+    let currentTime = 1000000, fullCheckObserved = false;
+    Date.now = () => currentTime;
+    try {
+      const result = prepareRepositoryEnvironment(root, { runtime: 'node' }, {
+        spawn(file, args, options) {
+          const child = spawn(file, args, options);
+          if (args[2] === 'run' && args[3] === 'check') {
+            fullCheckObserved = true;
+            // This listener precedes the real preparationCommands close listener,
+            // reproducing a command that completed after a long baseline run.
+            child.once('close', () => { currentTime += elapsedMs; });
+          }
+          return child;
+        },
+      });
+      if (elapsedMs < 900000) {
+        const ready = await result;
+        assert.equal(ready.status, 'ready');
+        assert.equal(ready.baseline.passed, true);
+        assert.match(ready.baseline.stdout, /healthy long baseline/);
+      } else {
+        await assert.rejects(result, error => error.code === 'PROJECT_PREFLIGHT_BLOCKED'
+          && error.outcome.reason === 'timeout');
+      }
+      assert.equal(fullCheckObserved, true, 'test must exercise the actual baseline command');
+    } finally { Date.now = originalNow; }
+  }
+});
