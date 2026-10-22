@@ -125,4 +125,4 @@ async function grantCommand(action, id, options) {
     return grant;
   });
 }
-module.exports = { grantCommand, STATES };
+module.exports = { grantCommand, STATES, registration, save };
