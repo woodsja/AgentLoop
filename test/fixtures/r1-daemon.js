@@ -4,6 +4,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const fixture = JSON.parse(fs.readFileSync(process.env.R1_FIXTURE, 'utf8'));
 const project = fixture.project;
+const observePullRequest = require('./r1-git-remote')(project, fixture.root);
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 async function gate(name) {
   while (!fs.existsSync(path.join(fixture.root, name))) await new Promise(resolve => setTimeout(resolve, 20));
@@ -18,6 +19,7 @@ require('../../src/daemon').start({ r1: { ciPollMs: 50, autopilotDependencies: {
   loadProjectConfig: () => project,
   discoverReadyIssues: async () => [1, 2, 3, 4].map(number => ({ number, title: `Issue ${number}`, body: '## Acceptance criteria\n- Write the answer' })),
   findOpenIssuePullRequests: async () => [],
+  observePullRequest,
   prepareIssueWorkspace: async (_project, issue, options) => {
     const worktreePath = path.join(project.worktreeRoot, `issue-${issue.number}`);
     if (!fs.existsSync(worktreePath)) git(project.checkout, 'worktree', 'add', '-b', options.branch, worktreePath, 'HEAD');
@@ -35,6 +37,7 @@ require('../../src/daemon').start({ r1: { ciPollMs: 50, autopilotDependencies: {
   deliverPassedWork: async ({ workspace, issue }, { onProgress }) => {
     git(workspace.worktreePath, 'add', 'answer');
     git(workspace.worktreePath, 'commit', '-m', 'Fixture implementation');
+    git(workspace.worktreePath, 'push', 'origin', workspace.branch);
     const delivery = { branch: workspace.branch, commit: git(workspace.worktreePath, 'rev-parse', 'HEAD'), pushed: true,
       pr: { number: issue.number, url: `https://example.invalid/pull/${issue.number}` } };
     await onProgress(delivery);

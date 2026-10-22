@@ -24,7 +24,7 @@ const CORRECTION_STATUSES = new Set(['eligible', 'running', 'passed', 'delivered
 const REVIEW_VERDICTS = new Set(['PASS', 'NEEDS_CHANGES']);
 const REVIEW_POLICIES = new Set(['risk', 'always']);
 const MAX_REVIEW_FINDINGS = 50;
-const MAX_REVIEW_HISTORY = 2;
+const MAX_REVIEW_HISTORY = 8;
 const REVIEW_ATTEMPT_STATUSES = new Set(['running', 'completed', 'failed', 'timed_out', 'invalid_verdict', 'interrupted']);
 const JOB_FILE = /^issue-([1-9][0-9]*)\.json$/;
 
@@ -271,6 +271,26 @@ function validateJob(job, filePath) {
     && Number.isSafeInteger(value.run) && value.run >= 0
     && typeof value.phase === 'string' && value.phase.length > 0
     && typeof value.message === 'string' && value.message.length > 0;
+  const validIntegrationAttempt = entry => isPlainObject(entry)
+    && Number.isSafeInteger(entry.number) && entry.number >= 1 && entry.number <= 3
+    && entry.project === job.project && entry.repo === job.repo
+    && entry.issue === job.issue?.number && entry.pr === job.pr?.number && entry.branch === job.branch
+    && /^[a-f0-9]{40,64}$/.test(entry.oldHead) && /^[a-f0-9]{40,64}$/.test(entry.targetSha)
+    && (entry.finalHead === null || /^[a-f0-9]{40,64}$/.test(entry.finalHead))
+    && ['prepare', 'merge', 'resolve', 'commit', 'verify', 'repair', 'repair_commit', 'push'].includes(entry.phase)
+    && typeof entry.startedAt === 'string' && Array.isArray(entry.logs)
+    && Array.isArray(entry.workers) && Array.isArray(entry.affectedFiles);
+  const validIntegration = isPlainObject(job) && (job.integrationHistory === undefined
+    || (Array.isArray(job.integrationHistory) && job.integrationHistory.length <= 3
+      && job.integrationHistory.every((entry, index) => validIntegrationAttempt(entry)
+        && entry.number === index + 1 && ['integrated', 'up_to_date', 'escalated'].includes(entry.outcome)
+        && typeof entry.finishedAt === 'string')))
+    && (job.integrationActive == null || (validIntegrationAttempt(job.integrationActive)
+      && job.integrationActive.number === (job.integrationHistory?.length || 0) + 1
+      && job.integrationActive.outcome === undefined))
+    && (job.integration == null || (isPlainObject(job.integration)
+      && typeof job.integration.headSha === 'string' && job.integration.headSha.length > 0
+      && typeof job.integration.targetSha === 'string' && job.integration.targetSha.length > 0));
   const problem = !isPlainObject(job) ? 'not an object'
     : job.schemaVersion !== SCHEMA_VERSION ? `unsupported schemaVersion ${String(job.schemaVersion)}`
       : typeof job.project !== 'string' || !job.project ? 'missing project identity'
@@ -286,6 +306,7 @@ function validateJob(job, filePath) {
             : !hasValidDelivery(job) ? 'invalid delivery state'
             : !hasValidPullRequest(job) ? 'invalid pull request state'
               : !hasValidMerge(job) ? 'invalid merge state'
+              : !validIntegration ? 'invalid integration state'
               : !hasValidCi(job) ? 'invalid CI state'
                 : job.verification != null && !isVerificationEvidence(job.verification) ? 'invalid deterministic verification state'
                 : !hasValidReview(job) ? 'invalid independent review state'
@@ -663,7 +684,15 @@ function createJobStore(stateDir, options = {}) {
   // working the same issue at once.  Locks left by a crash or reboot are
   // reclaimed once their owner is provably gone.
   function acquire(issueNumber) {
-    const filePath = lockPath(issueNumber);
+    return acquireFile(lockPath(issueNumber), `issue #${issueNumber}`);
+  }
+
+  function acquireTarget(repo, baseBranch) {
+    const key = require('node:crypto').createHash('sha256').update(`${repo}\0${baseBranch}`).digest('hex');
+    return acquireFile(path.join(directory, `target-${key}.lock`), `${repo}:${baseBranch}`);
+  }
+
+  function acquireFile(filePath, label) {
     fs.mkdirSync(directory, { recursive: true });
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -692,14 +721,14 @@ function createJobStore(stateDir, options = {}) {
         owner = null;
       }
       if (!lockIsStale(owner)) {
-        throw new Error(`Autopilot job for issue #${issueNumber} is already owned by running process ${owner.pid}`);
+        throw new Error(`Autopilot job for ${label} is already owned by running process ${owner.pid}`);
       }
       fs.rmSync(filePath, { force: true });
     }
     throw new Error(`Autopilot job lock ${filePath} could not be acquired`);
   }
 
-  return { directory, jobPath, load, list, save, acquire, now };
+  return { directory, jobPath, load, list, save, acquire, acquireTarget, now };
 }
 
 function isResumable(job) {

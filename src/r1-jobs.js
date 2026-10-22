@@ -16,6 +16,7 @@ const { managesWorktree, resolveProject } = require('./project-registry');
 const { createR1ChildHandoff } = require('./r1-child-handoff');
 const { authorizeR1Child } = require('./r1-child-admission');
 const { createR1LoopImplementation } = require('./r1-loop-implementation');
+const { createRalphTaskService } = require('./ralph-task-service');
 const { captureFailedR1Job, bindR1Parent } = require('./r1-failed-work');
 const { eligibleIssues } = require('./r1-dependencies');
 const { verificationFailureSummary } = require('./r1-transcript-summary');
@@ -226,11 +227,12 @@ function createR1Jobs(store, options = {}) {
     const outcome = approvedMerge(job) ? 'merged' : task.specification === 'missing' && !job ? 'needs_specification' : 'failed';
     const branch = job && job.branch;
     const pr = job && job.pr && job.pr.number;
+    const retainIntegration = job?.workspaceState === 'integration_retained' || Boolean(job?.integrationActive);
     if (outcome !== 'merged') {
       const reason = outcome === 'needs_specification'
         ? `Ralph needs a product specification before it can start: describe the required behaviour and acceptance criteria, then re-apply \`${project.readyLabel}\`.`
         : `Ralph could not complete this issue autonomously and stopped with outcome FAILED (job ${task.id}): ${job?.terminalState || task.phase || 'no deliverable result'}. Full execution evidence is available in the owner dashboard.`;
-      if (pr) {
+      if (pr && !retainIntegration) {
         try {
           const state = JSON.parse(await command('gh', ['pr', 'view', String(pr), '--repo', project.repo, '--json', 'state'], project.checkout)).state;
           if (state === 'OPEN') await attempt('close-pr', 'gh', ['pr', 'close', String(pr), '--repo', project.repo, '--comment', reason], project.checkout);
@@ -239,10 +241,10 @@ function createR1Jobs(store, options = {}) {
       await attempt('comment-issue', 'gh', ['issue', 'comment', String(task.issue), '--repo', project.repo, '--body', reason], project.checkout);
       await attempt('relabel-issue', 'gh', ['issue', 'edit', String(task.issue), '--repo', project.repo, '--remove-label', project.readyLabel, '--add-label', project.humanLabel], project.checkout);
     }
-    if (branch && TEMPORARY_BRANCH.test(branch) && job.delivery && job.delivery.pushed) {
+    if (!retainIntegration && branch && TEMPORARY_BRANCH.test(branch) && job.delivery && job.delivery.pushed) {
       await attempt('delete-remote-branch', 'gh', ['api', '--method', 'DELETE', `repos/${project.repo}/git/refs/heads/${branch}`], project.checkout);
     }
-    if (branch && TEMPORARY_BRANCH.test(branch)) {
+    if (!retainIntegration && branch && TEMPORARY_BRANCH.test(branch)) {
       try {
         await command('git', ['-C', project.checkout, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], project.checkout);
         await attempt('delete-local-branch', 'git', ['-C', project.checkout, 'branch', '-D', branch], project.checkout);
@@ -333,6 +335,17 @@ function createR1Jobs(store, options = {}) {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
         environmentIsCancelled: () => closing || store.readTask(task.id, 'running').cancelRequested === true,
+        // A completed implementation child cannot resolve a later integration.
+        // Use the existing scoped CLI-worker service and tracked parent process
+        // lifecycle, only after every authorized implementation child has ended.
+        createIntegrationTaskService: serviceOptions => {
+          const attached = store.listR1ChildLoops ? store.listR1ChildLoops(task.id) : [];
+          if (closing || store.readTask(task.id, 'running').cancelRequested
+            || attached.some(child => child.stage !== 'done')) {
+            throw new Error('Integration worker refused while another child is active or the parent is stopping.');
+          }
+          return (dependencies.createIntegrationTaskService || createRalphTaskService)(serviceOptions);
+        },
         ...(mixedEnabled ? { createRalphTaskService: options => {
           const mixed = createR1LoopImplementation({
             ensureChild: () => ensureChildLoop(task.id),
