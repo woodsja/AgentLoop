@@ -217,3 +217,40 @@ test('npm script signal exit remains visible in the baseline evidence', async t 
   assert.equal(result.baseline.passed, false);
   assert.equal(result.baseline.exitCode, 137);
 });
+
+// Issue #128: use a virtual clock so the default deadline is tested in
+// milliseconds, not by waiting for a real six-minute project test suite.
+test('Node project preparation allows a six-minute integration baseline but remains bounded at fifteen minutes', () => {
+  const { preparationCommands } = require('../src/project-preflight-command');
+  const originalNow = Date.now;
+  let now = 1000000;
+  Date.now = () => now;
+  try {
+    const { check } = preparationCommands('/unused/virtual-time-node-project');
+    now += 6 * 60 * 1000;
+    assert.doesNotThrow(check, 'valid full-suite baseline may require over five minutes');
+    now += 9 * 60 * 1000;
+    assert.throws(check, error => error.code === 'PROJECT_PREFLIGHT_BLOCKED'
+      && error.outcome.reason === 'timeout', 'the fifteen-minute default must remain bounded');
+  } finally { Date.now = originalNow; }
+});
+
+test('Node project preparation retains explicit shorter deadline and cancellation precedence', () => {
+  const { preparationCommands } = require('../src/project-preflight-command');
+  const originalNow = Date.now;
+  let now = 1000000, cancelled = false;
+  Date.now = () => now;
+  try {
+    const { check } = preparationCommands('/unused/virtual-time-node-project', { timeoutMs: 1500,
+      isCancelled: () => cancelled });
+    now += 1000;
+    assert.doesNotThrow(check);
+    cancelled = true;
+    assert.throws(check, error => error.code === 'PROJECT_PREFLIGHT_BLOCKED'
+      && error.outcome.reason === 'cancelled');
+    cancelled = false;
+    now += 500;
+    assert.throws(check, error => error.code === 'PROJECT_PREFLIGHT_BLOCKED'
+      && error.outcome.reason === 'timeout', 'an explicit shorter timeout takes precedence over the default');
+  } finally { Date.now = originalNow; }
+});

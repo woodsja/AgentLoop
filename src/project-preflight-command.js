@@ -6,7 +6,7 @@ const { blocked } = require('./project-preflight');
 const { startTime, terminatePriorR1Worker } = require('./r1-process-claim');
 
 function preparationCommands(root, options = {}) {
-  const deadline = Date.now() + (options.timeoutMs ?? 300000);
+  const deadline = Date.now() + (options.timeoutMs ?? 900000);
   const cancelled = () => { try { return options.isCancelled?.() === true; } catch { return true; } };
   const check = () => {
     if (cancelled()) throw blocked('cancelled', 'Project preparation cancelled before worker admission.');
