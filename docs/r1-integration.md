@@ -58,7 +58,25 @@ Pre-commit task-service test failures remain captured; a completed resolver
 process may proceed to the mandatory exact-commit verifier after environment
 preparation. Only that verifier can authorize publishing, and a red result
 requires the bounded repair path. A failed or timed-out worker never qualifies.
-Observation failures before an attempt exists also stop after three failures.
+Transient Git transport/read failures use a persisted budget for the matching
+project, repository, branch, expected commits, working directory and command.
+The initial failure and two retries are the limit. Retry deadlines use increasing
+5- and 10-second delays; each one-shot pass returns deferred until eligible.
+A retry is checkpointed before invoking Git, so a restart cannot reset its budget.
+A successful matching operation clears only that streak. Authentication, identity,
+malformed SHA, integrity and policy errors stop immediately. Infrastructure
+retries consume no implementation, conflict, CI-correction or review attempts.
+Exhaustion reports the operation and owner execution journal with all diagnostics.
+
+CI and target/head polling keep current state, total poll counts, last-check and
+last-transition timestamps. Unchanged polls do not add transition entries. Recent
+transitions are limited to 20 and active-attempt log navigation to 128 records;
+the state store validates these limits on reload. Complete Git output, every raw
+observation, meaningful transition and retry decision is appended and flushed to
+the existing execution journal before updating summaries. R1 mirrors these
+records to the parent's owner-visible execution log. A separate exact-commit
+verifier completion checkpoint survives eviction from recent log navigation.
+The finite summary is navigation; it never replaces or truncates raw evidence.
 Persisted push intent accepts only the old or final remote head; an already
 completed push is reconciled without another push or another PR. Infrastructure
 failures retain active checkpoints for bounded retry. Ordinary failed verification

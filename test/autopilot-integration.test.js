@@ -485,3 +485,284 @@ test('contention after Claude PASS preserves approval and resumes without anothe
   assert.equal(reviews, 1);
   assert.equal(merges, 1);
 });
+
+// Exercise each one-shot pass through a freshly loaded durable job and real Git.
+function retryRunner(f, execute, clock, overrides = {}) {
+  Object.assign(f.project, { enabled: true, reviewPolicy: 'always', autoMerge: true, readyLabel: 'ready', worker: 'codex' });
+  return () => require('../src/autopilot').run(['--project', 'demo'], {
+    jobStore: createJobStore(f.store.directory, { now: () => new Date(clock.time).toISOString() }),
+    loadProjectConfig: () => f.project, discoverReadyIssues: async () => [f.issue], write: () => {},
+    execFile: execute, observePullRequest: f.options.observePullRequest,
+    observePullRequestCi: async (_p, pr) => ({ state: clock.green ? 'green' : 'pending', headCommit: pr.commit, prNumber: pr.number }),
+    independentReview: async ({ headCommit }) => ({ reviewer: 'claude:fixture', verdict: 'PASS', findings: [], commit: headCommit }),
+    mergePullRequest: async () => ({ mergeCommit: 'merged-fixture-sha' }), reconcileIssueClosure: async () => ({}),
+    createRalphTaskService: () => { throw new Error('infrastructure retry started worker'); },
+    ...overrides,
+  });
+}
+function transportAdapter(match, failure) {
+  const native = require('node:child_process').execFile;
+  return (file, args, options, cb) => {
+    if (file === 'git' && match(args)) return failure(file, args, options, cb, native);
+    return native(file, args, options, cb);
+  };
+}
+for (const operation of ['fetch', 'ls-remote']) {
+  test(`one-shot ${operation} transport retry survives reload and respects deadline without spending model budgets`, async t => {
+    const f = await fixture(t), clock = { time: Date.now() };
+    let calls = 0;
+    const tick = retryRunner(f, transportAdapter(args => args[0] === operation, (_file, _args, _opts, cb) => {
+      calls++;
+      cb(Object.assign(new Error(`Command failed: git ${operation} refs/heads/ralph/issue-401-authentication`), { code: 128 }), '', 'fatal: Could not resolve host: github.com\nraw original failure');
+    }), clock);
+    const first = await tick();
+    assert.equal(first.outcome.status, 'deferred');
+    const saved = f.store.load(105);
+    assert.equal(saved.terminal, false);
+    assert.equal(saved.runs, 0); assert.equal(saved.reviewAttempts, 0);
+    await tick(); assert.equal(calls, 1);
+    clock.time += 60000;
+    const recovered = retryRunner(f, require('node:child_process').execFile, clock);
+    await recovered();
+    assert.equal(f.store.load(105).integrationHistory[0].outcome, 'integrated');
+    assert.deepEqual(f.store.load(105).gitRetries, {});
+    const raw = fs.readFileSync(f.store.load(105).executionJournal.file, 'utf8');
+    assert.match(raw, /raw original failure/);
+  });
+}
+test('three matching failures exhaust across restarts; auth refuses immediately', async t => {
+  for (const auth of [false, true]) {
+    const f = await fixture(t), clock = { time: Date.now() };
+    let calls = 0;
+    const tick = retryRunner(f, transportAdapter(args => args[0] === 'fetch', (_file, _args, _opts, cb) => {
+      calls++; cb(Object.assign(new Error('git failed'), { code: 128 }), '', auth ? 'fatal: Authentication failed' : `Connection timed out: failure ${calls}`);
+    }), clock);
+    if (auth) await assert.rejects(tick(), /Authentication/);
+    else {
+      await tick(); await tick(); assert.equal(calls, 1);
+      clock.time += 60000; await tick(); await tick(); assert.equal(calls, 2);
+      clock.time += 60000; await assert.rejects(tick(), /exhausted/);
+    }
+    const saved = f.store.load(105);
+    assert.equal(saved.terminalState, 'ready_for_human');
+    assert.equal(calls, auth ? 1 : 3);
+    assert.equal(saved.runs, 0); assert.equal(saved.reviewAttempts, 0);
+    const raw = fs.readFileSync(saved.executionJournal.file, 'utf8');
+    if (!auth) for (let n = 1; n <= 3; n++) assert.match(raw, new RegExp(`failure ${n}`));
+  }
+});
+test('500 pending CI and target polls keep bounded summaries and retain green/base transitions and raw evidence', async t => {
+  const f = await fixture(t), clock = { time: Date.now() };
+  const tick = retryRunner(f, require('node:child_process').execFile, clock);
+  await tick(); await tick();
+  const before = fs.statSync(f.store.jobPath(105)).size;
+  for (let n = 0; n < 500; n++) { clock.time += 1000; await tick(); }
+  const saved = f.store.load(105);
+  assert.ok(fs.statSync(f.store.jobPath(105)).size < before + 2000);
+  assert.equal(saved.integrationPolling.channels.ci.pollCount, 501);
+  assert.equal(saved.integrationPolling.channels.ci.current.state, 'pending');
+  assert.equal(saved.integrationPolling.channels.ci.lastCheckedAt, new Date(clock.time).toISOString());
+  assert.ok(saved.integrationPolling.channels.target.pollCount >= 500);
+  assert.ok(saved.integrationPolling.transitions.length <= 20);
+  const raw = fs.readFileSync(saved.executionJournal.file, 'utf8');
+  assert.match(raw, /refs\/remotes\/origin\/main/);
+  const events = raw.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(events.filter(event => event.event === 'integration-observation' && event.channel === 'ci').length, 501);
+  fs.writeFileSync(path.join(f.project.checkout, 'later.js'), 'console.log("later")');
+  git(f.project.checkout, 'add', '.'); git(f.project.checkout, 'commit', '-m', 'base advances after long pending CI');
+  git(f.project.checkout, 'push', 'origin', 'main');
+  clock.time += 1000; await tick();
+  const advanced = f.store.load(105);
+  assert.equal(advanced.integration.targetSha, git(f.origin, 'rev-parse', 'main'));
+  assert.ok(advanced.integrationPolling.transitions.some(e => e.current.targetSha === advanced.integration.targetSha));
+  clock.green = true; clock.time += 1000; await tick();
+  assert.equal(f.store.load(105).status, 'merged');
+  assert.ok(f.store.load(105).integrationPolling.transitions.some(e => e.current.state === 'green'));
+  const complete = JSON.parse(fs.readFileSync(f.store.jobPath(105), 'utf8'));
+  for (const damage of [
+    job => { job.integrationPolling.transitions = Array(21).fill(saved.integrationPolling.transitions[0]); },
+    job => { job.integrationPolling.channels.ci.pollCount = -1; },
+    job => { job.integrationPolling.channels.ci.current.state = 'invented'; },
+    job => { job.integrationPolling.channels.ci.lastCheckedAt = ' '.repeat(1000) + new Date(clock.time).toISOString(); },
+  ]) {
+    const damaged = structuredClone(complete); damage(damaged);
+    fs.writeFileSync(f.store.jobPath(105), JSON.stringify(damaged));
+    assert.throws(() => f.store.load(105), /invalid integration polling/);
+  }
+  for (const damage of [
+    job => { job.integrationHistory[0].logs = Array(129).fill(job.integrationHistory[0].logs[0]); },
+    job => { job.integrationHistory[0].logs = [null]; },
+    job => { job.integrationGateObservations = Array(21).fill({ at: new Date(clock.time).toISOString() }); },
+    job => { job.gitRetries = { ['a'.repeat(64)]: { count: 4, operation: 'fetch', diagnostic: 'invalid',
+      lastFailureAt: new Date(clock.time).toISOString(), nextEligibleAt: new Date(clock.time).toISOString() } }; },
+  ]) {
+    const damaged = structuredClone(complete); damage(damaged);
+    fs.writeFileSync(f.store.jobPath(105), JSON.stringify(damaged));
+    assert.throws(() => f.store.load(105), /invalid (integration|Git retry)/);
+  }
+  assert.equal(fs.readFileSync(complete.executionJournal.file, 'utf8').startsWith(raw), true);
+});
+
+test('uncertain completed push reconciles read-only and preserves pre-push read retry evidence', async t => {
+  const f = await fixture(t), clock = { time: Date.now() };
+  let pushes = 0, reads = 0;
+  const execute = transportAdapter(args => ['push', 'ls-remote'].includes(args[0]), (file, args, opts, cb, native) => {
+    if (args[0] === 'ls-remote' && ++reads === 1) {
+      return cb(Object.assign(new Error('read reset'), { code: 128 }), '', 'Connection reset by peer: pre-push read');
+    }
+    if (args[0] === 'push') {
+      pushes++;
+      assert.ok(!args.some(arg => /force|^\+/.test(arg)));
+      return native(file, args, opts, (error, stdout, stderr) => {
+        assert.ifError(error);
+        cb(Object.assign(new Error('lost push response'), { code: 'ECONNRESET' }), stdout, stderr + '\nConnection reset by peer: push response');
+      });
+    }
+    return native(file, args, opts, cb);
+  });
+  const tick = retryRunner(f, execute, clock);
+  await tick(); assert.equal(pushes, 0);
+  clock.time += 60000; await tick(); assert.equal(pushes, 1);
+  const finalHead = git(f.origin, 'rev-parse', f.job.branch);
+  clock.time += 60000; await tick();
+  assert.equal(pushes, 1);
+  const saved = f.store.load(105);
+  assert.equal(saved.delivery.commit, finalHead);
+  assert.deepEqual(saved.gitRetries, {});
+  assert.equal(saved.reviewAttempts, 0);
+  assert.match(fs.readFileSync(saved.executionJournal.file, 'utf8'), /integration-push-reconciled/);
+});
+test('final target ls-remote transport failure defers with retained exact PASS and no extra review', async t => {
+  const f = await fixture(t), clock = { time: Date.now(), green: true };
+  let reads = 0;
+  const tick = retryRunner(f, transportAdapter(args => args[0] === 'ls-remote' && args.at(-1) === 'refs/heads/main', (file, args, opts, cb, native) => {
+    if (++reads === 1) return cb(Object.assign(new Error('unavailable'), { code: 128 }), '', 'Could not resolve host: github.com');
+    return native(file, args, opts, cb);
+  }), clock);
+  await tick(); await tick();
+  assert.equal(f.store.load(105).terminal, false);
+  assert.equal(f.store.load(105).review.verdict, 'PASS');
+  assert.equal(f.store.load(105).reviewAttempts, 1);
+  await tick(); assert.equal(reads, 1);
+  clock.time += 60000; await tick();
+  assert.equal(f.store.load(105).status, 'merged');
+  assert.equal(f.store.load(105).reviewAttempts, 1);
+});
+
+test('a successful fetch clears only its own streak while a pre-push read remains deferred', async t => {
+  const f = await fixture(t), clock = { time: Date.now() };
+  let fetches = 0;
+  const tick = retryRunner(f, transportAdapter(args => ['fetch', 'ls-remote'].includes(args[0]), (file, args, opts, cb, native) => {
+    if (args[0] === 'fetch' && ++fetches === 2) return native(file, args, opts, cb);
+    return cb(Object.assign(new Error('network failure'), { code: 128 }), '', 'Connection timed out');
+  }), clock);
+  await tick();
+  clock.time += 60000; await tick();
+  const pending = f.store.load(105);
+  assert.equal(Object.values(pending.gitRetries).length, 1);
+  assert.equal(Object.values(pending.gitRetries)[0].operation, 'ls-remote');
+  // Fetch is no longer needed during the active push phase. Repeated passes
+  // must leave that read's budget untouched and the recent inline logs bounded.
+  const size = fs.statSync(f.store.jobPath(105)).size;
+  // Four successful reads per deferred pass exceed the 128-record window.
+  for (let n = 0; n < 40; n++) await tick();
+  const saved = f.store.load(105);
+  assert.equal(Object.values(saved.gitRetries)[0].count, 1);
+  assert.ok(saved.integrationActive.logs.length <= 128);
+  assert.ok(fs.statSync(f.store.jobPath(105)).size < size + 60000);
+  assert.equal(saved.reviewAttempts, 0);
+});
+
+test('loss between the first Git result and its checkpoint cannot reset retry reservation', async t => {
+  const f = await fixture(t), clock = { time: Date.now() };
+  const store = createJobStore(f.store.directory, { now: () => new Date(clock.time).toISOString() });
+  const append = store.appendIntegrationEvent;
+  let lost = false, calls = 0;
+  store.appendIntegrationEvent = (job, record) => {
+    append(job, record);
+    if (!lost && record.event === 'integration-git' && record.command[1] === 'fetch') {
+      lost = true; throw new Error('supervisor lost after initial Git response');
+    }
+  };
+  const adapter = transportAdapter(args => args[0] === 'fetch', (_file, _args, _opts, cb) => {
+    calls++; cb(Object.assign(new Error('transport unavailable'), { code: 128 }), '', 'Connection timed out');
+  });
+  await assert.rejects(retryRunner(f, adapter, clock, { jobStore: store })(), /supervisor lost/);
+  const pending = f.store.load(105);
+  assert.equal(Object.values(pending.gitRetries)[0].count, 1);
+  await retryRunner(f, adapter, clock)(); assert.equal(calls, 1);
+  clock.time += 60000;
+  await retryRunner(f, require('node:child_process').execFile, clock)();
+  assert.equal(f.store.load(105).integrationHistory[0].outcome, 'integrated');
+  assert.deepEqual(f.store.load(105).gitRetries, {});
+});
+
+for (const operation of ['worktree', 'rev-parse']) {
+  test(`temporary ${operation} read process failure resumes at the real persisted run seam`, async t => {
+    const f = await fixture(t), clock = { time: Date.now() };
+    let calls = 0;
+    const tick = retryRunner(f, transportAdapter(args => args[0] === operation, (_file, _args, _opts, cb) => {
+      calls++; cb(Object.assign(new Error('spawn git EAGAIN'), { code: 'EAGAIN' }), '', '');
+    }), clock);
+    await tick(); await tick(); assert.equal(calls, 1);
+    assert.equal(f.store.load(105).terminal, false);
+    clock.time += 60000;
+    await retryRunner(f, require('node:child_process').execFile, clock)();
+    assert.equal(f.store.load(105).integrationHistory[0].outcome, 'integrated');
+    assert.equal(f.store.load(105).runs, 0);
+    assert.equal(f.store.load(105).reviewAttempts, 0);
+  });
+}
+
+test('reattaching a removed delivery worktree retries its own fetch with persisted infrastructure budget', async t => {
+  const f = await fixture(t), clock = { time: Date.now() };
+  git(f.project.checkout, 'worktree', 'remove', f.workspace.worktreePath);
+  let calls = 0;
+  const tick = retryRunner(f, transportAdapter(args => args[0] === 'fetch' && args.at(-1) === 'main', (_file, _args, _opts, cb) => {
+    calls++; cb(Object.assign(new Error('remote unavailable'), { code: 128 }), '', 'Connection timed out: workspace reattachment');
+  }), clock);
+  await tick(); await tick(); assert.equal(calls, 1);
+  assert.equal(f.store.load(105).integrationActive.interruptions || 0, 0);
+  clock.time += 60000;
+  await retryRunner(f, require('node:child_process').execFile, clock)();
+  assert.equal(f.store.load(105).integrationHistory[0].outcome, 'integrated');
+  assert.equal(f.store.load(105).runs, 0);
+  assert.deepEqual(f.store.load(105).gitRetries, {});
+});
+
+test('an unexplained push response is reconciled read-only and never authorizes a blind retry', async t => {
+  for (const completed of [false, true]) {
+    const f = await fixture(t), clock = { time: Date.now() };
+    let pushes = 0;
+    const tick = retryRunner(f, transportAdapter(args => args[0] === 'push', (file, args, opts, cb, native) => {
+      pushes++;
+      const lost = () => cb(Object.assign(new Error('response unavailable'), { code: 128 }), '', '');
+      if (completed) return native(file, args, opts, error => { assert.ifError(error); lost(); });
+      lost();
+    }), clock);
+    if (completed) {
+      await tick();
+      assert.equal(f.store.load(105).integrationHistory[0].outcome, 'integrated');
+      assert.equal(f.store.load(105).delivery.commit, git(f.origin, 'rev-parse', f.job.branch));
+    } else {
+      await assert.rejects(tick(), /response unavailable/);
+      assert.equal(f.store.load(105).terminalState, 'ready_for_human');
+    }
+    assert.equal(pushes, 1);
+  }
+});
+
+test('malformed delivered or observed commit identities stop immediately without transport retries', async t => {
+  for (const delivered of [false, true]) {
+    const f = await fixture(t), clock = { time: Date.now() };
+    if (delivered) { recordDelivery(f.job, { commit: 'malformed-sha' }); f.store.save(f.job); }
+    let reads = 0;
+    const tick = retryRunner(f, transportAdapter(args => args[0] === 'rev-parse', (_file, _args, _opts, cb) => {
+      reads++; cb(null, 'malformed-sha\n', '');
+    }), clock);
+    await assert.rejects(tick(), /invalid (delivered|observed) commit SHA/);
+    assert.equal(reads, delivered ? 0 : 1);
+    assert.equal(f.store.load(105).terminalState, 'ready_for_human');
+    assert.equal(f.store.load(105).runs, 0);
+  }
+});

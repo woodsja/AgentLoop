@@ -315,6 +315,10 @@ function createR1Jobs(store, options = {}) {
       : job.status === 'running' ? 'implementation' : job.status === 'awaiting_ci' ? 'ci' : job.status;
     const snapshot = snapshotter();
     const jobStore = { ...original,
+      appendIntegrationEvent(job, record) {
+        original.appendIntegrationEvent(job, record);
+        store.appendExecution(task.id, { stage: phaseOf(job), implementationAttempt: job.runs, ...record });
+      },
       list: () => original.list().filter(job => job.issue.number === task.issue),
       save(job) {
         bindR1Parent(job, task.id);

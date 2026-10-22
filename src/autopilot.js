@@ -22,6 +22,7 @@ const {
 } = require('./autopilot-workspace');
 const { readRepositoryInstructions } = require('./autopilot-instructions');
 const { prepareRepositoryEnvironment, instructionsRequireVenv } = require('./autopilot-environment');
+const { observeIntegration } = require('./autopilot-integration-state');
 const { synchronizeIssueBranch, observeTargetSha } = require('./autopilot-integration');
 const { createClaudeReviewAdapter } = require('./autopilot-review');
 const { buildAutopilotTask, buildCorrectiveTask } = require('./autopilot-task');
@@ -347,11 +348,9 @@ async function run(argv, dependencies = {}) {
     if (remote.state === 'MERGED') {
       if (!recoverMerged(remote)) return;
     } else if (remote.state === 'OPEN') {
-      const targetSha = await (dependencies.observeTargetSha || observeTargetSha)(project, { execFile: dependencies.execFile });
-      job.integrationGateObservations ||= [];
-      job.integrationGateObservations.push({ at: store.now(), pr: remote, targetSha,
-        integratedTargetSha: job.integration?.targetSha || null, approvedHead: job.delivery.commit });
-      store.save(job);
+      const targetSha = await (dependencies.observeTargetSha || observeTargetSha)(project, { execFile: dependencies.execFile, job, store });
+      observeIntegration(job, store, 'gate', { targetSha, headSha: remote.headRefOid,
+        integratedTargetSha: job.integration?.targetSha || null, approvedHead: job.delivery.commit }, remote);
       if (!job.integration || job.integration.headSha !== job.delivery.commit
         || job.integration.targetSha !== targetSha) {
         // The prior PASS stays historical, even when the feature SHA has not
@@ -498,6 +497,7 @@ async function run(argv, dependencies = {}) {
         store.save(job);
         return { issue: candidate, workspace: null, result: null, outcome: { status: READY_FOR_HUMAN }, job };
       }
+      observeIntegration(job, store, 'ci', { state: observation.state, headSha: observation.headCommit || job.delivery.commit, pr: job.pr.number }, observation);
       recordCiState(job, observation);
       if (observation.state === 'green') {
         if (project.reviewPolicy === 'always' || project.reviewPolicy === 'risk') {
@@ -833,6 +833,11 @@ async function run(argv, dependencies = {}) {
     write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${outcome.status}${stopped}.`);
     return { issue: candidate, workspace, result, outcome, job };
   } catch (error) {
+    if (error.code === 'AUTOPILOT_GIT_DEFERRED') {
+      job.status = 'awaiting_ci'; store.save(job);
+      write(`Autopilot: issue #${candidate.number}; ${error.message}`);
+      return { issue: candidate, workspace: null, result: null, outcome: { status: 'deferred' }, job };
+    }
     if (error.code === 'AUTOPILOT_TARGET_BUSY') {
       // The issue lock still protects this job. Retain all checkpoints (including
       // a completed review) for the next pass without recording a failure.
@@ -850,7 +855,7 @@ async function run(argv, dependencies = {}) {
         } else {
           recordFailure(job, phase, error, store.now);
           if (job.ralph && job.ralph.status === 'running') job.ralph.status = 'error';
-          if (phase === 'integration' && error.code === 'AUTOPILOT_INTEGRATION_BLOCKED') {
+          if (error.code === 'AUTOPILOT_INTEGRATION_BLOCKED') {
             handToHuman(job, 'integration', errorMessage(error), store.now);
           } else if (phase === 'integration') {
             if (job.failures.filter(failure => failure.phase === 'integration').length >= 3) {

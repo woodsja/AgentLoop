@@ -1,6 +1,7 @@
 'use strict';
 
 const journal = require('./execution-journal');
+const { validPolling, validRetries } = require('./autopilot-integration-state');
 const { snapshotter } = require('./execution-preview');
 
 const fs = require('node:fs');
@@ -278,7 +279,11 @@ function validateJob(job, filePath) {
     && /^[a-f0-9]{40,64}$/.test(entry.oldHead) && /^[a-f0-9]{40,64}$/.test(entry.targetSha)
     && (entry.finalHead === null || /^[a-f0-9]{40,64}$/.test(entry.finalHead))
     && ['prepare', 'merge', 'resolve', 'commit', 'verify', 'repair', 'repair_commit', 'push'].includes(entry.phase)
-    && typeof entry.startedAt === 'string' && Array.isArray(entry.logs)
+    && typeof entry.startedAt === 'string' && Array.isArray(entry.logs) && entry.logs.length <= 128
+    && entry.logs.every(log => isPlainObject(log) && typeof log.at === 'string' && log.at.length <= 40
+      && (typeof log.event === 'string' && log.event.length <= 64
+        || Array.isArray(log.command) && log.command.length <= 32
+          && log.command.every(arg => typeof arg === 'string' && arg.length <= 4096)))
     && Array.isArray(entry.workers) && Array.isArray(entry.affectedFiles);
   const validIntegration = isPlainObject(job) && (job.integrationHistory === undefined
     || (Array.isArray(job.integrationHistory) && job.integrationHistory.length <= 3
@@ -307,6 +312,10 @@ function validateJob(job, filePath) {
             : !hasValidPullRequest(job) ? 'invalid pull request state'
               : !hasValidMerge(job) ? 'invalid merge state'
               : !validIntegration ? 'invalid integration state'
+              : !validPolling(job.integrationPolling) ? 'invalid integration polling state'
+              : !validRetries(job.gitRetries) ? 'invalid Git retry state'
+              : ['integrationObservations', 'integrationGateObservations'].some(key => job[key] !== undefined
+                && (!Array.isArray(job[key]) || job[key].length > 20 || job[key].some(entry => !isPlainObject(entry) || typeof entry.at !== 'string'))) ? 'invalid integration observation collection'
               : !hasValidCi(job) ? 'invalid CI state'
                 : job.verification != null && !isVerificationEvidence(job.verification) ? 'invalid deterministic verification state'
                 : !hasValidReview(job) ? 'invalid independent review state'
@@ -660,6 +669,12 @@ function createJobStore(stateDir, options = {}) {
       .sort((left, right) => left.issue.number - right.issue.number);
   }
 
+  function appendIntegrationEvent(job, record) {
+    const file = jobPath(job.issue.number).replace(/\.json$/, '.execution.ndjson');
+    journal.append(file, { ...record, timestamp: now() });
+    journal.flush(file); // raw evidence precedes the checkpoint, including retries
+  }
+
   const snapshot = snapshotter();
   function save(job) {
     validateJob(job, jobPath(job && job.issue && job.issue.number));
@@ -729,7 +744,7 @@ function createJobStore(stateDir, options = {}) {
     throw new Error(`Autopilot job lock ${filePath} could not be acquired`);
   }
 
-  return { directory, jobPath, load, list, save, acquire, acquireTarget, now };
+  return { directory, jobPath, load, list, save, acquire, acquireTarget, now, appendIntegrationEvent };
 }
 
 function isResumable(job) {

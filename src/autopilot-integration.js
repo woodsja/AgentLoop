@@ -9,6 +9,7 @@ const { prepareIssueWorkspace, deriveWorktreePath } = require('./autopilot-works
 const { observePullRequest } = require('./autopilot-github');
 const { runVerification } = require('./verifier');
 const { recordDelivery, recordVerification } = require('./autopilot-state');
+const { gitOperation, observeIntegration, clearGitRetry } = require('./autopilot-integration-state');
 const MAX_INTEGRATIONS = 3;
 const protectedPath = file => /^(?:docs\/decisions\/|docs\/github-issue-tracker\.md$)|(^|\/)(?:\.env(?:\.[^/]+)?|AGENTS\.md|SKILL\.md|package-lock\.json|autopilot-projects\.json)$|(^|\/)\.(?:github|ralph|agents|codex)\//.test(file);
 
@@ -16,12 +17,17 @@ function refused(message) {
   return Object.assign(new Error(`Integration refused: ${message}`), { code: 'AUTOPILOT_INTEGRATION_BLOCKED' });
 }
 
-async function observeTargetSha(project, { execFile: execute = execFile } = {}) {
-  const result = await new Promise((resolve, reject) => execute('git',
-    ['ls-remote', '--exit-code', 'origin', `refs/heads/${project.baseBranch}`],
+async function observeTargetSha(project, { execFile: execute = execFile, job, store } = {}) {
+  const args = ['ls-remote', '--exit-code', 'origin', `refs/heads/${project.baseBranch}`];
+  const read = () => new Promise(resolve => execute('git', args,
     unattendedOptions({ cwd: project.checkout, encoding: 'utf8', shell: false }),
-    (error, stdout) => error ? reject(error) : resolve(String(stdout))));
-  const lines = result.trim().split('\n');
+    (error, stdout, stderr) => resolve({ code: error ? error.code : 0,
+      error: error ? { name: error.name, message: error.message, stack: error.stack, code: error.code, killed: error.killed || false, signal: error.signal || null } : null,
+      stdout: String(stdout || ''), stderr: String(stderr || '') })));
+  const observed = job && store
+    ? await gitOperation({ job, store, project, cwd: project.checkout, args, execute: read }) : await read();
+  if (observed.code !== 0) throw refused(`git ls-remote failed: ${observed.stderr}`);
+  const lines = observed.stdout.trim().split('\n');
   const match = lines.length === 1 && lines[0].match(/^([a-f0-9]{40,64})\s+refs\/heads\/(.+)$/);
   if (!match || match[2] !== project.baseBranch) throw refused('ambiguous target branch SHA');
   return match[1];
@@ -35,25 +41,23 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
   let attempt = job.integrationActive;
   const execute = options.execFile || execFile;
   const git = async (cwd, args, allowFailure = false) => {
-    const result = await new Promise(resolve => execute('git', args,
-      unattendedOptions({ cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, shell: false }),
-      (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout: String(stdout || ''), stderr: String(stderr || '') })));
+    const result = await gitOperation({ job, store, project, cwd, args, allowFailure,
+      execute: () => new Promise(resolve => execute('git', args,
+        unattendedOptions({ cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, shell: false }),
+        (error, stdout, stderr) => resolve({ code: error ? error.code : 0,
+          error: error ? { name: error.name, message: error.message, stack: error.stack, code: error.code, killed: error.killed || false, signal: error.signal || null } : null,
+          stdout: String(stdout || ''), stderr: String(stderr || '') }))) });
     if (attempt) {
-      attempt.logs.push({ at: now(), command: ['git', ...args], cwd, ...result });
+      attempt.logs = [...attempt.logs, { at: now(), command: ['git', ...args], cwd, code: result.code }].slice(-128);
       save();
-    } else {
-      job.integrationObservations ||= [];
-      job.integrationObservations.push({ at: now(), command: ['git', ...args], cwd, ...result });
-      save();
-    }
-    if (result.code !== 0 && !allowFailure) {
-      const error = refused(`git ${args[0]} failed: ${result.stderr}`);
-      if (args[0] === 'push') error.code = 'AUTOPILOT_INTEGRATION_RETRY';
-      throw error;
     }
     return result;
   };
-  const out = async (cwd, args) => (await git(cwd, args)).stdout.trim();
+  const out = async (cwd, args) => {
+    const value = (await git(cwd, args)).stdout.trim();
+    if (args[0] === 'rev-parse' && !/^[a-f0-9]{40,64}$/.test(value)) throw refused('invalid observed commit SHA');
+    return value;
+  };
   const cwd = deriveWorktreePath(project, issue);
   const checkpoint = phase => { attempt.phase = phase; attempt.updatedAt = now(); save(); };
   const finish = outcome => {
@@ -70,6 +74,7 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
     if (job.repo !== project.repo || !job.pr || !job.delivery?.pushed || job.branch !== job.delivery.branch
       || !new RegExp(`^ralph/issue-${issue.number}-[a-z0-9-]+$`).test(job.branch)
       || (job.worktreePath && path.resolve(job.worktreePath) !== cwd)) throw refused('issue/branch/worktree identity mismatch');
+    if (!/^[a-f0-9]{40,64}$/.test(job.delivery.commit)) throw refused('invalid delivered commit SHA');
     const remote = await (options.observePullRequest || observePullRequest)(project, job.pr.number, { execFile: execute });
     if (!remote || remote.isCrossRepository !== false || remote.number !== job.pr.number || remote.headRefName !== job.branch
       || remote.baseRefName !== project.baseBranch || !['OPEN', 'MERGED'].includes(remote.state)) throw refused('PR identity mismatch');
@@ -81,6 +86,7 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
       await git(project.checkout, ['fetch', '--no-tags', 'origin', `+refs/heads/${project.baseBranch}:refs/remotes/origin/${project.baseBranch}`]);
       const targetSha = await out(project.checkout, ['rev-parse', `refs/remotes/origin/${project.baseBranch}^{commit}`]);
       if (!/^[a-f0-9]{40,64}$/.test(targetSha)) throw refused('invalid target SHA');
+      observeIntegration(job, store, 'target', { targetSha, headSha: remote.headRefOid, state: remote.state }, remote);
       if (job.integration?.headSha === job.delivery.commit && job.integration.targetSha === targetSha) return { changed: false };
       if ((job.integrationHistory?.length || 0) >= MAX_INTEGRATIONS) throw refused(`total synchronization limit (${MAX_INTEGRATIONS}) exhausted`);
       attempt = job.integrationActive = { number: (job.integrationHistory?.length || 0) + 1,
@@ -96,8 +102,22 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
     const own = entries.find(entry => entry.split('\n').includes(`worktree ${cwd}`));
     if (!own) {
       if (fs.existsSync(cwd) && fs.readdirSync(cwd).length) throw refused('unregistered nonempty worktree');
-      await (options.prepareIssueWorkspace || prepareIssueWorkspace)(project, issue, { branch: job.branch,
-        headCommit: attempt.finalHead || attempt.oldHead, execFile: execute });
+      // Workspace reattachment performs its own fetch/ref reads. Route those
+      // through the same durable budget, retaining their classification even
+      // though the workspace adapter wraps command errors for ordinary callers.
+      let preparationError;
+      const prepareExecute = (file, args, commandOptions, callback) => {
+        const read = file === 'git' && (['fetch', 'show-ref', 'rev-parse'].includes(args[0])
+          || args[0] === 'worktree' && args[1] === 'list');
+        if (!read) return execute(file, args, commandOptions, callback);
+        git(commandOptions.cwd, args, args[0] === 'show-ref').then(result => {
+          callback(result.code === 0 ? null : Object.assign(new Error('missing ref'), { code: result.code }), result.stdout, result.stderr);
+        }, error => { preparationError = error; callback(error, '', error.message); });
+      };
+      try {
+        await (options.prepareIssueWorkspace || prepareIssueWorkspace)(project, issue, { branch: job.branch,
+          headCommit: attempt.finalHead || attempt.oldHead, execFile: prepareExecute });
+      } catch (error) { throw preparationError || refused(error.message); }
     } else if (!own.split('\n').includes(`branch refs/heads/${job.branch}`)) throw refused('registered worktree branch mismatch');
     job.worktreePath = cwd; job.workspaceState = 'prepared'; save();
     const head = await out(cwd, ['rev-parse', 'HEAD']);
@@ -226,7 +246,7 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
       if (await out(cwd, ['rev-parse', 'HEAD']) !== attempt.finalHead) throw refused('head changed before verification');
       if (!attempt.verifier) {
         // The completion event is durable before the return-value checkpoint.
-        const completed = attempt.logs.findLast(entry => entry.event === 'verification'
+        const completed = (attempt.verificationCompleted?.commit === attempt.finalHead ? attempt.verificationCompleted : null) || attempt.logs.findLast(entry => entry.event === 'verification'
           && entry.commit === attempt.finalHead);
         if (completed) { attempt.verifier = completed.result; attempt.verifierCommit = attempt.finalHead; }
       }
@@ -234,7 +254,10 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
         attempt.verifierStartedAt = now(); save();
         attempt.verifier = await (options.runVerification || runVerification)(cwd, verificationCommand,
           options.verificationTimeoutMs, (event, details) => {
-            attempt.logs.push({ at: now(), commit: attempt.finalHead, event, ...details }); save();
+            const record = { at: now(), commit: attempt.finalHead, event, ...details };
+            store.appendIntegrationEvent(job, { ...record, event: 'integration-verifier', verifierEvent: event });
+            if (event === 'verification') attempt.verificationCompleted = record;
+            attempt.logs = [...attempt.logs, record].slice(-128); save();
           });
         attempt.verifierCommit = attempt.finalHead; save();
       }
@@ -269,11 +292,31 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
     if (attempt.phase === 'push') {
       if (await out(cwd, ['rev-parse', 'HEAD']) !== attempt.finalHead || await out(cwd, ['status', '--porcelain'])) throw refused('verified tree changed');
       if (attempt.verifierCommit !== attempt.finalHead || !attempt.verifier?.passed) throw refused('missing exact verification');
-      const published = await out(cwd, ['ls-remote', '--exit-code', 'origin', `refs/heads/${job.branch}`]);
-      const remoteHead = published.split(/\s/)[0];
-      if (![attempt.oldHead, attempt.finalHead].includes(remoteHead)) throw refused('remote head changed before push');
-      attempt.push = { status: 'intent', commit: attempt.finalHead, at: now() }; save();
-      if (remoteHead !== attempt.finalHead) await git(cwd, ['push', 'origin', `HEAD:refs/heads/${job.branch}`]);
+      const readPublishedHead = async () => {
+        const published = await out(cwd, ['ls-remote', '--exit-code', 'origin', `refs/heads/${job.branch}`]);
+        const lines = published.split('\n');
+        const match = lines.length === 1 && lines[0].match(/^([a-f0-9]{40,64})\s+refs\/heads\/(.+)$/);
+        if (!match || match[2] !== job.branch) throw refused('ambiguous published branch SHA');
+        if (![attempt.oldHead, attempt.finalHead].includes(match[1])) throw refused('remote head changed before push');
+        return match[1];
+      };
+      const pushArgs = ['push', 'origin', `HEAD:refs/heads/${job.branch}`];
+      const remoteHead = await readPublishedHead();
+      if (remoteHead !== attempt.finalHead && attempt.push?.responseError?.retryable === false) {
+        throw refused(`Unconfirmed push did not publish the verified head: ${attempt.push.responseError.message}`);
+      }
+      attempt.push = { ...attempt.push, status: 'intent', commit: attempt.finalHead, at: now() }; save();
+      if (remoteHead !== attempt.finalHead) {
+        try { await git(cwd, pushArgs); }
+        catch (error) {
+          if (!error.gitTransport && !error.reconcilePush) throw error;
+          attempt.push.responseError = { message: error.message, retryable: Boolean(error.gitTransport) }; save();
+          // Even the last allowed push may have completed. Reconcile read-only
+          // before deferring or exhausting its budget; never infer a failed push.
+          if (await readPublishedHead() !== attempt.finalHead) throw error;
+          clearGitRetry({ job, store, project, cwd, args: pushArgs });
+        }
+      } else clearGitRetry({ job, store, project, cwd, args: pushArgs });
       attempt.push = { ...attempt.push, status: 'pushed', finishedAt: now() }; save();
       recordDelivery(job, { commit: attempt.finalHead, pushed: true });
       recordVerification(job, attempt.environment?.result?.verification || project.verification, attempt.verifier);
@@ -287,7 +330,8 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
     if (attempt && !attempt.finishedAt) {
       attempt.error = { message: error.message, stack: error.stack, at: now() };
       // Transport failures during push retain the intent for remote reconciliation.
-      if (error.code !== 'AUTOPILOT_INTEGRATION_BLOCKED') {
+      if (error.code === 'AUTOPILOT_GIT_DEFERRED') { save(); }
+      else if (error.code !== 'AUTOPILOT_INTEGRATION_BLOCKED') {
         attempt.interruptions = (attempt.interruptions || 0) + 1;
         if (attempt.interruptions > 2) {
           job.workspaceState = 'integration_retained';
