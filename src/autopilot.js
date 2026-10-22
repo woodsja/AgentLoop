@@ -22,6 +22,8 @@ const {
 } = require('./autopilot-workspace');
 const { readRepositoryInstructions } = require('./autopilot-instructions');
 const { prepareRepositoryEnvironment, instructionsRequireVenv } = require('./autopilot-environment');
+const { observeIntegration } = require('./autopilot-integration-state');
+const { synchronizeIssueBranch, observeTargetSha } = require('./autopilot-integration');
 const { createClaudeReviewAdapter } = require('./autopilot-review');
 const { buildAutopilotTask, buildCorrectiveTask } = require('./autopilot-task');
 const { createRalphTaskService } = require('./ralph-task-service');
@@ -79,9 +81,10 @@ function errorMessage(error) {
 
 // Terminal hand-off for a CI failure the single corrective cycle could not fix.
 const READY_FOR_HUMAN = 'ready_for_human';
-// One initial review and one review of the bounded correction, including
-// interrupted invocations. This budget is never reset for a new commit.
+// At most two reviews per exact SHA, including interrupted invocations;
+// reintegration shares a total budget of eight retained review attempts.
 const MAX_REVIEW_ATTEMPTS = 2;
+const MAX_TOTAL_REVIEW_ATTEMPTS = 8;
 const realReviewAdapter = createClaudeReviewAdapter();
 
 // A verified-but-undelivered change and an already pushed branch are both work
@@ -91,6 +94,7 @@ function shouldPreserveBranch(job) {
 }
 
 function handToHuman(job, phase, message, now) {
+  if (phase === 'integration') job.workspaceState = 'integration_retained';
   recordFailure(job, phase, message, now);
   job.status = READY_FOR_HUMAN;
   markTerminal(job, READY_FOR_HUMAN);
@@ -234,6 +238,65 @@ async function run(argv, dependencies = {}) {
   const createService = dependencies.createRalphTaskService || createRalphTaskService;
   const maxJobRuns = dependencies.maxJobRuns ?? DEFAULT_MAX_JOB_RUNS;
 
+  const synchronize = async () => {
+    phase = 'integration';
+    const sync = dependencies.synchronizeIssueBranch || synchronizeIssueBranch;
+    const result = await sync({ project, issue: candidate, job, store }, {
+      execFile: dependencies.execFile,
+      observePullRequest: dependencies.observePullRequest,
+      prepareIssueWorkspace: dependencies.prepareIssueWorkspace,
+      runVerification: dependencies.runVerification,
+      verificationTimeoutMs: dependencies.ralphOptions?.verificationTimeoutMs,
+      prepareEnvironment: async cwd => {
+        if (job.environmentProcess) {
+          const claim = job.environmentProcess;
+          if (!require('./r1-process-claim').terminatePriorR1Worker({ r1Child: true, workerPid: claim.pid, workerStartTime: claim.startTime })) {
+            throw Object.assign(new Error('Prior integration environment process ownership unresolved.'), { code: 'AUTOPILOT_INTEGRATION_BLOCKED' });
+          }
+          job.environmentProcess = null; store.save(job);
+        }
+        return prepareEnvironment(cwd, project, {
+          instructions: await discoverInstructions(cwd), isCancelled: dependencies.environmentIsCancelled,
+          onProcess: claim => { job.environmentProcess = claim; store.save(job); },
+        });
+      },
+      resolveConflict: async context => {
+        const instructions = await discoverInstructions(context.cwd);
+        const original = buildTask(project, candidate, instructions);
+        const task = { ...original, id: `${original.id}:integration-${context.attempt}-${context.kind}`,
+          maxAttempts: 1,
+          goal: `${original.goal}\n\nResolve ${context.kind} integration task only in ${context.cwd}. `
+            + `Old head: ${context.oldHead}; target: ${context.targetSha}.\n`
+            + `Conflict files: ${JSON.stringify(context.files)}\nIndex stages:\n${context.stages || ''}\n`
+            + `Verification diagnostics: ${JSON.stringify(context.diagnostics || null)}\n`
+            + 'Preserve requirements from both branches, including both package.json test additions. '
+            + 'Resolve and stage files without committing, pushing, or editing other worktrees. '
+            + 'Refuse ambiguous conflicts, divergent architecture, protected policy/configuration edits. '
+            + 'Never use ours/theirs blindly. Leave the merge commit to the integration gate.' };
+        const integrationService = dependencies.createIntegrationTaskService || createService;
+        const result = await integrationService({ config: storeConfig, ...dependencies.ralphOptions }).run(context.cwd, task);
+        const last = result?.attempts?.at(-1);
+        if (last?.worker && (last.worker.exitCode !== 0 || last.worker.timedOut)) {
+          return { status: 'needs_planning', taskResult: result };
+        }
+        // The task service may test an uncommitted resolution before the
+        // integrated environment exists. Keep that failure verbatim, but let
+        // the exact-commit verifier own validation and its bounded repair.
+        if (result?.status === 'needs_planning' && last?.status === 'failed'
+          && last.worker?.exitCode === 0 && !last.worker.timedOut && last.verification?.passed === false) {
+          return { status: 'passed', verificationDeferred: true, taskResult: result };
+        }
+        return result;
+      },
+    });
+    if (result?.changed) {
+      // Old approvals remain in history but cannot authorize the integrated SHA.
+      job.review = null; job.reviewSkip = null;
+      job.status = 'awaiting_ci'; store.save(job);
+    }
+    return result;
+  };
+
   // The final GitHub identity read is deliberately separate from CI and
   // review.  Both may be true for an old head if the PR was force-pushed or
   // retargeted afterwards, so the merge path always reads the PR immediately
@@ -248,6 +311,7 @@ async function run(argv, dependencies = {}) {
     // the first observation is retried (boundedly) rather than treated as a
     // review or worker failure.
     phase = 'merge';
+    targetLock ||= (dependencies.acquireTargetLock || (() => store.acquireTarget(project.repo, project.baseBranch)))();
     if (!job.pr || !job.delivery || !job.delivery.commit || !matchingPass(job.review, job.delivery.commit)
       || !Array.isArray(job.review.findings) || job.review.findings.length !== 0
       || !job.review.reviewer.startsWith('claude:')) {
@@ -259,7 +323,7 @@ async function run(argv, dependencies = {}) {
     const observePr = dependencies.observePullRequest || observePullRequest;
     const remote = await observePr(project, job.pr.number, { execFile: dependencies.execFile });
     const expectedBase = project.baseBranch;
-    if (!remote || remote.number !== job.pr.number || remote.headRefName !== job.branch
+    if (!remote || remote.isCrossRepository !== false || remote.number !== job.pr.number || remote.headRefName !== job.branch
       || remote.headRefOid !== job.delivery.commit || remote.baseRefName !== expectedBase) {
       handToHuman(job, 'merge', `GitHub PR identity changed or is ambiguous for PR #${job.pr.number}; expected ${job.branch} at ${job.delivery.commit} into ${expectedBase}.`, store.now);
       return;
@@ -284,6 +348,22 @@ async function run(argv, dependencies = {}) {
     if (remote.state === 'MERGED') {
       if (!recoverMerged(remote)) return;
     } else if (remote.state === 'OPEN') {
+      const targetSha = await (dependencies.observeTargetSha || observeTargetSha)(project, { execFile: dependencies.execFile, job, store });
+      observeIntegration(job, store, 'gate', { targetSha, headSha: remote.headRefOid,
+        integratedTargetSha: job.integration?.targetSha || null, approvedHead: job.delivery.commit }, remote);
+      if (!job.integration || job.integration.headSha !== job.delivery.commit
+        || job.integration.targetSha !== targetSha) {
+        // The prior PASS stays historical, even when the feature SHA has not
+        // changed yet. Synchronize before observing CI or reviewing again.
+        job.review = null; job.status = 'awaiting_ci'; store.save(job);
+        await synchronize();
+        return;
+      }
+      if (!hasPassingVerification(job.verification, job.delivery.commit)
+        || job.ci?.state !== 'green' || job.ci.headCommit !== job.delivery.commit) {
+        handToHuman(job, 'merge', 'Missing exact-SHA verification or CI evidence.', store.now);
+        return;
+      }
       phase = 'merge';
       const merge = dependencies.mergePullRequest || mergePullRequest;
       let result;
@@ -335,6 +415,7 @@ async function run(argv, dependencies = {}) {
   const lock = store.acquire(candidate.number);
   let job;
   let workspace;
+  let targetLock;
   let phase = 'reconcile';
   try {
     // Re-read under the lock: the selection-time snapshot may be stale.
@@ -390,6 +471,16 @@ async function run(argv, dependencies = {}) {
       if (!job.pr || !job.delivery || !job.delivery.commit) {
         throw new Error(`Autopilot job for issue #${candidate.number} awaits CI without a persisted pull request and head commit`);
       }
+      // Serialize integration and final merge; external CI/review calls run
+      // without the target lock so other issues can make progress.
+      phase = 'ci';
+      targetLock = (dependencies.acquireTargetLock || (() => store.acquireTarget(project.repo, project.baseBranch)))();
+      const integration = await synchronize();
+      if (integration?.changed || integration?.pending) {
+        store.save(job);
+        return { issue: candidate, workspace: null, result: null, outcome: { status: 'awaiting_ci' }, job };
+      }
+      targetLock.release(); targetLock = null;
       phase = 'ci';
       const observeCi = dependencies.observePullRequestCi || observePullRequestCi;
       const observation = await observeCi(project, {
@@ -400,6 +491,13 @@ async function run(argv, dependencies = {}) {
         || (observation.prNumber !== undefined && observation.prNumber !== job.pr.number)) {
         throw new Error(`Autopilot CI observation for issue #${candidate.number} does not match PR #${job.pr.number} at ${job.delivery.commit}`);
       }
+      if (observation.state === 'green'
+        && (observation.headCommit !== job.delivery.commit || observation.prNumber !== job.pr.number)) {
+        handToHuman(job, 'ci', 'Green CI requires explicit PR and exact head SHA evidence.', store.now);
+        store.save(job);
+        return { issue: candidate, workspace: null, result: null, outcome: { status: READY_FOR_HUMAN }, job };
+      }
+      observeIntegration(job, store, 'ci', { state: observation.state, headSha: observation.headCommit || job.delivery.commit, pr: job.pr.number }, observation);
       recordCiState(job, observation);
       if (observation.state === 'green') {
         if (project.reviewPolicy === 'always' || project.reviewPolicy === 'risk') {
@@ -409,7 +507,9 @@ async function run(argv, dependencies = {}) {
             handToHuman(job, 'review', 'Independent review requires passing deterministic verification evidence for the exact delivered commit.', store.now);
           } else if (matchingPass(job.review, job.delivery.commit)) {
             await finishApprovedMerge();
-          } else if ((job.reviewAttempts ?? 0) >= MAX_REVIEW_ATTEMPTS) {
+          } else if ((job.reviewAttempts ?? 0) >= MAX_TOTAL_REVIEW_ATTEMPTS
+            || ((job.reviewHistory || []).filter(entry => entry.commit === job.delivery.commit).length
+              + Math.max(0, (job.reviewAttempts || 0) - (job.reviewHistory || []).length)) >= MAX_REVIEW_ATTEMPTS) {
             handToHuman(job, 'review', `Independent review attempt limit (${MAX_REVIEW_ATTEMPTS}) reached; no further automatic review will run.`, store.now);
           } else {
             // Keep the original injection names working for embedders while the
@@ -733,6 +833,17 @@ async function run(argv, dependencies = {}) {
     write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${outcome.status}${stopped}.`);
     return { issue: candidate, workspace, result, outcome, job };
   } catch (error) {
+    if (error.code === 'AUTOPILOT_GIT_DEFERRED') {
+      job.status = 'awaiting_ci'; store.save(job);
+      write(`Autopilot: issue #${candidate.number}; ${error.message}`);
+      return { issue: candidate, workspace: null, result: null, outcome: { status: 'deferred' }, job };
+    }
+    if (error.code === 'AUTOPILOT_TARGET_BUSY') {
+      // The issue lock still protects this job. Retain all checkpoints (including
+      // a completed review) for the next pass without recording a failure.
+      write(`Autopilot: project ${projectName}; issue #${candidate.number}; target busy, deferred.`);
+      return { issue: candidate, workspace: null, result: null, outcome: { status: 'deferred' }, job };
+    }
     if (job) {
       try {
         if (['PYTHON_PREFLIGHT_BLOCKED', 'PROJECT_PREFLIGHT_BLOCKED'].includes(error.code)) {
@@ -744,7 +855,13 @@ async function run(argv, dependencies = {}) {
         } else {
           recordFailure(job, phase, error, store.now);
           if (job.ralph && job.ralph.status === 'running') job.ralph.status = 'error';
-          if (phase === 'merge' && error && (error.code === 'AUTOPILOT_MERGE_UNCONFIRMED' || error.code === 'AUTOPILOT_MERGE_REJECTED')) {
+          if (error.code === 'AUTOPILOT_INTEGRATION_BLOCKED') {
+            handToHuman(job, 'integration', errorMessage(error), store.now);
+          } else if (phase === 'integration') {
+            if (job.failures.filter(failure => failure.phase === 'integration').length >= 3) {
+              handToHuman(job, 'integration', `Integration retry limit reached: ${errorMessage(error)}`, store.now);
+            } else job.status = 'awaiting_ci';
+          } else if (phase === 'merge' && error && (error.code === 'AUTOPILOT_MERGE_UNCONFIRMED' || error.code === 'AUTOPILOT_MERGE_REJECTED')) {
             handToHuman(job, 'merge', errorMessage(error), store.now);
           } else if (phase === 'merge' && job.failures.filter(failure => failure.phase === 'merge').length >= 2) {
             // A transport failure is retryable once because GitHub may not have
@@ -802,6 +919,7 @@ async function run(argv, dependencies = {}) {
         }
       }
     } finally {
+      targetLock?.release();
       lock.release();
     }
   }

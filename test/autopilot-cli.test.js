@@ -25,7 +25,7 @@ function temporaryStore(options) {
 
 // Every CLI test gets its own job store so nothing touches real state.
 function run(argv, dependencies) {
-  return runAutopilot(argv, { jobStore: temporaryStore(), findOpenIssuePullRequests: async () => [], ...dependencies });
+  return runAutopilot(argv, { jobStore: temporaryStore(), synchronizeIssueBranch: async () => ({ changed: false }), findOpenIssuePullRequests: async () => [], ...dependencies });
 }
 
 test('dry run inspects disabled projects and reports its selected candidate', async () => {
@@ -1520,6 +1520,8 @@ test('reloads a failed job on the next run and resumes it with the persisted bra
 function enabledDependencies(store, overrides = {}) {
   return {
     jobStore: store,
+    synchronizeIssueBranch: async ({ job }) => { job.integration = { headSha: job.delivery.commit, targetSha: 'base-sha' }; return { changed: false }; },
+    observeTargetSha: async () => 'base-sha',
     loadProjectConfig: () => ({ ...project, enabled: true, verification: 'check', maxAttempts: 2, worktreeRoot: '/tmp/worktrees', reviewPolicy: 'none', reviewSkipReason: 'Synthetic fixture changes are covered by deterministic tests.' }),
     prepareIssueWorkspace: async (value, issue, options) => ({
       worktreePath: `/tmp/worktrees/issue-${issue.number}`,
@@ -2033,7 +2035,7 @@ function approvedMergeJob(store, number = 80, mutate = () => {}) {
 }
 
 function greenCi() { return { state: 'green', details: 'CI passed', prNumber: 99, headCommit: 'abc123', runs: [] }; }
-function openExpectedPr(branch) { return { number: 99, url: 'https://github.com/example/repo/pull/99', state: 'OPEN', headRefName: branch, headRefOid: 'abc123', baseRefName: 'main', mergeCommit: null }; }
+function openExpectedPr(branch) { return { number: 99, url: 'https://github.com/example/repo/pull/99', state: 'OPEN', isCrossRepository: false, headRefName: branch, headRefOid: 'abc123', baseRefName: 'main', mergeCommit: null }; }
 
 test('autoMerge false preserves ready_for_human_merge for an independently approved job', async () => {
   const store = temporaryStore(); const issue = approvedMergeJob(store);

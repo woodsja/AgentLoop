@@ -9,6 +9,12 @@ function directory(value) {
   return resolved;
 }
 
+function canonicalDirectory(value) {
+  const canonical = directory(value);
+  if (canonical !== path.resolve(value)) throw new Error('Registered workspace path changed through a symlink.');
+  return canonical;
+}
+
 function configuredProjects(value, configPath) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return Object.freeze({});
   const resolve = value => {
@@ -50,19 +56,28 @@ function git(cwd, args) {
 function worktree(root, checkout = null) {
   const marker = path.join(root, '.git');
   if (!fs.existsSync(marker) || !fs.statSync(marker).isFile()) throw new Error('Authorized worktree must be an isolated Git worktree.');
-  const records = git(root, ['worktree', 'list', '--porcelain', '-z']).split('\0\0');
-  const paths = records.map(record => record.split('\0').find(line => line.startsWith('worktree ')))
-    .filter(Boolean).map(line => path.resolve(line.slice(9)));
-  if (paths[0] === root || !paths.includes(root)) throw new Error('Authorized worktree must be registered and isolated.');
-  if (checkout && path.resolve(root, git(root, ['rev-parse', '--git-common-dir']))
-    !== path.resolve(checkout, git(checkout, ['rev-parse', '--git-common-dir']))) {
+  const common = cwd => directory(path.resolve(cwd, git(cwd, ['rev-parse', '--git-common-dir'])));
+  if (checkout && common(root) !== common(checkout)) {
     throw new Error('Authorized worktree does not belong to the registered repository.');
+  }
+  const records = git(checkout || root, ['worktree', 'list', '--porcelain', '-z'])
+    .split('\0\0').filter(Boolean).map(record => record.split('\0'));
+  const matches = records.filter(record => record.includes(`worktree ${root}`));
+  if (records[0]?.includes(`worktree ${root}`) || matches.length !== 1
+    || matches[0].some(line => line.startsWith('prunable'))) {
+    throw new Error('Authorized worktree must be registered and isolated.');
+  }
+  // A copied or redirected .git file must not impersonate another linked
+  // worktree, even when both directories share the same common repository.
+  const gitDir = directory(git(root, ['rev-parse', '--absolute-git-dir']));
+  const backlink = fs.readFileSync(path.join(gitDir, 'gitdir'), 'utf8').trim();
+  if (path.resolve(gitDir, backlink) !== marker) {
+    throw new Error('Authorized worktree Git registration is redirected or stale.');
   }
 }
 
 function checkedScope(root, configPath, checkout = null) {
-  const canonical = directory(root);
-  if (canonical !== path.resolve(root)) throw new Error('Registered workspace path changed through a symlink.');
+  const canonical = canonicalDirectory(root);
   const authority = fs.realpathSync(configPath);
   const relative = path.relative(canonical, authority);
   if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
@@ -79,24 +94,34 @@ function resolveProject(config, project, worktreeName, configPath) {
   const entry = registry[project];
   if (worktreeName !== undefined) {
     if (!entry || typeof entry !== 'object' || typeof worktreeName !== 'string'
-      || !Object.hasOwn(entry.worktrees, worktreeName)) throw new Error('Unknown authorized worktree.');
-    return checkedScope(entry.worktrees[worktreeName], configPath, directory(entry.root));
+      || !worktreeName || worktreeName === '.' || worktreeName === '..'
+      || /[\/\\\x00-\x1f\x7f:]/.test(worktreeName)) throw new Error('Unknown authorized worktree: select a single directory name.');
+    if (Object.hasOwn(entry.worktrees || {}, worktreeName)) {
+      return checkedScope(entry.worktrees[worktreeName], configPath, canonicalDirectory(entry.root));
+    }
+    if (!entry.worktreeRoot) throw new Error('Unknown authorized worktree.');
+    const candidate = path.join(entry.worktreeRoot, worktreeName);
+    if (!fs.existsSync(candidate)) throw new Error('Unknown authorized worktree: directory does not exist.');
+    return checkedScope(candidate, configPath, canonicalDirectory(entry.root));
   }
   return checkedScope(typeof entry === 'string' ? entry : entry.root, configPath);
 }
 
 function resolveWorkerScope(config, requestedPath, configPath) {
   const requested = directory(requestedPath);
+  if (requested !== path.resolve(requestedPath)) {
+    throw new Error('Worker workspace is not explicitly authorized: path changed through a symlink.');
+  }
   for (const entry of Object.values(config.allowedProjects || {})) {
     const root = typeof entry === 'string' ? entry : entry.root;
     if (requested === path.resolve(root)) return checkedScope(root, configPath);
-    for (const candidate of Object.values(typeof entry === 'object' ? entry.worktrees : {})) {
-      if (requested === path.resolve(candidate)) return checkedScope(candidate, configPath, directory(root));
+    for (const candidate of Object.values(typeof entry === 'object' ? entry.worktrees || {} : {})) {
+      if (requested === path.resolve(candidate)) return checkedScope(candidate, configPath, canonicalDirectory(root));
     }
     // Ralph-created worktrees under an owner-managed root are authorized only
     // as canonical, registered worktrees of this project's repository.
     // The requested path is already canonical, so a redirected root never contains it.
-    if (managesWorktree(entry, requested)) return checkedScope(requested, configPath, directory(root));
+    if (managesWorktree(entry, requested)) return checkedScope(requested, configPath, canonicalDirectory(root));
   }
   throw new Error('Worker workspace is not explicitly authorized in the project registry.');
 }

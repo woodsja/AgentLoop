@@ -199,13 +199,13 @@ It reloads the user manager, runs `systemctl --user enable --now` on the timer, 
 
 A disabled project, like `finance-dashboard` with `"enabled": false`, makes each scheduled pass exit 0 right away. It does not do issue discovery, cleanup, or workspace preparation.
 
-Worker directories must be explicitly registered in the owner configuration (`AGENTLOOP_CONFIG_PATH` or `--config`). Existing `allowedProjects` entries can still map a project name to its directory. To authorize isolated feature worktrees, a project entry may instead contain `root` and a named `worktrees` map:
+Worker directories must be authorized by the owner configuration (`AGENTLOOP_CONFIG_PATH` or `--config`). Existing `allowedProjects` entries can still map a project name to its directory. To authorize isolated feature worktrees, a project entry may instead contain `root` and a named `worktrees` map:
 
 ```json
 {"allowedProjects":{"ralph":{"root":"/path/to/checkout","worktrees":{"review":"/path/to/feature-worktree"}}}}
 ```
 
-To let Ralph create and use its own issue worktrees, an entry may instead (or also) name a managed `worktreeRoot`, such as `{"root":"/path/to/checkout","worktreeRoot":"/path/to/worktrees"}`. A worker directory under that root is authorized only when its canonical path stays inside the root and it is a registered Git worktree of that same repository, not its main checkout; symlink escapes, plain directories, and other repositories' worktrees are refused.
+To authorize future linked worktrees once at the project level, an entry may instead (or also) name a managed `worktreeRoot`, such as `{"root":"/path/to/checkout","worktreeRoot":"/path/to/worktrees"}`. After this owner authorization, `git worktree add /path/to/worktrees/feature -b feature/example` is the only worktree-specific setup needed. Select it with `worktree: "feature"` in `dispatch_task`, `start_loop`, or `ralph_run_task`; branch names are unrestricted. Explicit named aliases take precedence. Selectors must be single directory names, without slashes, absolute paths, or `..`. Projects without a managed root still require an explicit alias. A worker directory under that root is authorized only when its canonical path stays inside the root and it is a registered Git worktree of that same repository, not its main checkout; symlink escapes, plain directories, and other repositories' worktrees are refused.
 
 Keep that authoritative configuration outside every writable worker directory. Requests select `project: "ralph"` and `worktree: "review"`; they cannot register a project or override its path. The resolver checks the canonical directory, Git worktree registration, and repository ownership again before execution. `dispatch_task`, `start_loop`, and `ralph_run_task` accept the optional `worktree` selector; `cwd` and `projectPath` remain rejected. Unknown projects, redirected worktrees, and unrelated paths fail closed.
 

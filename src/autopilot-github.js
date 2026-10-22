@@ -209,6 +209,7 @@ function normalizePullRequestObservation(value) {
   if (!isPlainObject(value) || !Number.isSafeInteger(value.number) || value.number < 1
     || typeof value.url !== 'string' || !value.url
     || typeof value.state !== 'string' || !['OPEN', 'CLOSED', 'MERGED'].includes(value.state)
+    || typeof value.isCrossRepository !== 'boolean'
     || typeof value.headRefName !== 'string' || !value.headRefName
     || typeof value.headRefOid !== 'string' || !value.headRefOid
     || typeof value.baseRefName !== 'string' || !value.baseRefName
@@ -216,7 +217,7 @@ function normalizePullRequestObservation(value) {
     throw new Error('GitHub pull request observation failed: gh returned an unexpected pull request shape');
   }
   return { number: value.number, url: value.url, state: value.state, headRefName: value.headRefName,
-    headRefOid: value.headRefOid, baseRefName: value.baseRefName,
+    headRefOid: value.headRefOid, baseRefName: value.baseRefName, isCrossRepository: value.isCrossRepository,
     mergeCommit: value.mergeCommit ? value.mergeCommit.oid : null };
 }
 
@@ -228,7 +229,7 @@ async function observePullRequest(project, number, { execFile: executeFile = exe
   let response;
   try {
     response = JSON.parse(await runGh(['pr', 'view', String(number), '--repo', project.repo,
-      '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergeCommit'], executeFile, 'GitHub pull request observation'));
+      '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergeCommit,isCrossRepository'], executeFile, 'GitHub pull request observation'));
   } catch (error) {
     if (error.message.includes('GitHub pull request observation failed:')) throw error;
     throw new Error(`GitHub pull request observation failed: gh returned malformed JSON: ${error.message}`);
@@ -443,6 +444,7 @@ async function collectCiFailureDiagnostics(project, observation, { execFile: exe
 }
 
 module.exports = {
+  runGh,
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,

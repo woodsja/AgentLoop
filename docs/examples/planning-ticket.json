@@ -1,0 +1,17 @@
+{
+  "id": "mga-104-planning-drafts",
+  "kind": "ticket",
+  "repo": "woodsja/AgentLoop",
+  "title": "MGA 1/8 — Create non-executable ChatGPT planning drafts",
+  "sourceSpec": "#103",
+  "conversation": "ChatGPT planning conversation: autopilot:woodsja/AgentLoop#104, owner-supplied issue body and acceptance criteria",
+  "summary": "Allow the owner to preview and publish a specification or implementation ticket from a planning conversation as an unlabeled GitHub issue. Use repository-local Pocock conventions and existing GitHub operations.",
+  "acceptanceCriteria": [
+    "AGENTS.md links the committed draft publication convention and preserves the existing trust-boundary instructions.",
+    "The owner preview includes the repository, no-label policy, full title, source specification, planning source, proposal, acceptance criteria, blockers and release boundary.",
+    "Fake GitHub tests show creation without labels, metadata validation, rejection of unexpected labels, and read-only reconciliation after failure.",
+    "The focused tests and full npm test pass without changing production project registration."
+  ],
+  "blockers": [],
+  "labels": []
+}
