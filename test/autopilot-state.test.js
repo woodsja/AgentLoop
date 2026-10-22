@@ -244,8 +244,13 @@ test('review history retains verdicts across delivered SHAs and verbatim failure
   store.save(job);
   assert.deepEqual(createJobStore(store.directory).load(18).reviewHistory, job.reviewHistory);
   assert.equal(job.reviewHistory.length, 2);
+  for (let n = 3; n <= 8; n++) {
+    const extra = beginReviewAttempt(job, store.now, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: `new-sha-${n}` });
+    failReviewAttempt(job, extra.number, new Error('retained failure'), store.now);
+  }
   assert.throws(() => beginReviewAttempt(job, store.now, { reviewer: 'claude:opus', model: 'opus', policy: 'always', commit: 'def456' }), /history capacity/);
-  assert.equal(job.reviewAttempts, 2);
+  assert.equal(job.reviewAttempts, 8);
+  assert.deepEqual(job.reviewHistory[0], checkpoint);
 });
 
 test('corrupt review attempt history fails closed while older jobs without history still load', () => {

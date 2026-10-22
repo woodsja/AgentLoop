@@ -126,7 +126,7 @@ test('CI observation rejects malformed Actions responses', async () => {
 test('observes exact PR identity, merges with GitHub expected-head protection, and closes the issue', async () => {
   const calls = [];
   const responses = [
-    JSON.stringify({ number: 42, url: 'https://github.com/example/repo/pull/42', state: 'OPEN', headRefName: 'ralph/issue-42', headRefOid: 'deadbeef', baseRefName: 'ralph-dev', mergeCommit: null }),
+    JSON.stringify({ number: 42, url: 'https://github.com/example/repo/pull/42', state: 'OPEN', isCrossRepository: false, headRefName: 'ralph/issue-42', headRefOid: 'deadbeef', baseRefName: 'ralph-dev', mergeCommit: null }),
     JSON.stringify({ merged: true, sha: 'mergecafe' }),
     JSON.stringify({ number: 9, state: 'open', repository_url: 'https://api.github.com/repos/example/repo' }),
     JSON.stringify({ number: 9, state: 'closed', repository_url: 'https://api.github.com/repos/example/repo' }),
@@ -134,12 +134,12 @@ test('observes exact PR identity, merges with GitHub expected-head protection, a
   const executeFile = (file, args, options, callback) => { calls.push([file, args]); assertUnattendedGhOptions(options); callback(null, responses.shift(), ''); };
   const project = { repo: 'example/repo' };
   assert.deepEqual(await observePullRequest(project, 42, { execFile: executeFile }), {
-    number: 42, url: 'https://github.com/example/repo/pull/42', state: 'OPEN', headRefName: 'ralph/issue-42', headRefOid: 'deadbeef', baseRefName: 'ralph-dev', mergeCommit: null,
+    number: 42, url: 'https://github.com/example/repo/pull/42', state: 'OPEN', isCrossRepository: false, headRefName: 'ralph/issue-42', headRefOid: 'deadbeef', baseRefName: 'ralph-dev', mergeCommit: null,
   });
   assert.deepEqual(await mergePullRequest(project, { number: 42, headCommit: 'deadbeef' }, { execFile: executeFile }), { mergeCommit: 'mergecafe' });
   assert.deepEqual(await reconcileIssueClosure(project, 9, { execFile: executeFile }), { number: 9, state: 'closed' });
   assert.deepEqual(calls.map(([, args]) => args), [
-    ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergeCommit'],
+    ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,url,state,headRefName,headRefOid,baseRefName,mergeCommit,isCrossRepository'],
     ['api', '--method', 'PUT', 'repos/example/repo/pulls/42/merge', '-f', 'sha=deadbeef'],
     ['api', 'repos/example/repo/issues/9'],
     ['api', '--method', 'PATCH', 'repos/example/repo/issues/9', '-f', 'state=closed'],

@@ -5,6 +5,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const fixture = JSON.parse(fs.readFileSync(process.env.R1_FIXTURE, 'utf8'));
 const project = fixture.project;
+require('./r1-git-remote')(project, fixture.root);
 const file = name => path.join(fixture.root, name);
 const record = (name, value) => fs.appendFileSync(file(name), JSON.stringify(value) + '\n');
 // Let the integration test make the durable transcript unavailable without
@@ -61,6 +62,7 @@ require('../../src/daemon').start({ r1: {
     deliverPassedWork: async ({ workspace, issue }, { onProgress }) => {
       git(workspace.worktreePath, 'add', 'answer', 'revision');
       git(workspace.worktreePath, 'commit', '-m', `Fixture change for #${issue.number}`);
+      git(workspace.worktreePath, 'push', 'origin', workspace.branch);
       const delivery = { branch: workspace.branch, commit: git(workspace.worktreePath, 'rev-parse', 'HEAD'), pushed: true,
         pr: { number: issue.number, url: `https://example.invalid/pull/${issue.number}` } };
       await onProgress(delivery);
@@ -83,7 +85,7 @@ require('../../src/daemon').start({ r1: {
     observePullRequest: async (_project, number) => {
       const branch = branchOf(number);
       const merged = fs.existsSync(file(`merged-${number}`)) ? fs.readFileSync(file(`merged-${number}`), 'utf8') : null;
-      return { number, url: `https://example.invalid/pull/${number}`, state: merged ? 'MERGED' : 'OPEN', headRefName: branch,
+      return { number, url: `https://example.invalid/pull/${number}`, state: merged ? 'MERGED' : 'OPEN', isCrossRepository: false, headRefName: branch,
         headRefOid: git(project.checkout, 'rev-parse', `refs/heads/${branch}`), baseRefName: project.baseBranch, mergeCommit: merged };
     },
     mergePullRequest: async (_project, { number, headCommit }) => {
