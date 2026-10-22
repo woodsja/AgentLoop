@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, execFileSync } = require('node:child_process');
 
 const daemon = require('../src/daemon');
 const store = require('../src/store');
@@ -82,6 +82,50 @@ async function listenHttp(t, server) {
     throw error;
   }
 }
+
+test('dispatch and loop discover new managed Git worktrees without registry edits', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-managed-http-'));
+  const checkout = path.join(directory, 'checkout');
+  const managed = path.join(directory, 'managed');
+  const feature = path.join(managed, 'feature');
+  fs.mkdirSync(checkout);
+  const git = args => execFileSync('git', ['-C', checkout, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  git(['init']);
+  git(['config', 'user.name', 'Ralph test']);
+  git(['config', 'user.email', 'ralph@example.test']);
+  fs.writeFileSync(path.join(checkout, 'PLAN.md'), '# Plan\n');
+  git(['add', '.']);
+  git(['commit', '-m', 'fixture']);
+  fs.mkdirSync(managed);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: { root: checkout, worktreeRoot: managed } } }, directory);
+  const server = isolated.daemon.createHttpServer();
+  try {
+    // The daemon has already loaded owner authorization before Git creates it.
+    git(['worktree', 'add', '-b', 'feature/arbitrary-name', feature]);
+    if (!await listenHttp(t, server)) return;
+    for (const endpoint of ['/api/dispatch', '/api/loop']) {
+      const response = await requestJson(server, 'POST', endpoint, {
+        project: 'demo', worktree: 'feature', prompt: 'Edit in the linked worktree', autoCommit: false,
+      });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      const pending = isolated.store.readTask(response.body.id, 'pending');
+      assert.equal(endpoint === '/api/loop' ? pending.projectPath : pending.cwd, feature);
+      for (const name of ['missing', '../checkout', checkout]) {
+        const denied = await requestJson(server, 'POST', endpoint, { project: 'demo', worktree: name, prompt: 'deny' });
+        assert.equal(denied.status, 400);
+        assert.match(denied.body.error, /Unknown authorized worktree/);
+      }
+      fs.mkdirSync(path.join(managed, 'plain'), { recursive: true });
+      const unsafe = await requestJson(server, 'POST', endpoint, { project: 'demo', worktree: 'plain', prompt: 'deny' });
+      assert.equal(unsafe.status, 400);
+      assert.match(unsafe.body.error, /isolated Git worktree/);
+    }
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('authorized HTTP jobs persist under a configured project and expose compact state/result', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));

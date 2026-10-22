@@ -63,8 +63,9 @@ test('worker authorization is checked before spawn and cannot come from task con
   assert.equal(calls, 1);
 });
 
-test('MCP selects the owner worktree and cannot replace it with a request path or registry', t => {
+test('MCP discovers a managed worktree and cannot replace it with a request path or registry', t => {
   const f = fixture(t);
+  fs.writeFileSync(f.registryPath, JSON.stringify({ allowedProjects: { ralph: { root: f.checkout, worktreeRoot: f.root } } }));
   const toolsPath = path.resolve(__dirname, '../src/tools.js');
   const script = `const tools=require(${JSON.stringify(toolsPath)}); let calls=[]; const service={run:async(p,t)=>{calls.push(p);return {task:t,status:'passed',attempts:[]}}}; (async()=>{ const base={project:'ralph',worktree:'feature',id:'scope',goal:'edit',acceptance:['edit'],verification:'true',worker:'codex'}; const ok=await tools.callTool({name:'ralph_run_task',arguments:base},{ralphTaskService:service}); const denied=await tools.callTool({name:'ralph_run_task',arguments:{...base,projectPath:${JSON.stringify(f.unrelated)},allowedProjects:{self:${JSON.stringify(f.unrelated)}}}},{ralphTaskService:service}); const unknown=await tools.callTool({name:'ralph_run_task',arguments:{...base,worktree:'self-authorized'}},{ralphTaskService:service}); console.log(JSON.stringify({calls,ok:ok.structuredContent.status,denied:denied.isError,unknown:unknown.isError})); })();`;
   const output = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env, AGENTLOOP_CONFIG_PATH: f.registryPath } });
@@ -94,7 +95,7 @@ test('an owner-managed worktree root authorizes only verified worktrees of its o
   // Existing project permissions are unchanged.
   assert.deepEqual(resolveProject(config, 'legacy', undefined, f.registryPath), { cwd: f.unrelated, isolatedWorktree: false });
   assert.deepEqual(resolveWorkerScope(config, f.checkout, f.registryPath), { cwd: f.checkout, isolatedWorktree: false });
-  assert.throws(() => resolveProject(config, 'ralph', 'issue-7', f.registryPath), /Unknown authorized worktree/);
+  assert.deepEqual(resolveProject(config, 'ralph', 'issue-7', f.registryPath), { cwd: issue, isolatedWorktree: true });
 
   const plain = path.join(managedRoot, 'plain');
   fs.mkdirSync(plain);
@@ -123,6 +124,73 @@ test('an owner-managed worktree root authorizes only verified worktrees of its o
   assert.deepEqual(configuredProjects({ bare: { root: f.checkout } }, f.registryPath), {});
 });
 
+test('managed selection rejects unsafe names and directories while preserving explicit aliases', t => {
+  const f = fixture(t);
+  const other = fixture(t);
+  const registry = { ralph: { root: f.checkout, worktreeRoot: f.root, worktrees: { review: f.feature } },
+    inactive: { root: f.checkout, worktreeRoot: f.root, activation: 'inactive' } };
+  const config = { allowedProjects: configuredProjects(registry, f.registryPath) };
+  fs.mkdirSync(path.join(f.root, 'review')); // The explicit alias takes precedence.
+  assert.deepEqual(resolveProject(config, 'ralph', 'review', f.registryPath), { cwd: f.feature, isolatedWorktree: true });
+  assert.throws(() => resolveProject(config, 'inactive', 'feature', f.registryPath), /Unknown project/);
+  for (const name of ['', '.', '..', '../feature', 'a/b', 'a\\b', f.feature, 'C:feature', 'bad\0name', 'missing']) {
+    assert.throws(() => resolveProject(config, 'ralph', name, f.registryPath), /Unknown authorized worktree/);
+  }
+  for (const name of ['checkout', 'unrelated']) {
+    assert.throws(() => resolveProject(config, 'ralph', name, f.registryPath), /isolated Git worktree/);
+  }
+  const foreign = path.join(f.root, 'foreign');
+  execFileSync('git', ['-C', other.checkout, 'worktree', 'add', '-b', 'anything', foreign], { stdio: 'pipe' });
+  assert.throws(() => resolveProject(config, 'ralph', 'foreign', f.registryPath), /does not belong/);
+  fs.symlinkSync(other.feature, path.join(f.root, 'escape'), 'dir');
+  fs.symlinkSync(f.feature, path.join(f.root, 'redirect'), 'dir');
+  for (const name of ['escape', 'redirect']) {
+    assert.throws(() => resolveProject(config, 'ralph', name, f.registryPath), /symlink/);
+  }
+  // Sharing a common repository and a listed pathname is insufficient if the
+  // candidate's .git file now points at another worktree's administrative data.
+  const second = path.join(f.root, 'second');
+  execFileSync('git', ['-C', f.checkout, 'worktree', 'add', '-b', 'arbitrary/branch', second], { stdio: 'pipe' });
+  const administrativeRoot = path.join(f.checkout, '.git', 'worktrees');
+  fs.cpSync(path.join(administrativeRoot, 'feature'), path.join(administrativeRoot, 'duplicate'), { recursive: true });
+  assert.throws(() => resolveProject(config, 'ralph', 'feature', f.registryPath), /registered and isolated/);
+  fs.rmSync(path.join(administrativeRoot, 'duplicate'), { recursive: true });
+  fs.copyFileSync(path.join(second, '.git'), path.join(f.feature, '.git'));
+  assert.throws(() => resolveProject(config, 'ralph', 'feature', f.registryPath), /redirected or stale/);
+});
+
+test('worker revalidates managed worktrees after admission before spawning', async t => {
+  const f = fixture(t);
+  const config = { allowedProjects: configuredProjects({ ralph: { root: f.checkout, worktreeRoot: f.root } }, f.registryPath),
+    enginePaths: { codex: '/unused' } };
+  const scope = resolveProject(config, 'ralph', 'feature', f.registryPath);
+  let calls = 0;
+  const worker = createCliWorker({ config, registryPath: f.registryPath,
+    spawnImpl: () => { calls += 1; throw new Error('must not spawn'); } });
+  const task = { id: 'delayed', goal: 'edit', acceptance: ['edit'], verification: 'true', worker: 'codex' };
+  // Deregistration with the directory still present invalidates the job.
+  const gitDir = execFileSync('git', ['-C', f.feature, 'rev-parse', '--absolute-git-dir'], { encoding: 'utf8' }).trim();
+  fs.rmSync(gitDir, { recursive: true });
+  await assert.rejects(worker(scope.cwd, task));
+  fs.rmSync(f.feature, { recursive: true });
+  await assert.rejects(worker(scope.cwd, task), /ENOENT/);
+  fs.symlinkSync(f.unrelated, f.feature, 'dir');
+  await assert.rejects(worker(scope.cwd, task), /symlink/);
+  assert.equal(calls, 0);
+});
+
+test('redirecting the registered checkout cannot authorize a different repository', t => {
+  const f = fixture(t);
+  const other = fixture(t);
+  const config = { allowedProjects: configuredProjects({ ralph: { root: f.checkout, worktreeRoot: f.root } }, f.registryPath) };
+  const foreign = path.join(f.root, 'foreign');
+  execFileSync('git', ['-C', other.checkout, 'worktree', 'add', '-b', 'foreign', foreign], { stdio: ['ignore', 'pipe', 'pipe'] });
+  fs.renameSync(f.checkout, path.join(f.root, 'old-checkout'));
+  fs.symlinkSync(other.checkout, f.checkout, 'dir');
+  assert.throws(() => resolveProject(config, 'ralph', 'foreign', f.registryPath), /symlink/);
+  assert.throws(() => resolveWorkerScope(config, foreign, f.registryPath), /symlink/);
+});
+
 test('an unrelated stale Git worktree record does not block the authorized worktree', t => {
   const f = fixture(t);
   const stale = path.join(f.root, 'stale');
@@ -131,18 +199,23 @@ test('an unrelated stale Git worktree record does not block the authorized workt
   assert.deepEqual(resolveProject(f.config, 'ralph', 'feature', f.registryPath), { cwd: f.feature, isolatedWorktree: true });
 });
 
-test('authorized worktree workers run ordinary local subprocesses without a sandbox gate', async t => {
+test('discovered managed worktree workers edit only the selected checkout with ordinary local subprocesses', async t => {
   const f = fixture(t);
+  const registry = { ralph: { root: f.checkout, worktreeRoot: f.root } };
+  fs.writeFileSync(f.registryPath, JSON.stringify({ allowedProjects: registry }));
+  const config = { allowedProjects: configuredProjects(registry, f.registryPath) };
+  const scope = resolveProject(config, 'ralph', 'feature', f.registryPath);
   for (const id of ['codex', 'claude']) {
-    const worker = createCliWorker({ config: { ...f.config, enginePaths: { [id]: '/unused' } }, registryPath: f.registryPath,
+    const worker = createCliWorker({ config: { ...config, enginePaths: { [id]: '/unused' } }, registryPath: f.registryPath,
       spawnImpl(file, args, options) {
         assert.equal(options.cwd, f.feature);
         assert.ok(!args.some(arg => arg.includes('ralph_worktree')));
         return spawn(process.execPath, ['-e', "process.stdin.resume();process.stdin.on('end',()=>{require('fs').writeFileSync('answer.txt','edited');console.log('local worker output')})"], options);
       } });
-    const result = await worker(f.feature, { id: 'local', goal: 'edit', acceptance: ['edited'], verification: 'true', worker: id });
+    const result = await worker(scope.cwd, { id: 'local', goal: 'edit', acceptance: ['edited'], verification: 'true', worker: id });
     assert.equal(result.exitCode, 0, result.stderr);
     assert.match(result.stdout, /local worker output/);
     assert.equal(fs.readFileSync(path.join(f.feature, 'answer.txt'), 'utf8'), 'edited');
+    assert.equal(fs.readFileSync(path.join(f.checkout, 'answer.txt'), 'utf8'), 'original');
   }
 });
