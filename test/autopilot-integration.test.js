@@ -130,10 +130,12 @@ test('one-shot runner invalidates PASS when target advances, then requires new C
     readRepositoryInstructions: async () => [], prepareRepositoryEnvironment: async () => ({}),
     observePullRequest: f.options.observePullRequest,
     observePullRequestCi: async (_project, pr) => {
+      const available = f.store.acquireTarget(f.project.repo, 'main'); available.release();
       ciHeads.push(pr.commit);
       return { state: 'green', headCommit: pr.commit, prNumber: pr.number };
     },
     independentReview: async input => {
+      const available = f.store.acquireTarget(f.project.repo, 'main'); available.release();
       reviews.push(input.headCommit);
       if (reviews.length === 1) {
         fs.writeFileSync(path.join(f.project.checkout, 'third.js'), 'console.log("third")');
@@ -220,18 +222,49 @@ test('unexpected PR head refuses before any merge or agent invocation', async t 
   assert.equal(git(f.workspace.worktreePath, 'rev-parse', 'HEAD'), f.oldHead);
 });
 
-test('agent edits to another worktree or protected configuration refuse publication', async t => {
-  for (const protectedEdit of [false, true]) {
-    const f = await fixture(t, true);
-    if (!protectedEdit) fs.writeFileSync(path.join(f.project.checkout, 'unrelated'), 'original owner content');
-    await assert.rejects(synchronizeIssueBranch(f, { ...f.options, resolveConflict: async () => {
-      if (protectedEdit) {
-        fs.writeFileSync(path.join(f.workspace.worktreePath, 'AGENTS.md'), 'unsafe policy change');
-      } else fs.writeFileSync(path.join(f.project.checkout, 'unrelated'), 'unrelated worktree edit');
-      return { status: 'passed' };
-    } }), protectedEdit ? /protected/ : /another worktree/);
-    assert.equal(git(f.origin, 'rev-parse', `refs/heads/${f.job.branch}`), f.oldHead);
-  }
+test('resolver-attributed edits outside its worktree refuse publication', async t => {
+  const f = await fixture(t, true);
+  await assert.rejects(synchronizeIssueBranch(f, { ...f.options, resolveConflict: async () => ({
+    status: 'passed', taskResult: { attempts: [{ worker: { stdout: JSON.stringify({
+      type: 'item.completed', item: { type: 'file_change', changes: [
+        { path: path.join(f.project.checkout, 'unrelated'), kind: 'update' },
+      ] },
+    }) } }] },
+  }) }), /outside.*worktree/);
+});
+
+test('protected resolver configuration edits refuse publication', async t => {
+  const f = await fixture(t, true);
+  await assert.rejects(synchronizeIssueBranch(f, { ...f.options, resolveConflict: async () => {
+    fs.writeFileSync(path.join(f.workspace.worktreePath, 'AGENTS.md'), 'unsafe policy change');
+    return { status: 'passed' };
+  } }), /protected/);
+});
+
+test('another authorized worktree can change while conflict resolution is running', async t => {
+  const f = await fixture(t, true);
+  const other = await prepareIssueWorkspace(f.project, { number: 106, title: 'Concurrent work' });
+  let resume;
+  const waiting = new Promise(resolve => { resume = resolve; });
+  const integration = synchronizeIssueBranch(f, { ...f.options, resolveConflict: async ({ cwd }) => {
+    resume();
+    await edited;
+    fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: {
+      test: 'node base.js && node first.js && node second.js',
+    } }));
+    git(cwd, 'add', 'package.json');
+    return { status: 'passed' };
+  } });
+  let finishEdit;
+  const edited = new Promise(resolve => { finishEdit = resolve; });
+  await waiting;
+  fs.writeFileSync(path.join(other.worktreePath, 'concurrent.js'), 'authorized concurrent edit');
+  git(other.worktreePath, 'add', '.'); git(other.worktreePath, 'commit', '-m', 'Concurrent worker');
+  fs.writeFileSync(path.join(other.worktreePath, 'untracked'), 'still working');
+  finishEdit();
+  await integration;
+  assert.equal(f.store.load(105).integrationHistory[0].outcome, 'integrated');
+  assert.equal(fs.readFileSync(path.join(other.worktreePath, 'untracked'), 'utf8'), 'still working');
 });
 
 test('total synchronization budget refuses another target advance without discarding passing work', async t => {
@@ -372,4 +405,83 @@ test('a failed resolver process cannot become successful through a task-service 
   assert.equal(saved.workspaceState, 'integration_retained');
   assert.equal(saved.integrationHistory[0].outcome, 'escalated');
   assert.equal(git(f.origin, 'rev-parse', `refs/heads/${f.job.branch}`), f.oldHead);
+});
+
+for (const timeoutMs of [undefined, 15 * 60 * 1000]) {
+  test(`one-shot integration inherits verification timeout ${timeoutMs}`, async t => {
+    const f = await fixture(t);
+    const { run } = require('../src/autopilot');
+    let verified = false;
+    await run(['--project', 'demo'], {
+      jobStore: f.store, loadProjectConfig: () => ({ ...f.project, enabled: true }),
+      discoverReadyIssues: async () => [f.issue], write: () => {},
+      readRepositoryInstructions: async () => [], prepareRepositoryEnvironment: async () => ({}),
+      observePullRequest: f.options.observePullRequest,
+      ralphOptions: { verificationTimeoutMs: timeoutMs },
+      runVerification: async (cwd, command, timeout) => {
+        verified = true;
+        assert.equal(cwd, f.workspace.worktreePath);
+        assert.equal(command, 'npm test');
+        assert.equal(timeout, timeoutMs);
+        return { passed: true, exitCode: 0, timedOut: false, stdout: '', stderr: '' };
+      },
+    });
+    assert.equal(verified, true);
+  });
+}
+
+test('target contention defers durably without consuming any job attempts', async t => {
+  const f = await fixture(t);
+  const { run } = require('../src/autopilot');
+  const before = f.store.load(105);
+  const lock = f.store.acquireTarget(f.project.repo, 'main');
+  try {
+    const result = await run(['--project', 'demo'], {
+      jobStore: createJobStore(f.store.directory),
+      loadProjectConfig: () => ({ ...f.project, enabled: true }),
+      discoverReadyIssues: async () => [f.issue], write: () => {},
+      synchronizeIssueBranch: async () => { throw new Error('must defer before integration'); },
+    });
+    assert.equal(result.outcome.status, 'deferred');
+    assert.deepEqual(f.store.load(105), before);
+  } finally { lock.release(); }
+});
+
+test('contention after Claude PASS preserves approval and resumes without another review', async t => {
+  const f = await fixture(t);
+  await synchronizeIssueBranch(f, f.options);
+  const { run } = require('../src/autopilot');
+  let competingLock, reviews = 0, merges = 0;
+  const dependencies = {
+    jobStore: f.store,
+    loadProjectConfig: () => ({ ...f.project, enabled: true, reviewPolicy: 'always', autoMerge: true }),
+    discoverReadyIssues: async () => [f.issue], write: () => {},
+    observePullRequest: f.options.observePullRequest,
+    observePullRequestCi: async (_project, pr) => ({ state: 'green', headCommit: pr.commit, prNumber: pr.number }),
+    independentReview: async ({ headCommit }) => {
+      reviews++;
+      competingLock = createJobStore(f.store.directory).acquireTarget(f.project.repo, 'main');
+      return { reviewer: 'claude:sonnet', verdict: 'PASS', findings: [], commit: headCommit };
+    },
+    mergePullRequest: async () => {
+      merges++;
+      assert.throws(() => f.store.acquireTarget(f.project.repo, 'main'), { code: 'AUTOPILOT_TARGET_BUSY' });
+      return { mergeCommit: 'merged-fixture-sha' };
+    },
+    reconcileIssueClosure: async () => ({}),
+  };
+  try {
+    const result = await run(['--project', 'demo'], dependencies);
+    assert.equal(result.outcome.status, 'deferred');
+    const deferred = f.store.load(105);
+    assert.equal(deferred.status, 'awaiting_ci');
+    assert.equal(deferred.review.verdict, 'PASS');
+    assert.equal(deferred.reviewAttempts, 1);
+    assert.deepEqual(deferred.failures, []);
+    assert.equal(merges, 0);
+  } finally { competingLock?.release(); }
+  await run(['--project', 'demo'], { ...dependencies, jobStore: createJobStore(f.store.directory) });
+  assert.equal(f.store.load(105).status, 'merged');
+  assert.equal(reviews, 1);
+  assert.equal(merges, 1);
 });

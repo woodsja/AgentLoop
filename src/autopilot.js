@@ -245,6 +245,7 @@ async function run(argv, dependencies = {}) {
       observePullRequest: dependencies.observePullRequest,
       prepareIssueWorkspace: dependencies.prepareIssueWorkspace,
       runVerification: dependencies.runVerification,
+      verificationTimeoutMs: dependencies.ralphOptions?.verificationTimeoutMs,
       prepareEnvironment: async cwd => {
         if (job.environmentProcess) {
           const claim = job.environmentProcess;
@@ -309,6 +310,7 @@ async function run(argv, dependencies = {}) {
     // the first observation is retried (boundedly) rather than treated as a
     // review or worker failure.
     phase = 'merge';
+    targetLock ||= (dependencies.acquireTargetLock || (() => store.acquireTarget(project.repo, project.baseBranch)))();
     if (!job.pr || !job.delivery || !job.delivery.commit || !matchingPass(job.review, job.delivery.commit)
       || !Array.isArray(job.review.findings) || job.review.findings.length !== 0
       || !job.review.reviewer.startsWith('claude:')) {
@@ -470,8 +472,8 @@ async function run(argv, dependencies = {}) {
       if (!job.pr || !job.delivery || !job.delivery.commit) {
         throw new Error(`Autopilot job for issue #${candidate.number} awaits CI without a persisted pull request and head commit`);
       }
-      // Lock only final integration, observation/review and merge; independent
-      // implementation worktrees keep running concurrently.
+      // Serialize integration and final merge; external CI/review calls run
+      // without the target lock so other issues can make progress.
       phase = 'ci';
       targetLock = (dependencies.acquireTargetLock || (() => store.acquireTarget(project.repo, project.baseBranch)))();
       const integration = await synchronize();
@@ -479,6 +481,7 @@ async function run(argv, dependencies = {}) {
         store.save(job);
         return { issue: candidate, workspace: null, result: null, outcome: { status: 'awaiting_ci' }, job };
       }
+      targetLock.release(); targetLock = null;
       phase = 'ci';
       const observeCi = dependencies.observePullRequestCi || observePullRequestCi;
       const observation = await observeCi(project, {
@@ -830,6 +833,12 @@ async function run(argv, dependencies = {}) {
     write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${outcome.status}${stopped}.`);
     return { issue: candidate, workspace, result, outcome, job };
   } catch (error) {
+    if (error.code === 'AUTOPILOT_TARGET_BUSY') {
+      // The issue lock still protects this job. Retain all checkpoints (including
+      // a completed review) for the next pass without recording a failure.
+      write(`Autopilot: project ${projectName}; issue #${candidate.number}; target busy, deferred.`);
+      return { issue: candidate, workspace: null, result: null, outcome: { status: 'deferred' }, job };
+    }
     if (job) {
       try {
         if (['PYTHON_PREFLIGHT_BLOCKED', 'PROJECT_PREFLIGHT_BLOCKED'].includes(error.code)) {

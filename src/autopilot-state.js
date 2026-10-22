@@ -689,10 +689,10 @@ function createJobStore(stateDir, options = {}) {
 
   function acquireTarget(repo, baseBranch) {
     const key = require('node:crypto').createHash('sha256').update(`${repo}\0${baseBranch}`).digest('hex');
-    return acquireFile(path.join(directory, `target-${key}.lock`), `${repo}:${baseBranch}`);
+    return acquireFile(path.join(directory, `target-${key}.lock`), `${repo}:${baseBranch}`, 'AUTOPILOT_TARGET_BUSY');
   }
 
-  function acquireFile(filePath, label) {
+  function acquireFile(filePath, label, busyCode) {
     fs.mkdirSync(directory, { recursive: true });
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -721,7 +721,8 @@ function createJobStore(stateDir, options = {}) {
         owner = null;
       }
       if (!lockIsStale(owner)) {
-        throw new Error(`Autopilot job for ${label} is already owned by running process ${owner.pid}`);
+        throw Object.assign(new Error(`Autopilot job for ${label} is already owned by running process ${owner.pid}`),
+          busyCode ? { code: busyCode } : {});
       }
       fs.rmSync(filePath, { force: true });
     }

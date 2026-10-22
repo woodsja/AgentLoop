@@ -127,24 +127,6 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
         attempt.finalHead = head; checkpoint('verify');
       }
     }
-    const snapshotOtherWorktrees = async () => {
-      const result = [];
-      for (const entry of entries) {
-        const location = entry.split('\n').find(line => line.startsWith('worktree '))?.slice(9);
-        if (location && location !== cwd) {
-          const untracked = (await git(location, ['ls-files', '--others', '--exclude-standard', '-z'])).stdout.split('\0').filter(Boolean);
-          const contents = untracked.map(file => {
-            const fullPath = path.join(location, file);
-            const stat = fs.lstatSync(fullPath);
-            const bytes = stat.isSymbolicLink() ? fs.readlinkSync(fullPath) : fs.readFileSync(fullPath);
-            return [file, stat.mode, require('node:crypto').createHash('sha256').update(bytes).digest('hex')];
-          });
-          result.push([location, await out(location, ['rev-parse', 'HEAD']), await out(location, ['status', '--porcelain']),
-            await out(location, ['diff', '--binary']), await out(location, ['diff', '--cached', '--binary']), contents]);
-        }
-      }
-      return JSON.stringify(result);
-    };
     const policySnapshot = async () => {
       const files = (await out(cwd, ['ls-files', '--cached', '--others', '--exclude-standard'])).split('\n').filter(protectedPath);
       return JSON.stringify([...new Set(files)].sort().map(file => {
@@ -156,19 +138,44 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
       if (!options.resolveConflict) throw refused('conflict/repair resolution agent unavailable');
       const priorWorker = attempt.workers.find(w => w.kind === kind);
       if (priorWorker) {
-        if (priorWorker.status !== 'passed' || priorWorker.before !== await snapshotOtherWorktrees()
-          || priorWorker.policy !== await policySnapshot()) throw refused(`${kind} resolution interrupted or budget exhausted`);
+        if (priorWorker.status !== 'passed' || priorWorker.policy !== await policySnapshot()) throw refused(`${kind} resolution interrupted or budget exhausted`);
         return;
       }
-      const before = await snapshotOtherWorktrees();
-      const claim = { kind, before, policy: await policySnapshot(), startedAt: now(), status: 'running' };
+      const claim = { kind, policy: await policySnapshot(), startedAt: now(), status: 'running' };
       attempt.workers.push(claim); save();
       const result = await options.resolveConflict({ ...context, kind, cwd, oldHead: attempt.oldHead,
         targetSha: attempt.targetSha, stages: attempt.stages, files: attempt.conflictFiles, attempt: attempt.number });
-      claim.result = result; claim.finishedAt = now(); claim.status = result?.status || 'invalid'; save();
-      if (before !== await snapshotOtherWorktrees()) throw refused('resolution edited another worktree');
+      claim.result = result; claim.finishedAt = now(); claim.status = result?.status === 'passed' ? 'validating' : result?.status || 'invalid'; save();
+      // Inspect only writes attributed to this resolver's captured tool events.
+      // Other authorized workers may change their worktrees during this call.
+      for (const run of result?.taskResult?.attempts || []) {
+        for (const line of (run.worker?.stdout || '').split('\n')) {
+          let event;
+          try { event = JSON.parse(line); } catch { continue; }
+          const writes = event.item?.type === 'file_change'
+            ? (event.item.changes || []).map(change => change.path) : [];
+          for (const block of event.message?.content || []) {
+            if (block.type === 'tool_use' && ['Write', 'Edit', 'MultiEdit'].includes(block.name)) {
+              writes.push(block.input?.file_path);
+            }
+          }
+          for (const file of writes) {
+            if (typeof file !== 'string') throw refused('resolution reported an ambiguous write path');
+            const location = path.resolve(cwd, file);
+            // Resolve existing symlinks (including a symlinked parent of a new file).
+            let parent = location;
+            while (!fs.existsSync(parent) && path.dirname(parent) !== parent) parent = path.dirname(parent);
+            const resolved = path.resolve(fs.realpathSync(parent), path.relative(parent, location));
+            const relative = path.relative(fs.realpathSync(cwd), resolved);
+            if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+              throw refused('resolution wrote outside its authorized worktree');
+            }
+          }
+        }
+      }
       if (claim.policy !== await policySnapshot()) throw refused('resolution edited protected policy/configuration files');
       if (result?.status !== 'passed') throw refused(`${kind} resolution did not pass`);
+      claim.status = 'passed'; save();
     };
     const checkFiles = async () => {
       if (await out(cwd, ['ls-files', '--unmerged'])) throw refused('unresolved index entries');
@@ -226,7 +233,7 @@ async function synchronizeIssueBranch({ project, issue, job, store }, options = 
       if (!attempt.verifier) {
         attempt.verifierStartedAt = now(); save();
         attempt.verifier = await (options.runVerification || runVerification)(cwd, verificationCommand,
-          options.verificationTimeoutMs ?? 120000, (event, details) => {
+          options.verificationTimeoutMs, (event, details) => {
             attempt.logs.push({ at: now(), commit: attempt.finalHead, event, ...details }); save();
           });
         attempt.verifierCommit = attempt.finalHead; save();

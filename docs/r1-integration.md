@@ -10,13 +10,21 @@ rebased or force-pushed. An unexpected PR head is an operator handoff.
 A conflict gets one existing authorized Ralph task, with the original issue,
 repository instructions, exact old and target commits, paths and index stages.
 The worker must resolve and stage without committing. Policy/configuration and
-lockfile conflicts are handed off; protected edits and changes to other
-registered worktrees are rejected. Ambiguous requirements and divergent
-architecture must be refused by the resolver. Additive package test commands
+lockfile conflicts are handed off. The existing authorized CLI worker starts in
+this issue's worktree and is instructed to resolve only there. Protected edits
+and outside-worktree writes attributed to the resolver's captured file-change
+or Write/Edit tool events are rejected (including symlink escapes). We do not
+compare snapshots of other worktrees: their authorized workers can legitimately
+edit and commit during resolution. These event checks cover reported writes;
+they are not a VM-wide filesystem audit or an additional OS sandbox.
+Ambiguous requirements and divergent architecture must be refused by the resolver. Additive package test commands
 from both parents must survive. Unmerged entries and conflict markers block
 commit. Tests failing on an integrated commit get one repair task, followed by
 a new commit and another deterministic verification. Both verifier results
-remain available. The exact final commit must pass before an ordinary push to
+remain available. Integration inherits `ralphOptions.verificationTimeoutMs`, the
+same timeout supplied to implementation/correction verification; if unset, the
+existing verifier runs without a timer. There is no separate 120-second limit.
+The exact final commit must pass before an ordinary push to
 the same branch. New CI and independent review must refer to this SHA.
 
 ## Bounds and recovery
@@ -61,10 +69,14 @@ autonomous failure cleanup may report the failure but cannot delete these assets
 ## Merge serialization and race window
 
 The existing durable job lock implementation also provides a lock keyed by
-repository and target branch in the project's state directory. Final integration,
-CI observation, review, target recheck and guarded merge share this lock for each
-one-shot invocation; pending CI releases it. Other issue implementation workers
-remain concurrent. Processes using the same project state directory serialize;
+repository and target branch in the project's state directory. Integration holds
+this lock, then releases it before CI observation and the external Claude call.
+The final merge path reacquires the lock before re-observing PR identity/head
+and target SHA and retains it through guarded merge. Target-lock contention
+returns a deferred outcome, leaving the job resumable without recording a
+failure or spending implementation, correction, or review attempts. If contention
+occurs after review, the persisted exact-SHA PASS survives for the next pass.
+Other issue implementation workers remain concurrent. Processes using the same project state directory serialize;
 separate installations or owner aliases using different state directories do
 not share this lock and must not be treated as globally serialized.
 
