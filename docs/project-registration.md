@@ -165,3 +165,5 @@ A project with `dependencyFormat: "household-blocked-by"` is owned by the
 separate autopilot issue poller: the R1 daemon's general one-minute admission
 scanner does not consume its `ready-for-agent` labels. The two admission paths must not
 compete for the same project's work. Other R1 projects remain unchanged.
+
+Registered repositories can also use the staged [owner milestone grant commands](milestone-grants.md). Creating or activating a grant preserves project admission settings.

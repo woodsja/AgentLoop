@@ -7,9 +7,9 @@ const { projectCommand } = require('./project-registration');
 
 function parseArguments(argv) {
   const [group, action, ...rest] = argv;
-  if (group !== 'project') throw new Error('Usage: ralph project add|check|activate owner/repository [--yes] [--config path] [--projects path] [--checkout-root path] [--worktree-root path] [--base-branch name] [--ci-workflow name] [--worker codex|claude] [--ready-label label]; project recover');
+  if (!['project', 'grant'].includes(group)) throw new Error('Usage: ralph project add|check|activate owner/repository [--yes] [--config path] [--projects path] [--checkout-root path] [--worktree-root path] [--base-branch name] [--ci-workflow name] [--worker codex|claude] [--ready-label label]; project recover; ralph grant draft|inspect|activate ID [--input JSON --spec file] [--digest SHA256 --yes] [--config path] [--projects path]');
   const options = {}, positional = [];
-  const flags = { '--config': 'configPath', '--projects': 'projectsPath', '--checkout-root': 'checkoutRoot', '--worktree-root': 'worktreeRoot', '--base-branch': 'baseBranch', '--ci-workflow': 'ciWorkflow', '--worker': 'worker', '--ready-label': 'readyLabel' };
+  const flags = { '--input': 'inputPath', '--spec': 'specPath', '--digest': 'digest', '--config': 'configPath', '--projects': 'projectsPath', '--checkout-root': 'checkoutRoot', '--worktree-root': 'worktreeRoot', '--base-branch': 'baseBranch', '--ci-workflow': 'ciWorkflow', '--worker': 'worker', '--ready-label': 'readyLabel' };
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === '--yes') options.yes = true;
     else if (flags[rest[i]]) {
@@ -18,13 +18,19 @@ function parseArguments(argv) {
     } else if (rest[i].startsWith('--')) throw new Error(`Unknown option ${rest[i]}`);
     else positional.push(rest[i]);
   }
-  if (positional.length !== (action === 'recover' ? 0 : 1)) throw new Error('Supply one owner/repository identifier (none for recover).');
+  if (positional.length !== (group === 'project' && action === 'recover' ? 0 : 1)) throw new Error(group === 'grant' ? 'Supply one grant ID.' : 'Supply one owner/repository identifier (none for recover).');
+  if (group === 'grant') {
+    if (!['draft', 'inspect', 'activate'].includes(action)) throw new Error('Usage: ralph grant draft|inspect|activate ID');
+    if (action === 'draft' && (!options.inputPath || !options.specPath)) throw new Error('Draft requires --input JSON and --spec file.');
+    const allowed = ['configPath', 'projectsPath', ...(action === 'draft' ? ['inputPath', 'specPath'] : action === 'activate' ? ['digest', 'yes'] : [])];
+    if (Object.keys(options).some(key => !allowed.includes(key))) throw new Error('Option is not valid for this grant command.');
+  } else if (options.inputPath || options.specPath || options.digest) throw new Error('Grant options require the grant command.');
   if (options.worker && !['codex', 'claude'].includes(options.worker)) throw new Error('Worker must be codex or claude.');
   options.configPath = path.resolve(options.configPath || process.env.AGENTLOOP_CONFIG_PATH || path.join(__dirname, '../config.json'));
   options.projectsPath = path.resolve(options.projectsPath || process.env.AGENTLOOP_PROJECTS_PATH || path.join(__dirname, '../autopilot-projects.json'));
   options.checkoutRoot ||= path.join(os.homedir(), 'repositories');
   options.worktreeRoot ||= path.join(os.homedir(), 'worktrees');
-  return { action, repo: positional[0], options };
+  return { group, action, repo: positional[0], options };
 }
 
 async function main(argv = process.argv.slice(2)) {
@@ -56,7 +62,8 @@ async function main(argv = process.argv.slice(2)) {
   try {
     const parsed = parseArguments(argv);
     Object.assign(options, parsed.options);
-    const result = await projectCommand(parsed.action, parsed.repo, options);
+    const command = parsed.group === 'grant' ? require('./milestone-grants').grantCommand : projectCommand;
+    const result = await command(parsed.action, parsed.repo, options);
     options.record('onboarding_result', { result });
     return result;
   } catch (error) {
