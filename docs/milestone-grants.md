@@ -374,3 +374,71 @@ It also checks stale prerequisite proof, receipt replacement, scope/identity
 changes, retained evidence, no duplicate execution and R1 scanner exclusion.
 No real Household work, readiness label, grant activation, production setting or
 deployment is authorized by these tests or this implementation.
+
+## Pause, resume, amend and retire existing grants
+
+Use the existing owner CLI with the same state/configuration paths as both runners.
+Each lifecycle command first prints a complete preview and action digest:
+
+```sh
+ralph grant pause milestone-1
+ralph grant pause milestone-1 --digest <action-preview-digest>
+ralph grant resume milestone-1
+ralph grant resume milestone-1 --digest <action-preview-digest>
+ralph grant amend milestone-1 --input revision-2.json --spec approved-spec.md
+ralph grant amend milestone-1 --input revision-2.json --spec approved-spec.md --digest <action-preview-digest>
+```
+
+`revoke`, `expire` and `complete` use the same preview/confirm workflow. Confirmation
+prompts the owner; `--yes` supplies explicit noninteractive confirmation. A grant's
+term digest used for activation differs from an action digest, which also binds
+the action, lifecycle version, current state and proposed amendment. Successful
+retries with the same action digest have no effect. Each new pause/resume cycle
+has a new digest. Shared owner locks serialize transitions, ticket release and
+amendments; out-of-lock edits fail closed. Requests, failures and confirmed actions
+remain in the durable event history. Revoked, expired and completed grants cannot
+resume. Explicit expiry can retire a grant before its scheduled expiration.
+
+An amendment requires the next integer revision, the complete bounded proposal,
+and the exact approved specification bytes. It cannot change the project,
+repository or registration identity, or reduce total quota below issued tickets.
+The preceding approved revision is retained in `history`. Existing receipts stay
+unchanged and cannot authorize the new revision. For an affected ticket, submit a
+new exact-ticket request, explicitly approve its semantic scope, then release it.
+The old receipt moves to `receiptHistory` when its replacement is durably issued;
+the same issue still consumes one issued quota unit. Retained jobs can bind to
+that explicitly reapproved replacement, with their earlier binding kept in job
+history. Pause/resume alone never upgrades an invalid receipt. Batch journals
+continue to bind their original revision and require separate owner reconciliation.
+
+`inspect` prints issued count, remaining total quota, each receipted issue's local
+work state and authorization block reasons alongside the full grant and audit
+records. A pause or retirement denies new receipt releases, attempts and guarded
+merges. Authorization holds retain queue/checkpoint state, worktrees, branches,
+CI, independent reviews and raw execution records. Resume rechecks current issue
+content, receipt revision, prerequisites and every existing exact-head gate.
+Completed merges remain completed.
+
+While an implementation or integration service runs, both runners poll canonical
+local grant/receipt state for cooperative cancellation. The native CLI service
+requests SIGTERM and waits for actual process closure; mixed R1 children use the
+owning daemon cancellation lifecycle. Services without cancellation support record
+that limitation and finish under the existing timeout. Cancellation requests,
+errors and actual returned results are appended to the execution journal. A
+request never proves the process stopped, erases evidence or authorizes delivery.
+The native task service checks full admission again before each new attempt.
+The daemon also rereads canonical grant/receipt status before every mixed child
+worker or critic process, including later cycles.
+
+Expiration uses system time with a fsynced append-only high-water record in
+`milestone-clock.ndjson`. Observing expiry in a runner cannot be undone by a later
+backward clock transition or process restart. A forward clock jump may expire
+authority early; reconcile the clock with the owner instead of deleting evidence
+or automatically renewing a grant. Missing, malformed or unreadable authority
+fails closed. GitHub merges remain subject to the documented distributed
+transaction limitation after the final canonical read.
+
+These commands change only grant evidence. They do not edit owner registries,
+credentials, issue specifications, service configuration or deployment state.
+Implementation verification uses temporary stores and fake GitHub; no live
+activation, service restart or deployment is implied.

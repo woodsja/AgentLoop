@@ -826,6 +826,15 @@ function sessionModel(loop, engine) {
 }
 
 function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
+  if (loop.r1Child) {
+    const parent = store.readTask(loop.r1Child.parentJobId, 'running');
+    try {
+      require('./milestone-work').checkCurrent(parent.milestoneAuthorization, { stateDir: store.paths.state });
+    } catch (error) {
+      store.appendExecution(loop.id, { event: 'authorization_blocked', role, cycle: cycle.n, message: error.message });
+      throw error;
+    }
+  }
   const id = loop[`${role}Engine`] ?? loop.engine ?? store.config.defaultEngine;
   const cwd = loop.projectPath;
   let child;

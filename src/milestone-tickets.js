@@ -81,7 +81,7 @@ async function ticketCommand(action, id, options) {
       if (fs.readFileSync(file, 'utf8') !== expected) return 'Grant store changed during authorization; reconcile before retry.';
       if (read(options.projectsPath)[g.project]?.readyLabel !== label) return 'Configured ready label changed during authorization.';
       if (g.state !== 'active' || !g.activatedAt || !g.events?.some(e => e.type === 'activated' && e.digest === g.digest && e.revision === g.revision)) return 'Grant is not owner-approved and active.';
-      if (!Number.isFinite(Date.parse(g.expiresAt)) || Date.parse(g.expiresAt) <= Date.now()) return 'Grant expired.';
+      if (!Number.isFinite(Date.parse(g.expiresAt)) || Date.parse(g.expiresAt) <= require('./milestone-clock').currentTime(state)) return 'Grant expired.';
       if (!grantIntegrity(g)) return 'Grant terms or approved specification bytes changed.';
       if (request.repo !== g.repo || request.grantDigest !== g.digest || request.revision !== g.revision
         || request.spec.identity !== g.spec.identity || request.spec.digest !== g.spec.digest) return 'Repository, grant revision/digest or approved specification mismatch.';
@@ -96,6 +96,8 @@ async function ticketCommand(action, id, options) {
       return finish(result('NEEDS_APPROVAL', 'Another grant already retains a receipt for this issue; owner reconciliation required.'));
     }
     receipt = Object.hasOwn(g.receipts, key) ? g.receipts[key] : null;
+    const previousReceipt = receipt && receipt.revision !== g.revision ? receipt : null;
+    if (previousReceipt) receipt = null;
     if (receipt && (receipt.digest !== digest || receipt.grantId !== id || receipt.grantDigest !== g.digest || receipt.revision !== g.revision
       || JSON.stringify(receipt.request) !== JSON.stringify(request) || !receipt.issue
       || receipt.issue.number !== request.issue || ticketDigest(receipt.issue) !== request.ticketDigest)) {
@@ -104,12 +106,12 @@ async function ticketCommand(action, id, options) {
 
     const gh = args => withExecution(options.recordExecution || options.record || (() => {}),
       async () => JSON.parse(await runGh(args, options.execFile || execFile, 'Milestone ticket authorization')));
-    const native = options.nativeBlockers === true || Array.isArray(receipt?.issue?.nativeBlockers);
+    const native = options.nativeBlockers === true || Array.isArray((receipt || previousReceipt)?.issue?.nativeBlockers);
     if (options.nativeBlockers === true && receipt && !Array.isArray(receipt.issue.nativeBlockers)) {
       return finish(result('NEEDS_APPROVAL', 'Existing receipt does not bind native blockers; retain it for owner reconciliation.'));
     }
     const checkIssue = async () => {
-      issue = await gh(['api', endpoint]); blockers = validIssue(issue, request, label, receipt);
+      issue = await gh(['api', endpoint]); blockers = validIssue(issue, request, label, receipt || previousReceipt);
       if (native) {
         const actual = await require('./milestone-blockers').nativeBlockers(request.repo, issue.number, gh);
         if (JSON.stringify(actual) !== JSON.stringify([...blockers].sort((a, b) => a - b))) throw new Error('Native blockers conflict with exact Depends on metadata; owner review required.');
@@ -126,7 +128,7 @@ async function ticketCommand(action, id, options) {
       && typeof approval.actor === 'string' && Number.isFinite(Date.parse(approval.at));
     let out;
     if (!g.allowedCategories.includes(request.category) || request.scope === 'excluded') out = result('DENY', 'Category is outside the grant or the proposal includes excluded work.');
-    else if (!receipt && Object.keys(g.receipts).length >= g.ticketLimit) out = result('DENY', 'Grant ticket quota exhausted.');
+    else if (!receipt && !previousReceipt && Object.keys(g.receipts).length >= g.ticketLimit) out = result('DENY', 'Grant ticket quota exhausted.');
     else if (request.scope === 'ambiguous') out = result('NEEDS_APPROVAL', 'Semantic scope is ambiguous. Resolve scope against the objective, specification and every exclusion with the owner; submit a new exact request.');
     else if (!scopeApproved) out = result('NEEDS_APPROVAL', 'Owner must confirm this exact ticket fits the approved objective/specification, category and all exclusions. A planner category or model verdict cannot authorize scope.');
     else out = result('ALLOW', 'Owner confirmed exact semantic scope within this active grant; immutable ticket and quota checks passed.');
@@ -142,6 +144,7 @@ async function ticketCommand(action, id, options) {
       try {
         let active = 0;
         for (const r of Object.values(g.receipts)) {
+          if (r.request.issue === request.issue) continue;
           const current = await gh(['api', `repos/${g.repo}/issues/${r.request.issue}`]);
           if (!current || current.number !== r.request.issue || current.html_url !== `https://github.com/${g.repo}/issues/${r.request.issue}` || !['open', 'closed'].includes(current.state)) throw new Error('Cannot establish active ticket quota.');
           if (current.state === 'open') active++;
@@ -173,6 +176,7 @@ async function ticketCommand(action, id, options) {
     if (!receipt) {
       receipt = { id: crypto.randomUUID(), digest, grantId: id, grantDigest: g.digest, revision: g.revision, request, issue: { number: issue.number, title: issue.title, body: issue.body }, at: new Date().toISOString() };
       if (native) receipt.issue.nativeBlockers = [...blockers].sort((a, b) => a - b);
+      if (previousReceipt) { g.receiptHistory ||= []; g.receiptHistory.push(previousReceipt); }
       g.receipts[key] = receipt;
       event('authorized', evidence(result('ALLOW', 'Durable exact-ticket receipt reserved one quota unit.')));
       commit(); // Durable quota reservation and receipt MUST precede the executable label.

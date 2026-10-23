@@ -7,7 +7,7 @@ const { projectCommand } = require('./project-registration');
 
 function parseArguments(argv) {
   const [group, action, ...rest] = argv;
-  if (!['project', 'grant', 'ticket', 'batch'].includes(group)) throw new Error('Usage: ralph project add|check|activate owner/repository [--yes] [--config path] [--projects path] [--checkout-root path] [--worktree-root path] [--base-branch name] [--ci-workflow name] [--worker codex|claude] [--ready-label label]; project recover; ralph grant draft|inspect|activate ID [--input JSON --spec file] [--digest SHA256 --yes] [--config path] [--projects path]; ralph ticket preview|approve|release GRANT --input request.json [--digest SHA256 --yes]; ralph batch preview|publish|approve|release GRANT --input batch.json [--digest SHA256 --yes]');
+  if (!['project', 'grant', 'ticket', 'batch'].includes(group)) throw new Error('Usage: ralph project add|check|activate owner/repository [--yes] [--config path] [--projects path] [--checkout-root path] [--worktree-root path] [--base-branch name] [--ci-workflow name] [--worker codex|claude] [--ready-label label]; project recover; ralph grant draft|inspect|activate|pause|resume|amend|revoke|expire|complete ID [--input JSON --spec file] [--digest SHA256 --yes] [--config path] [--projects path]; ralph ticket preview|approve|release GRANT --input request.json [--digest SHA256 --yes]; ralph batch preview|publish|approve|release GRANT --input batch.json [--digest SHA256 --yes]');
   const options = {}, positional = [];
   const flags = { '--input': 'inputPath', '--spec': 'specPath', '--digest': 'digest', '--config': 'configPath', '--projects': 'projectsPath', '--checkout-root': 'checkoutRoot', '--worktree-root': 'worktreeRoot', '--base-branch': 'baseBranch', '--ci-workflow': 'ciWorkflow', '--worker': 'worker', '--ready-label': 'readyLabel' };
   for (let i = 0; i < rest.length; i++) {
@@ -24,9 +24,9 @@ function parseArguments(argv) {
     const allowed = ['configPath', 'projectsPath', 'inputPath', ...(action === 'approve' ? ['digest', 'yes'] : [])];
     if (Object.keys(options).some(key => !allowed.includes(key))) throw new Error(`Option is not valid for this ${group} command.`);
   } else if (group === 'grant') {
-    if (!['draft', 'inspect', 'activate'].includes(action)) throw new Error('Usage: ralph grant draft|inspect|activate ID');
-    if (action === 'draft' && (!options.inputPath || !options.specPath)) throw new Error('Draft requires --input JSON and --spec file.');
-    const allowed = ['configPath', 'projectsPath', ...(action === 'draft' ? ['inputPath', 'specPath'] : action === 'activate' ? ['digest', 'yes'] : [])];
+    if (!['draft', 'inspect', 'activate', 'pause', 'resume', 'amend', 'revoke', 'expire', 'complete'].includes(action)) throw new Error('Usage: ralph grant draft|inspect|activate|pause|resume|amend|revoke|expire|complete ID');
+    if (['draft', 'amend'].includes(action) && (!options.inputPath || !options.specPath)) throw new Error('Draft requires --input JSON and --spec file.');
+    const allowed = ['configPath', 'projectsPath', ...(action === 'draft' ? ['inputPath', 'specPath'] : action === 'amend' ? ['inputPath', 'specPath', 'digest', 'yes'] : action !== 'inspect' ? ['digest', 'yes'] : [])];
     if (Object.keys(options).some(key => !allowed.includes(key))) throw new Error('Option is not valid for this grant command.');
   } else if (options.inputPath || options.specPath || options.digest) throw new Error('Grant options require the grant command.');
   if (options.worker && !['codex', 'claude'].includes(options.worker)) throw new Error('Worker must be codex or claude.');

@@ -76,11 +76,12 @@ test('authorized submit progresses; queued recovery rechecks revocation without 
   const db = f.db(); db.grants.g1.state = 'revoked'; fs.writeFileSync(path.join(f.root, 'milestone-grants.json'), JSON.stringify(db));
   f.store.moveTask(task.id, 'pending', 'running');
   f.jobs.advance(f.store.readTask(task.id, 'running')); await f.jobs.stop(() => {});
-  assert.match(f.tasks.done[0].failure, /revoked/i);
+  assert.equal(f.tasks.done.length, 0);
+  assert.match(f.tasks.running[0].authorizationBlocked.message, /revoked/i);
   assert.ok(f.events.some(e => e.event === 'recovery' || e.type === 'recovery'));
 });
 
-for (const change of ['none', 'revoked', 'expired', 'edited']) {
+for (const change of ['none', 'revoked', 'expired', 'edited', 'paused']) {
   test(`actual R1 resume and guarded merge with ${change} authorization after green CI and Claude PASS`, async t => {
     const f = await r1Fixture(t); await f.approve(); await f.run('release');
     const task = await f.jobs.submit({ project: 'demo', issue: 106 });
@@ -104,7 +105,12 @@ for (const change of ['none', 'revoked', 'expired', 'edited']) {
       reviewPullRequest: async () => {
         reviews++;
         if (change === 'edited') f.issue.body += 'changed';
-        if (change === 'revoked' || change === 'expired') {
+        if (change === 'paused' || change === 'revoked') {
+          const action = change === 'paused' ? 'pause' : 'revoke';
+          const preview = await grantCommand(action, 'g1', f.options);
+          await grantCommand(action, 'g1', { ...f.options, digest: preview.digest });
+        }
+        if (change === 'expired') {
           const db = f.db();
           if (change === 'revoked') db.grants.g1.state = 'revoked';
           else db.grants.g1.expiresAt = '2000-01-01T00:00:00.000Z';
@@ -128,13 +134,24 @@ for (const change of ['none', 'revoked', 'expired', 'edited']) {
     assert.equal(merges, change === 'none' ? 1 : 0);
     if (change === 'none') assert.equal(f.tasks.done[0].status, 'merged');
     else {
-      assert.equal(f.tasks.done[0].status, 'failed');
-      assert.match(f.tasks.done[0].failure, /Milestone authorization blocked/);
-      assert.equal(f.tasks.done[0].cleanup, undefined, 'authorization holds retain work and labels');
+      assert.equal(f.tasks.done.length, 0, 'authorization hold retains resumable queue work');
+      assert.ok(f.tasks.running[0].r1.authorizationBlocked);
+      assert.equal(f.tasks.running[0].cleanup, undefined, 'authorization holds retain work and labels');
       assert.ok(saved.failures.some(x => x.phase === 'authorization'));
       let cleanups = 0;
       await require('../src/autopilot').cleanupTerminalWorkspaces(f.project, original, async () => { cleanups++; }, () => {});
       assert.equal(cleanups, 0, 'later maintenance retains authorization-held worktrees');
+      if (change === 'paused') {
+        const before = [...f.events];
+        const preview = await grantCommand('resume', 'g1', f.options);
+        await grantCommand('resume', 'g1', { ...f.options, digest: preview.digest });
+        const resumed = createR1Jobs(f.store, { projectsPath: f.options.projectsPath, autopilotDependencies: f.deps });
+        resumed.recover(f.store.readTask(task.id, 'running'));
+        f.store.moveTask(task.id, 'pending', 'running');
+        resumed.advance(f.store.readTask(task.id, 'running')); await resumed.stop(() => {});
+        assert.equal(f.tasks.done[0].status, 'merged'); assert.equal(merges, 1); assert.equal(reviews, 1);
+        assert.deepEqual(f.events.slice(0, before.length), before, 'restart preserves original transcript records');
+      }
     }
   });
 }
@@ -228,7 +245,8 @@ test('a queued R1 job cannot switch to a replacement receipt after submission', 
   fs.writeFileSync(path.join(f.root, 'milestone-grants.json'), JSON.stringify(db));
   f.store.moveTask(task.id, 'pending', 'running');
   f.jobs.advance(f.store.readTask(task.id, 'running')); await f.jobs.stop(() => {});
-  assert.match(f.tasks.done[0].failure, /receipt changed/);
+  assert.equal(f.tasks.done.length, 0);
+  assert.match(f.tasks.running[0].authorizationBlocked.message, /receipt changed/);
 });
 test('expiration during the final GitHub read fails closed', async t => {
   const f = await r1Fixture(t); await f.approve(); await f.run('release');

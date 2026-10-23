@@ -310,12 +310,17 @@ function createR1Jobs(store, options = {}) {
     }
     const original = createJobStore(resolveStateDir(task.project, project));
     const saved = original.load(task.issue);
-    try { await authorize(task.project, project, task.issue, task.milestoneAuthorization); }
+    try { const renewed = await authorize(task.project, project, task.issue, task.milestoneAuthorization);
+      if (renewed) task.milestoneAuthorization = renewed;
+      if (task.authorizationBlocked) { delete task.authorizationBlocked; delete task.failure; }
+    }
     catch (error) {
       task.failure = error.message;
       record('authorization_blocked', { message: error.message, code: error.code });
       // Preserve worktrees, attempts, reviews and logs for owner reconciliation.
-      return finish(task, saved);
+      task.authorizationBlocked = { at: now(), message: error.message };
+      checkpoint(task, 'blocked');
+      return;
     }
     if (saved && saved.terminal) return conclude(task, saved, project);
     if (task.autonomous && task.phase === 'ci') {
@@ -360,6 +365,7 @@ function createR1Jobs(store, options = {}) {
       await run(['--project', task.project], {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
+        milestoneOptions: { stateDir: store.paths.state },
         checkMilestoneAuthorization: () => authorize(task.project, load(task.project), task.issue, task.milestoneAuthorization),
         environmentIsCancelled: () => closing || store.readTask(task.id, 'running').cancelRequested === true,
         // A completed implementation child cannot resolve a later integration.
@@ -451,7 +457,7 @@ function createR1Jobs(store, options = {}) {
 
   function advance(task) {
     if (active.has(task.id) || closing) return;
-    if (task.phase === 'ci' && Date.now() < (nextAdvance.get(task.id) || 0)) return;
+    if (['ci', 'blocked'].includes(task.phase) && Date.now() < (nextAdvance.get(task.id) || 0)) return;
     // The dispatcher passes navigation metadata. Never execute its preview;
     // load full canonical context only after the active/poll gates admit work.
     task = store.readTask(task.id, 'running');
@@ -464,7 +470,7 @@ function createR1Jobs(store, options = {}) {
       }
     }).finally(() => {
       active.delete(task.id);
-      if (task.phase === 'ci') nextAdvance.set(task.id, Date.now() + ciPollMs);
+      if (['ci', 'blocked'].includes(task.phase)) nextAdvance.set(task.id, Date.now() + ciPollMs);
       else nextAdvance.delete(task.id);
     });
     active.set(task.id, promise);

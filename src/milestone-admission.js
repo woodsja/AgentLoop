@@ -45,7 +45,7 @@ async function checkMilestoneAdmission(projectName, project, number, options = {
     if (!Number.isFinite(Date.parse(g.activatedAt)) || !Array.isArray(g.events)
       || !g.events.some(e => e?.type === 'activated' && e.digest === g.digest && e.revision === g.revision
         && typeof e.actor === 'string' && e.actor.trim() && Number.isFinite(Date.parse(e.at)))) throw new Error('Missing owner activation evidence.');
-    if (!Number.isFinite(Date.parse(g.expiresAt)) || Date.parse(g.expiresAt) <= Date.now()) throw new Error('Grant expired.');
+    if (!Number.isFinite(Date.parse(g.expiresAt)) || Date.parse(g.expiresAt) <= require('./milestone-clock').currentTime(state)) throw new Error('Grant expired.');
     if (!grantIntegrity(g)) throw new Error('Grant terms or specification changed.');
     if (JSON.stringify(registration(projectName, project.repo, { configPath, projectsPath })) !== JSON.stringify(g.registration)) throw new Error('Registered identity changed.');
     const registered = JSON.parse(fs.readFileSync(projectsPath, 'utf8'))[projectName];
@@ -65,7 +65,14 @@ async function checkMilestoneAdmission(projectName, project, number, options = {
     if (!Array.isArray(g.ticketEvents) || !g.ticketEvents.some(e => e.type === 'authorized'
       && e.receiptId === r.id && e.digest === r.digest && e.grantId === id && e.grantDigest === g.digest && e.revision === g.revision)) throw new Error('Missing durable receipt authorization event.');
     const authorization = { grantId: id, receiptId: r.id, grantDigest: g.digest, ticketDigest: q.ticketDigest };
-    if (options.expectedAuthorization && Object.keys(authorization).some(key => authorization[key] !== options.expectedAuthorization[key])) throw new Error('Job authorization receipt changed.');
+    if (options.expectedAuthorization && Object.keys(authorization).some(key => authorization[key] !== options.expectedAuthorization[key])) {
+      const old = options.expectedAuthorization;
+      // Only a new explicit owner-approved receipt replacing this job's archived
+      // receipt can rebind retained work after an amendment.
+      if (old.grantId !== id || !g.receiptHistory?.some(previous => previous.id === old.receiptId
+        && previous.grantDigest === old.grantDigest && previous.request.issue === number
+        && previous.request.ticketDigest === old.ticketDigest && previous.revision < g.revision)) throw new Error('Job authorization receipt changed.');
+    }
     if (!object(g.receipts) || Object.keys(g.receipts).length > g.ticketLimit) throw new Error('Invalid receipt quota.');
     const issue = JSON.parse(await runGh(['api', `repos/${project.repo}/issues/${number}`], options.execFile || execFile, 'Milestone admission'));
     if (options.expectedIssue && ticketDigest(options.expectedIssue) !== q.ticketDigest) throw new Error('Selected issue title/body differs from the authorized revision.');
@@ -86,7 +93,7 @@ async function checkMilestoneAdmission(projectName, project, number, options = {
     // Owner edits during the GitHub read must not be accepted as stale authority.
     if (fs.readFileSync(file, 'utf8') !== raw
       || fs.readFileSync(configPath, 'utf8') !== configRaw || fs.readFileSync(projectsPath, 'utf8') !== projectsRaw) throw new Error('Grant store changed during authorization.');
-    if (Date.parse(g.expiresAt) <= Date.now()) throw new Error('Grant expired during authorization.');
+    if (Date.parse(g.expiresAt) <= require('./milestone-clock').currentTime(state)) throw new Error('Grant expired during authorization.');
     return authorization;
   } catch (cause) {
     throw admissionBlock(projectName, number, cause, { stateDir: state });

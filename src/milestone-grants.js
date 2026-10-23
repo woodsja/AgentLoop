@@ -70,7 +70,7 @@ function proposal(options) {
   return terms;
 }
 async function grantCommand(action, id, options) {
-  if (!['draft', 'inspect', 'activate'].includes(action)) throw new Error('Expected grant draft, inspect or activate.');
+  if (!['draft', 'inspect', 'activate', 'pause', 'resume', 'amend', 'revoke', 'expire', 'complete'].includes(action)) throw new Error('Unknown grant action.');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id || '')) throw new Error('Supply a grant ID (1..80 letters, digits, underscores or hyphens).');
   const state = path.resolve(options.stateDir || process.env.AGENTLOOP_STATE_DIR || path.join(__dirname, '../state'));
   fs.mkdirSync(state, { recursive: true }); syncDirectory(state); syncDirectory(path.dirname(state));
@@ -78,9 +78,16 @@ async function grantCommand(action, id, options) {
   const files = [fs.realpathSync(options.configPath), fs.realpathSync(options.projectsPath), file];
   if (new Set(files).size !== 3) throw new Error('Grant store and owner configuration paths must be distinct.');
   return locked(files, async () => {
-    const db = fs.existsSync(file) ? read(file) : { version: 1, grants: {} };
+    let expected = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    const db = expected === null ? { version: 1, grants: {} } : JSON.parse(expected);
     if (db.version !== 1 || !db.grants || typeof db.grants !== 'object' || Array.isArray(db.grants)) throw new Error('Invalid grant store; preserve and reconcile it.');
-    const commit = () => save(file, db, options);
+    const commit = () => {
+      if ((fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null) !== expected) throw new Error('Grant store changed outside the shared lock.');
+      save(file, db, { ...options, beforeCommit() {
+        options.beforeCommit?.();
+        if ((fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null) !== expected) throw new Error('Grant store changed outside the shared lock.');
+      } }); expected = fs.readFileSync(file, 'utf8');
+    };
     const actor = os.userInfo().username;
     let grant = Object.hasOwn(db.grants, id) ? db.grants[id] : undefined;
     const event = (type, details = {}) => { const at = new Date().toISOString(); grant.updatedAt = at; grant.events.push({ type, at, actor, revision: grant.revision, digest: grant.digest, ...details }); };
@@ -99,11 +106,57 @@ async function grantCommand(action, id, options) {
     if (!grant) throw new Error('Unknown grant.');
     if (!STATES.includes(grant.state)) throw new Error('Invalid lifecycle state.');
     // Inspection and activation persist expiry; terminal states remain distinguishable.
-    if (['draft', 'active', 'paused'].includes(grant.state) && Date.parse(grant.expiresAt) <= Date.now()) {
+    if (['draft', 'active', 'paused'].includes(grant.state) && Date.parse(grant.expiresAt) <= require('./milestone-clock').currentTime(state)) {
       grant.state = 'expired'; event('expired'); commit();
     }
-    options.record('preview', { grant });
+    const receipts = Object.values(grant.receipts || {});
+    let jobs = [], inspectionError = null;
+    try { jobs = require('./autopilot-state').createJobStore(require('./autopilot-state').resolveStateDir(grant.project, read(options.projectsPath)[grant.project], state)).list(); }
+    catch (error) { inspectionError = error.message; } // Damaged job diagnostics must never prevent revocation.
+    const inspection = { inspectionError, totalIssued: receipts.length, quotaRemaining: Math.max(0, grant.ticketLimit - receipts.length),
+      work: receipts.map(r => { const job = jobs.find(j => j.issue.number === r.request.issue);
+        return { issue: r.request.issue, status: job?.status || 'not_started', terminal: job?.terminal || false,
+          blocked: !!inspectionError || grant.state !== 'active' || r.revision !== grant.revision || !!job?.authorizationBlocked,
+          reason: inspectionError || (grant.state !== 'active' ? `Grant is ${grant.state}.` : r.revision !== grant.revision ? 'Receipt requires owner re-evaluation.' : job?.authorizationBlocked?.message || null) }; }) };
+    inspection.blockedWork = inspection.work.filter(work => work.blocked && !work.terminal).length;
+    inspection.activeWork = inspection.work.filter(work => !work.blocked && !work.terminal && work.status !== 'not_started').length;
+    options.record('preview', { grant, inspection });
     if (action === 'inspect') return grant;
+    if (!['activate'].includes(action)) {
+      if (['resume', 'amend'].includes(action) && !require('./milestone-tickets').grantIntegrity(grant)) throw new Error('Grant terms changed; reconcile before restoring authority.');
+      const terms = action === 'amend' ? proposal(options) : null;
+      const digest = hash(JSON.stringify({ action, id, state: grant.state, lifecycleVersion: grant.lifecycleVersion || 0, revision: grant.revision, digest: grant.digest, terms }));
+      // A confirmed retry is inert, even if subsequent actions changed state.
+      if (options.digest && grant.events.some(e => e.type === 'owner_action' && e.action === action && e.actionDigest === options.digest)) return grant;
+      if (terms && (terms.project !== grant.project || terms.repo !== grant.repo || JSON.stringify(terms.registration) !== JSON.stringify(grant.registration))) throw new Error('Amendment cannot change project or registration identity.');
+      const target = { pause: 'paused', resume: 'active', revoke: 'revoked', expire: 'expired', complete: 'completed', amend: grant.state }[action];
+      const allowed = { pause: ['active', 'paused'], resume: ['paused', 'active'], revoke: ['draft', 'active', 'paused', 'expired', 'revoked'], expire: ['draft', 'active', 'paused', 'expired'], complete: ['active', 'paused', 'completed'], amend: ['active', 'paused'] }[action];
+      if (!allowed.includes(grant.state)) throw new Error(`Cannot ${action} ${grant.state} grant.`);
+      if (terms && (terms.revision !== grant.revision + 1 || terms.ticketLimit < receipts.length)) throw new Error('Amendment requires the next revision and must retain issued quota.');
+      const preview = { action, digest, grant, proposedTerms: terms, inspection };
+      options.record('preview', preview);
+      if (!options.digest) return preview;
+      if (options.digest !== digest) throw new Error('Action requires --digest matching this exact preview.');
+      const priorRevision = terms ? structuredClone(grant) : null;
+      if (priorRevision) delete priorRevision.history;
+      event('action_requested', { action, actionDigest: digest }); commit();
+      try {
+        if (!await options.approve(`Confirm ${action} grant ${id}, revision ${grant.revision}, action ${digest}?`) || options.isCancelled?.()) throw new Error('Grant action cancelled.');
+        if (action === 'resume' || terms) {
+          if (JSON.stringify(registration(grant.project, grant.repo, options)) !== JSON.stringify(grant.registration)) throw new Error('Grant registration identity changed.');
+          if (Date.parse(terms?.expiresAt || grant.expiresAt) <= require('./milestone-clock').currentTime(state)) throw new Error('Grant expired during approval.');
+        }
+      } catch (error) { event('action_failed', { action, message: error.message }); commit(); throw error; }
+      if (terms) {
+        grant.history ||= []; grant.history.push(priorRevision);
+        Object.assign(grant, terms, { digest: hash(JSON.stringify(terms)) });
+        // Existing receipts stay immutable and fail the new digest/revision checks.
+        event('activated', { approval: 'amendment', actionDigest: digest });
+      }
+      grant.state = target; grant.lifecycleVersion = (grant.lifecycleVersion || 0) + 1;
+      event('owner_action', { action, actionDigest: digest }); commit();
+      return grant;
+    }
     if (options.digest !== grant.digest) throw new Error('Activation requires --digest matching the inspected grant digest.');
     if (!['draft', 'active'].includes(grant.state)) throw new Error(`Cannot activate ${grant.state} grant.`);
     const checkRegistration = () => {
@@ -115,7 +168,7 @@ async function grantCommand(action, id, options) {
     try {
       if (!await options.approve(`Activate grant ${id}, revision ${grant.revision}, digest ${grant.digest}?`) || options.isCancelled?.()) throw new Error('Grant activation cancelled.');
       checkRegistration();
-      if (Date.parse(grant.expiresAt) <= Date.now()) throw new Error('Grant expired during approval.');
+      if (Date.parse(grant.expiresAt) <= require('./milestone-clock').currentTime(state)) throw new Error('Grant expired during approval.');
     } catch (error) {
       event('approval_failed', { message: error.message }); commit(); throw error;
     }

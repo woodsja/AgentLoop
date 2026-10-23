@@ -72,6 +72,7 @@ function createCliWorker(options = {}) {
   } = options;
 
   return async function runWorker(projectPath, task, context) {
+    if (options.signal?.aborted) throw options.signal.reason;
     const scope = resolveWorkerScope(config, projectPath, registryPath);
     const engine = engines.get(task.worker);
     if (!engine) throw new Error(`Unknown worker engine: ${task.worker}`);
@@ -101,6 +102,9 @@ function createCliWorker(options = {}) {
           return;
         }
 
+        const abort = () => { child.kill('SIGTERM'); };
+        options.signal?.addEventListener('abort', abort, { once: true });
+        if (options.signal?.aborted) abort();
         let stdout = '';
         let stderr = '';
         let partialLine = '';
@@ -121,12 +125,14 @@ function createCliWorker(options = {}) {
         const finish = (error, exitCode = null, signal = null) => {
           if (settled) return;
           settled = true;
+          options.signal?.removeEventListener('abort', abort);
           clearTimeout(timeout);
           clearTimeout(timeoutFallback);
           if (error) {
             reject(error);
             return;
           }
+          options.recordExecution?.('process_close', { role: 'worker', exitCode, signal, timedOut });
           if (partialLine) parseLine(partialLine);
           if (engine.usesOutputFile) {
             try {
@@ -153,6 +159,7 @@ function createCliWorker(options = {}) {
         };
 
         child.stdout.on('data', chunk => {
+          options.recordExecution?.('output', { role: 'worker', stream: 'stdout', base64: Buffer.from(chunk).toString('base64') });
           const text = String(chunk);
           stdout += text;
           partialLine += text;
@@ -160,7 +167,10 @@ function createCliWorker(options = {}) {
           partialLine = lines.pop();
           for (const line of lines) parseLine(line);
         });
-        child.stderr.on('data', chunk => { stderr += String(chunk); });
+        child.stderr.on('data', chunk => {
+          options.recordExecution?.('output', { role: 'worker', stream: 'stderr', base64: Buffer.from(chunk).toString('base64') });
+          stderr += String(chunk);
+        });
         child.once('error', error => finish(error));
         child.once('close', (code, signal) => finish(null, code, signal));
         child.stdin.on('error', error => finish(error));

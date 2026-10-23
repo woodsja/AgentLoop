@@ -121,3 +121,61 @@ test('concurrent activation is rejected and cancellation requires a fresh approv
   assert.equal(f.ok('inspect', 'm1').state, 'draft');
   assert.equal(f.ok('activate', 'm1', '--yes', '--digest', draft.digest).state, 'active');
 });
+
+test('owner actions preview exact transitions, audit retries and preserve successive pause/resume cycles', async t => {
+  const f = fixture(t), { grantCommand } = require('../src/milestone-grants');
+  const previews = [];
+  const options = { configPath: f.config, projectsPath: f.projects, stateDir: f.state,
+    inputPath: f.input, specPath: f.spec, record: (type, value) => previews.push({ type, value }), approve: async () => true };
+  const draft = await grantCommand('draft', 'm1', options);
+  await grantCommand('activate', 'm1', { ...options, digest: draft.digest });
+  const action = async name => {
+    const preview = await grantCommand(name, 'm1', options);
+    const changed = await grantCommand(name, 'm1', { ...options, digest: preview.digest });
+    assert.deepEqual(await grantCommand(name, 'm1', { ...options, digest: preview.digest }), changed);
+    return { preview, changed };
+  };
+  const first = await action('pause'); assert.equal(first.changed.state, 'paused');
+  await action('resume');
+  const second = await action('pause'); assert.notEqual(second.preview.digest, first.preview.digest);
+  await assert.rejects(grantCommand('resume', 'm1', { ...options, digest: second.preview.digest }), /matching/);
+  const declined = await grantCommand('resume', 'm1', options);
+  await assert.rejects(grantCommand('resume', 'm1', { ...options, digest: declined.digest, approve: async () => false }), /cancelled/);
+  assert.equal((await grantCommand('inspect', 'm1', options)).state, 'paused');
+  await action('resume'); await action('complete');
+  await assert.rejects(grantCommand('resume', 'm1', options), /completed/);
+  const grant = await grantCommand('inspect', 'm1', options);
+  assert.equal(grant.events.filter(e => e.type === 'owner_action' && e.action === 'pause').length, 2);
+  assert.ok(previews.some(e => e.value.inspection?.quotaRemaining === 8));
+});
+test('amendment requires the next revision, rejects identity changes and detects owner edits during approval', async t => {
+  const f = fixture(t), { grantCommand } = require('../src/milestone-grants');
+  const options = { configPath: f.config, projectsPath: f.projects, stateDir: f.state, inputPath: f.input, specPath: f.spec, record() {}, approve: async () => true };
+  const draft = await grantCommand('draft', 'm1', options);
+  await grantCommand('activate', 'm1', { ...options, digest: draft.digest });
+  await assert.rejects(grantCommand('amend', 'm1', options), /next revision/);
+  f.proposal.revision = 2; f.write();
+  const preview = await grantCommand('amend', 'm1', options);
+  await assert.rejects(grantCommand('amend', 'm1', { ...options, digest: preview.digest, approve: async () => {
+    const file = path.join(f.state, 'milestone-grants.json'), db = JSON.parse(fs.readFileSync(file));
+    db.grants.m1.state = 'revoked'; fs.writeFileSync(file, JSON.stringify(db)); return true;
+  } }), /changed outside/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.state, 'milestone-grants.json'))).grants.m1.state, 'revoked');
+});
+test('durable authoritative time prevents expiration rollback across module restart', async t => {
+  const f = fixture(t), { grantCommand } = require('../src/milestone-grants');
+  const options = { configPath: f.config, projectsPath: f.projects, stateDir: f.state, inputPath: f.input, specPath: f.spec, record() {}, approve: async () => true };
+  const draft = await grantCommand('draft', 'm1', options);
+  await grantCommand('activate', 'm1', { ...options, digest: draft.digest });
+  const original = Date.now;
+  try {
+    Date.now = () => Date.parse(f.proposal.expiresAt) + 1;
+    const { currentTime } = require('../src/milestone-clock'); currentTime(f.state);
+    Date.now = () => Date.parse(f.proposal.expiresAt) - 60000;
+    delete require.cache[require.resolve('../src/milestone-clock')];
+    assert.equal((await grantCommand('inspect', 'm1', options)).state, 'expired');
+    await assert.rejects(grantCommand('resume', 'm1', options), /expired/);
+    const revoke = await grantCommand('revoke', 'm1', options);
+    assert.equal((await grantCommand('revoke', 'm1', { ...options, digest: revoke.digest })).state, 'revoked');
+  } finally { Date.now = original; }
+});
