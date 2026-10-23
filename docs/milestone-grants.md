@@ -80,8 +80,8 @@ merge remain delivery requirements; none establishes a verified deployment.
 This staged implementation adds explicit `ticket preview`, `ticket approve` and
 `ticket release` commands. These commands do **not** enable milestone enforcement, modify live
 configuration, enqueue a job, or authorize deployment. R1 enforcement is available
-only through the separately owner-configured opt-in described below; Household
-enforcement remains separate.
+only through the separately owner-configured opt-in described below. Household
+uses that same opt-in and validator through its existing autopilot.
 Do not run release against live projects until those admission protections are
 implemented and rollout is separately authorized. All implementation tests use
 fake GitHub operations and isolated registrations.
@@ -166,8 +166,8 @@ GitHub does not provide an atomic compare-title/body-and-add-label operation.
 This helper reads the issue again immediately before receipt creation and label
 mutation, but a concurrent edit can still race the label write. Receipts never
 confer authority on changed bytes: receipt validation in **both** R1 and Household
-admission is required before live rollout. The R1 opt-in below provides its admission protection; Household admission
-protection and live rollout remain separate work.
+admission is required before live rollout. The opt-in below provides admission protection in both runners; live rollout
+requires a separate owner decision.
 
 `node test/milestone-tickets.test.js` exercises the isolated grant/draft/approval/
 receipt/mock-label flow, failures, retries, quota, exact identity and scope holds.
@@ -216,3 +216,43 @@ reconciliation; automatic cleanup does not remove held work.
 R1 submit/discover/recover/advance/merge paths, fake GitHub and the real grant and
 receipt commands. It covers missing/corrupt/unreadable authorization, dependency
 proof and revocation, expiry or issue edits after green CI and independent PASS.
+
+
+## Household milestone admission (disabled on live projects)
+
+A registered project with `dependencyFormat: "household-blocked-by"` retains
+its existing Household autopilot and `## Blocked by` parsing. Setting
+`milestoneAuthorization` to exactly `true` additionally selects the shared R1
+receipt validator. No shipped owner policy is changed. R1 discovery continues to
+skip these projects, so the two runners do not compete for the ready label.
+
+Household selection, including `--dry-run`, checks current receipts and GitHub
+identity/content before choosing work. The selected title/body must match the
+receipted revision as well as the fresh GitHub read. The issue lock protects new
+job creation and recovery; authorization is rechecked under that lock and before
+worker admission, integration, delivery, independent review and guarded merge.
+Jobs retain their grant/receipt binding across restarts. A prior ready label,
+merged prerequisites or a cached receipt never replaces a fresh check.
+
+The shared validator selects Household dependency parsing from registered policy.
+Every blocker still needs a terminal merged job with independent exact-head
+Claude PASS, green CI, passing verification and reconciled issue closure. These
+prerequisites are checked again during continuation and merge. Missing or
+malformed metadata cannot silently become a dependency-free ticket.
+
+Selection reports `ALLOW`, `WAIT` (dependency evidence or metadata),
+`NEEDS_APPROVAL` (missing receipt or owner scope approval), or `DENY` (invalid,
+modified, ambiguous duplicate or expired authorization). All blocking decisions
+append fsynced diagnostics to `milestone-admission.ndjson`; no label is removed.
+An execution-time hold also retains job evidence and its workspace for owner
+reconciliation instead of retrying as a transient worker error. A dry run writes
+only local diagnostics; it does not create jobs, mutate grants, execute workers
+or write GitHub.
+
+`node test/household-milestone-admission.test.js` proves all four decisions using
+isolated stores, real grant/receipt commands and fake GitHub adapters through the
+actual Household selection, worker admission, resume and guarded merge paths.
+It also checks stale prerequisite proof, receipt replacement, scope/identity
+changes, retained evidence, no duplicate execution and R1 scanner exclusion.
+No real Household work, readiness label, grant activation, production setting or
+deployment is authorized by these tests or this implementation.
