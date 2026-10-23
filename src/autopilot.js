@@ -1,5 +1,5 @@
 'use strict';
-const { checkMilestoneAdmission } = require('./milestone-admission');
+const { checkMilestoneAdmission, admissionBlock } = require('./milestone-admission');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -205,11 +205,12 @@ async function run(argv, dependencies = {}) {
   const project = loadConfig(projectName);
   const store = dependencies.jobStore
     || createJobStore(resolveStateDir(projectName, project, dependencies.stateRoot));
-  const authorizeMilestone = () => project.milestoneAuthorization !== true ? Promise.resolve(null) : dependencies.checkMilestoneAuthorization
-    ? dependencies.checkMilestoneAuthorization()
-    : checkMilestoneAdmission(projectName, project, candidate.number, {
+  let job;
+  const authorizeMilestone = (issue = candidate, existing = job) => project.milestoneAuthorization !== true ? Promise.resolve(null) : dependencies.checkMilestoneAuthorization
+    ? dependencies.checkMilestoneAuthorization(issue, existing)
+    : checkMilestoneAdmission(projectName, project, issue.number, {
       ...dependencies.milestoneOptions, execFile: dependencies.execFile, jobs: () => store.list(),
-      expectedAuthorization: job?.milestoneAuthorization,
+      expectedAuthorization: existing?.milestoneAuthorization, expectedIssue: issue,
     });
   const cleanupWorkspace = dependencies.cleanupIssueWorkspace || cleanupIssueWorkspace;
   // A scheduled pass over a disabled project is a successful no-op: nothing is
@@ -221,8 +222,22 @@ async function run(argv, dependencies = {}) {
   if (!dryRun) await cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, dependencies.captureFailedWork);
   const discovered = await discover(project);
   const recorded = store.list();
-  const admitted = project.dependencyFormat === 'household-blocked-by'
-    ? householdEligible(discovered, recorded, projectName, project.repo, (_issue, message) => write(message)) : discovered;
+  const dependencyAdmitted = project.dependencyFormat === 'household-blocked-by'
+    ? householdEligible(discovered, recorded, projectName, project.repo, (number, message) => {
+      if (project.milestoneAuthorization === true) {
+        const error = admissionBlock(projectName, number, Object.assign(new Error(message), { decision: 'WAIT' }), dependencies.milestoneOptions);
+        write(`WAIT: ${error.message}`);
+      } else write(message);
+    }) : discovered;
+  const admitted = [];
+  for (const issue of dependencyAdmitted) {
+    try {
+      await authorizeMilestone(issue, recorded.find(saved => saved.issue.number === issue.number));
+      admitted.push(issue);
+    } catch (error) {
+      write(`${error.decision || 'DENY'}: ${error.message}`);
+    }
+  }
   const selection = selectIssueForJobs(admitted, recorded, choose);
 
   if (!selection) {
@@ -234,7 +249,7 @@ async function run(argv, dependencies = {}) {
 
   if (dryRun) {
     const resume = selection.job ? `; resumes existing job (status ${selection.job.status})` : '';
-    write(`Dry run: project ${projectName}; repository ${project.repo}; issue #${candidate.number}: ${candidate.title}; worker ${project.worker}${resume}; action is dry-run only.`);
+    write(`${project.milestoneAuthorization === true ? 'ALLOW: ' : ''}Dry run: project ${projectName}; repository ${project.repo}; issue #${candidate.number}: ${candidate.title}; worker ${project.worker}${resume}; action is dry-run only.`);
     return candidate;
   }
 
@@ -423,12 +438,11 @@ async function run(argv, dependencies = {}) {
   };
 
   const lock = store.acquire(candidate.number);
-  let job;
   let workspace;
   let targetLock;
   let phase = 'reconcile';
   const holdAuthorization = error => {
-    job.authorizationBlocked = { at: store.now(), message: error.message };
+    job.authorizationBlocked = { at: store.now(), decision: error.decision || 'DENY', message: error.message };
     handToHuman(job, 'authorization', error.message, store.now);
   };
   try {
@@ -878,6 +892,8 @@ async function run(argv, dependencies = {}) {
         if (error.code === 'MILESTONE_AUTHORIZATION_BLOCKED') {
           holdAuthorization(error);
           store.save(job);
+          write(`${error.decision || 'DENY'}: ${error.message}`);
+          return { issue: candidate, workspace, result: null, outcome: { status: job.terminalState, terminal: true, deliverable: false }, job };
         } else if (['PYTHON_PREFLIGHT_BLOCKED', 'PROJECT_PREFLIGHT_BLOCKED'].includes(error.code)) {
           job.environmentPreflight = error.outcome;
           job.status = 'blocked_infrastructure';
