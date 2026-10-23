@@ -165,3 +165,16 @@ test('dependency policy requires independent always review and automatic merge',
     assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...baseline, ...change } }) }), /requires reviewPolicy always and autoMerge true/);
   }
 });
+
+test('milestone admission is an explicit boolean opt-in and is disabled in shipped policies', () => {
+  for (const value of [true, false]) {
+    const configPath = writeConfig({ demo: { ...validProject(), milestoneAuthorization: value } });
+    assert.equal(loadProjectConfig('demo', { configPath }).milestoneAuthorization, value);
+  }
+  for (const value of ['true', 1, null, {}]) {
+    const configPath = writeConfig({ demo: { ...validProject(), milestoneAuthorization: value } });
+    assert.throws(() => loadProjectConfig('demo', { configPath }), /milestoneAuthorization must be a boolean/);
+  }
+  const shipped = JSON.parse(fs.readFileSync(path.join(__dirname, '../autopilot-projects.json'), 'utf8'));
+  assert.ok(Object.values(shipped).every(project => project.milestoneAuthorization !== true));
+});

@@ -1,4 +1,4 @@
-// Explicit operator/planner commands only; never called by admission or a daemon.
+// Commands are explicit operator/planner operations. Pure integrity helpers are also used by admission.
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -153,4 +153,4 @@ async function ticketCommand(action, id, options) {
     } catch (e) { return finish(result('WAIT', `Receipt retained; label release unconfirmed: ${e.message}`)); }
   });
 }
-module.exports = { ticketCommand, ticketDigest };
+module.exports = { ticketCommand, ticketDigest, grantIntegrity };

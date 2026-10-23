@@ -1787,6 +1787,7 @@ function failUnauthorizedR1Child(child, error) {
   recordEvent('loop_ended', { id: child.id, status: 'failed', reason: failed.reason });
 }
 
+const authorizingR1Children = new Set();
 function fillSlots() {
   const maxConcurrent = Math.max(1, Number(store.config.maxConcurrent) || 2);
   // Admission needs only metadata. Load full execution context only for the
@@ -1802,8 +1803,21 @@ function fillSlots() {
     const pendingChildren = store.listTasks('pending', { dashboard: true }).filter(task => task.r1Child?.parentJobId === r1.id);
     if (pendingChildren.length === 0) return;
     const candidate = store.readTask(sortPending(pendingChildren)[0].id, 'pending');
+    if (authorizingR1Children.has(candidate.id)) return;
     try {
-      r1Jobs.authorizeChild(candidate);
+      const authorization = r1Jobs.authorizeChild(candidate);
+      if (authorization?.then) {
+        authorizingR1Children.add(candidate.id);
+        authorization.then(() => {
+          const current = store.listTasks('running', { dashboard: true });
+          if (!current.some(task => task.id === r1.id) || current.some(task => task.id !== r1.id) || stopping) return;
+          startLoop(store.readTask(candidate.id, 'pending'));
+        }).catch(error => {
+          recorder(store, candidate.id)('authorization_blocked', { message: error.message, stack: error.stack });
+          failUnauthorizedR1Child(candidate, error);
+        }).finally(() => authorizingR1Children.delete(candidate.id));
+        return;
+      }
       if (running.some(task => task.id !== r1.id)) return;
       startLoop(candidate);
     } catch (error) {
@@ -2771,7 +2785,7 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && requestPath === '/api/r1/jobs') {
     try {
       const body = await readJsonBody(req);
-      const job = r1Jobs.submit(body);
+      const job = await r1Jobs.submit(body);
       sendJson(res, 201, { id: job.id });
     } catch (error) { sendJson(res, 400, { error: error.message }); }
     return;

@@ -1,3 +1,4 @@
+const { checkMilestoneAdmission } = require('./milestone-admission');
 const { snapshotter } = require('./execution-preview');
 // R1 phases run under the existing queue dispatcher, not a second scheduler.
 const fs = require('node:fs');
@@ -147,6 +148,12 @@ function createR1Jobs(store, options = {}) {
     store.writeTask(task, 'running');
   }
 
+  const authorize = (name, project, issue, expectedAuthorization) => project.milestoneAuthorization !== true ? Promise.resolve(null) : checkMilestoneAdmission(name, project, issue, {
+    configPath: store.paths.config, projectsPath: options.projectsPath,
+    stateDir: store.paths.state, expectedAuthorization, execFile: dependencies.execFile || runFile,
+    jobs: () => createJobStore(resolveStateDir(name, project)).list(),
+  });
+
   function submit(body) {
     if (!Number.isSafeInteger(body.issue) || body.issue < 1) throw new Error('R1 submission requires a positive issue number.');
     if (Object.hasOwn(body, 'cwd') || Object.hasOwn(body, 'projectPath')) throw new Error('R1 paths come from owner configuration.');
@@ -162,23 +169,27 @@ function createR1Jobs(store, options = {}) {
       .find(([name, candidate]) => candidate === planned && (body.worktree === undefined || name === body.worktree));
     const managed = !named && body.worktree === undefined && managesWorktree(entry, planned);
     if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before R1 submission.');
-    const task = store.enqueueTask({
-      workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
-      ...(named ? { worktree: named[0] } : {}), title: body.title || `R1 issue #${body.issue}`,
-      phase: 'queued', status: 'queued', phases: [{ phase: 'queued', at: now() }], source: body.source || 'api',
-      ...(autonomous(project) ? { autonomous: true } : {}),
-    });
-    logTransition(task, 'queued', 'queued for admission.');
-    // enqueueTask has already made the task durable. Persist the dedupe key
-    // separately; an unavailable log file remains strictly best effort.
-    try {
-      store.writeTask(task, 'pending');
-    } catch (error) {
-      // The queue entry is already durable; failure to persist transcript
-      // metadata must not turn an accepted submission into a failed one.
-      console.error(`R1 job ${task.id}: transcript checkpoint failed.`);
-    }
-    return task;
+    const enqueue = authorization => {
+      const task = store.enqueueTask({
+        workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
+        ...(authorization ? { milestoneAuthorization: authorization } : {}),
+        ...(named ? { worktree: named[0] } : {}), title: body.title || `R1 issue #${body.issue}`,
+        phase: 'queued', status: 'queued', phases: [{ phase: 'queued', at: now() }], source: body.source || 'api',
+        ...(autonomous(project) ? { autonomous: true } : {}),
+      });
+      logTransition(task, 'queued', 'queued for admission.');
+      // enqueueTask has already made the task durable. Persist the dedupe key
+      // separately; an unavailable log file remains strictly best effort.
+      try {
+        store.writeTask(task, 'pending');
+      } catch (error) {
+        // The queue entry is already durable; failure to persist transcript
+        // metadata must not turn an accepted submission into a failed one.
+        console.error(`R1 job ${task.id}: transcript checkpoint failed.`);
+      }
+      return task;
+    };
+    return project.milestoneAuthorization === true ? authorize(body.project, project, body.issue).then(enqueue) : enqueue();
   }
 
   function trackedSpawn(...args) {
@@ -272,6 +283,10 @@ function createR1Jobs(store, options = {}) {
   }
 
   async function conclude(task, job, project) {
+    if (job?.failures?.some(failure => failure.phase === 'authorization')) {
+      task.failure = job.failures.filter(failure => failure.phase === 'authorization').at(-1).message;
+      return finish(task, job);
+    }
     if (task.autonomous && project) {
       if (job && !job.terminal) job = failDurably(task, project, task.failure || 'R1 job stopped before a terminal outcome.');
       await cleanup(task, job, project);
@@ -295,6 +310,13 @@ function createR1Jobs(store, options = {}) {
     }
     const original = createJobStore(resolveStateDir(task.project, project));
     const saved = original.load(task.issue);
+    try { await authorize(task.project, project, task.issue, task.milestoneAuthorization); }
+    catch (error) {
+      task.failure = error.message;
+      record('authorization_blocked', { message: error.message, code: error.code });
+      // Preserve worktrees, attempts, reviews and logs for owner reconciliation.
+      return finish(task, saved);
+    }
     if (saved && saved.terminal) return conclude(task, saved, project);
     if (task.autonomous && task.phase === 'ci') {
       const waiting = [...(task.phases || [])].reverse().find(entry => entry.phase === 'ci');
@@ -338,6 +360,7 @@ function createR1Jobs(store, options = {}) {
       await run(['--project', task.project], {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
+        checkMilestoneAuthorization: () => authorize(task.project, load(task.project), task.issue, task.milestoneAuthorization),
         environmentIsCancelled: () => closing || store.readTask(task.id, 'running').cancelRequested === true,
         // A completed implementation child cannot resolve a later integration.
         // Use the existing scoped CLI-worker service and tracked parent process
@@ -468,14 +491,19 @@ function createR1Jobs(store, options = {}) {
           .filter(task => task.workflow === 'r1' && task.project === name && task.status === 'needs_specification')
           .map(task => [task.issue, task.specificationDigest]));
         const issues = (await discover(project)).filter(issue => waiting.get(issue.number) !== digest(issue));
+        const authorized = [];
+        for (const issue of issues) {
+          try { await authorize(name, project, issue.number); authorized.push(issue); }
+          catch (error) { console.error(error.message); }
+        }
         const blockedInScan = new Set();
         const admitted = name === 'ralph'
-          ? eligibleIssues(issues, jobs, name, project.repo, (issueNumber, message) => {
+          ? eligibleIssues(authorized, jobs, name, project.repo, (issueNumber, message) => {
             blockedInScan.add(issueNumber);
             if (dependencyDiagnostics.get(issueNumber) === message) return;
             dependencyDiagnostics.set(issueNumber, message);
             console.error(message); // Captured by the owner-visible systemd service journal.
-          }) : issues;
+          }) : authorized;
         if (name === 'ralph') {
           for (const issueNumber of dependencyDiagnostics.keys()) {
             if (!blockedInScan.has(issueNumber)) dependencyDiagnostics.delete(issueNumber);
@@ -526,7 +554,13 @@ function createR1Jobs(store, options = {}) {
   // Construct lazily: legacy R1 consumers that never invoke the new internal
   // handoff do not need to implement its optional durable-store interface.
   const ensureChildLoop = id => createR1ChildHandoff({ store, loadProject: load }).ensure(id);
-  const authorizeChild = task => authorizeR1Child(task, { store, loadProject: load });
+  const authorizeChild = task => {
+    const parent = authorizeR1Child(task, { store, loadProject: load });
+    const project = load(parent.project);
+    if (project.milestoneAuthorization !== true) return parent;
+    return authorize(parent.project, project, parent.issue, parent.milestoneAuthorization).then(() =>
+      authorizeR1Child(task, { store, loadProject: load }));
+  };
   return { submit, advance, admit, recover, read, stop, ensureChildLoop, authorizeChild };
 }
 
