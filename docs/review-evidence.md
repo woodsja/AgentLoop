@@ -11,23 +11,33 @@ without `.prepare` retain the original callable interface.
 A preparation failure is separate from model review history. The durable job's
 `reviewPreparationHistory` includes the exact head, status, classification,
 source child error code, configured content/buffer limits, captured byte count,
-and owner execution-journal reference. A maxBuffer byte count is explicitly a
-lower bound: Node may kill the child and limit callback output. It is never
-reported as the original complete diff's length. Full captured command pipes,
-errors, stacks and causes remain in owner execution records. No captured
+and owner execution-journal reference. `observedBytesIsLowerBound` is true only
+for `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`: Node may kill the child and limit
+callback output. That byte count is a lower bound and is never reported as the
+original complete diff's length. Ordinary failed commands, authentication
+errors, transport errors and Git exit 128 retain their original process codes
+and complete captured stdout/stderr with this flag false. Full captured command
+pipes, errors, stacks and causes remain in owner execution records. No captured
 worker, reviewer or verifier records are removed by preparation.
 
 `review_input_over_budget` is deterministic and requires owner correction; it
-never consumes a Claude attempt. Malformed context, missing diff, authentication,
-identity and integrity failures stop immediately. Recognized transient GitHub
-transport failures get at most three preparations for a head, separated by 30
-seconds, with each counter/deadline and earlier failure retained on disk. An
-interrupted preparation stops on restart without another context fetch or
-model invocation. There are at most 24 preparation checkpoints per job. These
-limits do not reset or remove earlier `NEEDS_CHANGES` findings. Model timeouts,
-invalid verdicts and genuine `NEEDS_CHANGES` still use the existing paid-attempt
-policy. Fixing a terminal job requires a separate owner-authorized recovery;
-this protocol does not rearm it.
+never consumes a Claude attempt. This includes `gh pr diff` HTTP 406 or GitHub's
+`diff exceeded the maximum number of lines` response: reduce the complete review
+patch using the lossless evidence protocol below before an owner-authorized
+successor/recovery; retained raw diagnostics identify the GitHub limit.
+Authentication and transient network failures remain distinct. Malformed
+context, missing diff, authentication, identity and integrity failures stop
+immediately. Recognized transient GitHub transport failures get at most three
+failed preparations for a head, separated by 30 seconds, with each
+counter/deadline and earlier failure retained on disk. An interrupted
+preparation stops on restart without another context fetch or model invocation.
+Successful `prepared` entries do not consume the failure retry cap; earlier
+failures and paid model attempts are never reset. There are at most 24
+preparation checkpoints per job. These limits do not reset or remove earlier
+`NEEDS_CHANGES` findings. Model timeouts, invalid verdicts and genuine
+`NEEDS_CHANGES` still use the existing paid-attempt policy. Fixing a terminal
+job requires a separate owner-authorized recovery; this protocol does not rearm
+it.
 
 ## Packaging a large evidence-only log patch
 

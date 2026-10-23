@@ -590,9 +590,10 @@ async function run(argv, dependencies = {}) {
               phase = 'review_preparation';
               const history = job.reviewPreparationHistory ||= [];
               const previous = history.at(-1);
-              const sameHead = history.filter(entry => entry.commit === job.delivery.commit);
+              // Successful preparation does not consume the failure retry budget.
+              const sameHeadFailures = history.filter(entry => entry.commit === job.delivery.commit && entry.status !== 'prepared');
               if (history.length >= 24 || previous && previous.commit === job.delivery.commit
-                && (previous.status === 'running' || previous.status === 'blocked' || sameHead.length >= 3)) {
+                && (previous.status === 'running' || previous.status === 'blocked' || sameHeadFailures.length >= 3)) {
                 if (previous?.status === 'running') {
                   Object.assign(previous, { status: 'blocked', completedAt: store.now(),
                     diagnostics: { code: 'review_preparation_interrupted', message: 'Preparation was interrupted before model start; owner correction is required.' },
@@ -617,7 +618,7 @@ async function run(argv, dependencies = {}) {
                 Object.assign(preparation, { status: 'prepared', completedAt: store.now() });
                 store.save(job);
               } catch (error) {
-                const retry = error.code === 'github_transport' && sameHead.length < 2;
+                const retry = error.code === 'github_transport' && sameHeadFailures.length < 2;
                 const diagnostic = {
                   code: error.code || 'review_context_invalid', sourceCode: error.sourceCode,
                   operation: error.operation, limitBytes: error.limitBytes, bufferBytes: error.bufferBytes,

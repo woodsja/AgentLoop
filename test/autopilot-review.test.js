@@ -431,3 +431,34 @@ test('canonical GitHub repository casing is accepted during preparation and post
   assert.equal(result.verdict, 'PASS');
   assert.equal(claude.calls.length, 1);
 });
+
+for (const scenario of [
+  { name: 'buffer overflow', sourceCode: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', stderr: 'buffer full', code: 'review_input_over_budget', lowerBound: true },
+  { name: 'GitHub excessive diff HTTP 406', sourceCode: 1, stderr: 'HTTP 406: diff exceeded the maximum number of lines (20000)', code: 'review_input_over_budget' },
+  { name: 'GitHub excessive diff message', sourceCode: 1, stderr: 'diff exceeded the maximum number of lines', code: 'review_input_over_budget' },
+  { name: 'auth failure', sourceCode: 1, stderr: 'HTTP 401: Bad credentials', code: 'github_auth_denied' },
+  { name: 'network failure', sourceCode: 'ECONNRESET', stderr: 'connection reset', code: 'github_transport' },
+  { name: 'ordinary failure', sourceCode: 1, stderr: 'command failed', code: 'review_context_unavailable' },
+  { name: 'Git exit 128', sourceCode: 128, stderr: 'fatal: invalid object name', code: 'review_context_unavailable', git: true },
+]) {
+  test(`review adapter retains complete raw cause and truthful byte diagnostics for ${scenario.name}`, async () => {
+    const command = commands(), execute = command.execFile, claude = reviewer();
+    const original = Object.assign(new Error(scenario.stderr), { code: scenario.sourceCode });
+    const stdout = 'captured output: π\n';
+    command.execFile = (file, args, options, cb) => {
+      if (scenario.git ? file === 'git' : file === 'gh' && args[1] === 'diff') return cb(original, stdout, scenario.stderr);
+      return execute(file, args, options, cb);
+    };
+    await assert.rejects(adapter(command, claude).prepare({ project, issue, pullRequest, headCommit: sha, verification: verificationEvidence }), error => {
+      assert.equal(error.code, scenario.code);
+      assert.equal(error.sourceCode, scenario.sourceCode);
+      assert.equal(error.cause, original);
+      assert.equal(error.rawStdout, stdout);
+      assert.equal(error.rawStderr, scenario.stderr);
+      assert.equal(error.observedBytes, Buffer.byteLength(stdout));
+      assert.equal(error.observedBytesIsLowerBound, Boolean(scenario.lowerBound));
+      return true;
+    });
+    assert.equal(claude.calls.length, 0);
+  });
+}

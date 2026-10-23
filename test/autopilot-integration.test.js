@@ -820,6 +820,7 @@ test('one-shot persisted R1 preflights the incident diff at the real Node buffer
   assert.equal(failure.status, 'blocked');
   assert.equal(failure.diagnostics.code, 'review_input_over_budget');
   assert.equal(failure.diagnostics.sourceCode, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+  assert.equal(failure.diagnostics.observedBytesIsLowerBound, true);
   assert.equal(failure.diagnostics.limitBytes, 245760);
   assert.equal(failure.diagnostics.bufferBytes, 245761);
   assert.ok(failure.diagnostics.observedBytes >= 245761);
@@ -829,7 +830,7 @@ test('one-shot persisted R1 preflights the incident diff at the real Node buffer
   assert.equal(claudeCalls, 0);
 });
 
-for (const mode of ['transient', 'auth', 'interrupted', 'stale initial head', 'stale rechecked head', 'empty diff']) {
+for (const mode of ['transient', 'auth', 'oversized diff', 'interrupted', 'stale initial head', 'stale rechecked head', 'empty diff']) {
   test(`one-shot review preparation ${mode} is bounded and restart-safe without paid attempts`, async t => {
     const f = await fixture(t);
     await synchronizeIssueBranch(f, f.options);
@@ -847,7 +848,7 @@ for (const mode of ['transient', 'auth', 'interrupted', 'stale initial head', 's
       diffs++;
       if (mode === 'empty diff') return cb(null, ' \n');
       if (mode === 'stale rechecked head') return cb(null, 'diff --git a/source.js b/source.js\n+change\n');
-      const message = mode === 'auth' ? 'HTTP 401: Bad credentials' : 'HTTP 503: transport interrupted';
+      const message = mode === 'auth' ? 'HTTP 401: Bad credentials' : mode === 'oversized diff' ? 'HTTP 406: diff exceeded the maximum number of lines (20000)' : 'HTTP 503: transport interrupted';
       return native('python3', ['-c', `import sys;sys.stderr.write(${JSON.stringify(message)});sys.exit(1)`], opts, cb);
     }, spawn() { models++; throw new Error('must not call Claude'); } });
     const clock = { time: Date.now(), green: true };
@@ -874,8 +875,14 @@ for (const mode of ['transient', 'auth', 'interrupted', 'stale initial head', 's
       await tick(); assert.equal(diffs, 3);
     } else {
       assert.equal(saved.terminal, true);
-      assert.equal(diffs, ['auth', 'stale rechecked head', 'empty diff'].includes(mode) ? 1 : 0);
-      if (mode === 'auth') assert.equal(saved.reviewPreparationHistory[0].diagnostics.code, 'github_auth_denied');
+      assert.equal(diffs, ['auth', 'oversized diff', 'stale rechecked head', 'empty diff'].includes(mode) ? 1 : 0);
+      if (mode === 'auth' || mode === 'oversized diff') {
+        const failure = saved.reviewPreparationHistory[0];
+        assert.equal(failure.diagnostics.code, mode === 'auth' ? 'github_auth_denied' : 'review_input_over_budget');
+        assert.equal(failure.diagnostics.sourceCode, 1);
+        assert.equal(failure.diagnostics.observedBytesIsLowerBound, false);
+        assert.match(fs.readFileSync(failure.rawEvidence.file, 'utf8'), mode === 'auth' ? /Bad credentials/ : /diff exceeded the maximum number of lines/);
+      }
       if (mode.startsWith('stale') || mode === 'empty diff') {
         assert.equal(saved.reviewPreparationHistory[0].diagnostics.code, mode === 'empty diff' ? 'review_diff_absent' : 'review_identity_mismatch');
       }
@@ -883,7 +890,7 @@ for (const mode of ['transient', 'auth', 'interrupted', 'stale initial head', 's
       await tick();
       assert.equal(heads, lookups, 'permanent preparation failures never retry');
       assert.equal(f.store.load(105).reviewPreparationHistory.length, 1);
-      assert.equal(diffs, ['auth', 'stale rechecked head', 'empty diff'].includes(mode) ? 1 : 0);
+      assert.equal(diffs, ['auth', 'oversized diff', 'stale rechecked head', 'empty diff'].includes(mode) ? 1 : 0);
     }
   });
 }
@@ -960,3 +967,76 @@ test('exhausted exact-head review budget skips preparation and its context fetch
   assert.equal(saved.terminalState, 'ready_for_human');
   assert.match(saved.failures.at(-1).message, /review attempt limit/);
 });
+
+for (const firstVerdict of ['timeout', 'invalid']) {
+  test(`one-shot successful preparation does not exhaust retry budget before eligible second review after ${firstVerdict}`, async t => {
+    const f = await fixture(t);
+    await synchronizeIssueBranch(f, f.options);
+    const head = f.job.delivery.commit;
+    const native = require('node:child_process').execFile;
+    let diffs = 0, models = 0;
+    const review = require('../src/autopilot-review').createClaudeReviewAdapter({ timeoutMs: 20,
+      execFile(file, args, opts, cb) {
+        if (file === 'git') return native(file, args, opts, cb);
+        if (args[0] === 'issue') return cb(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
+        if (args[1] === 'diff') {
+          diffs++;
+          if (diffs <= 2) return cb(Object.assign(new Error('HTTP 503: unavailable'), { code: 1 }), '', 'HTTP 503: unavailable');
+          return native('git', ['-C', f.project.checkout, 'diff', f.target, head], opts, cb);
+        }
+        cb(null, JSON.stringify({ number: 117, headRefOid: head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+      },
+      spawn() {
+        models++;
+        const saved = f.store.load(105);
+        assert.equal(saved.reviewAttempts, models, 'paid budget is reserved durably and never reset');
+        assert.equal(saved.reviewPreparationHistory.at(-1).status, 'prepared');
+        const { EventEmitter } = require('node:events');
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = new EventEmitter();
+        child.kill = () => { queueMicrotask(() => child.emit('close', 1)); return true; };
+        child.stdin.end = () => {
+          if (models === 1 && firstVerdict === 'timeout') return;
+          queueMicrotask(() => {
+            child.stdout.emit('data', models === 1 ? 'invalid verdict' : JSON.stringify({ is_error: false, result: JSON.stringify({ verdict: 'PASS', commit: head, findings: '' }) }));
+            child.emit('close', 0);
+          });
+        };
+        return child;
+      },
+    });
+    const clock = { time: Date.now(), green: true };
+    const tick = retryRunner(f, native, clock, { independentReview: review });
+    await tick();
+    clock.time += 30001; await tick();
+    assert.deepEqual(f.store.load(105).reviewPreparationHistory.map(entry => entry.status), ['retry_wait', 'retry_wait']);
+    clock.time += 30001; await tick();
+    const failed = f.store.load(105);
+    assert.deepEqual(failed.reviewPreparationHistory.map(entry => entry.status), ['retry_wait', 'retry_wait', 'prepared']);
+    assert.equal(failed.reviewAttempts, 1);
+    assert.equal(failed.reviewHistory[0].status, firstVerdict === 'timeout' ? 'timed_out' : 'invalid_verdict');
+    assert.equal(failed.terminal, true, 'existing terminal policy is preserved');
+    // A terminal failed attempt cannot be rearmed. Arrange a separate eligible
+    // successor store, keeping the predecessor and its raw history immutable.
+    // Carry the paid counter as a legacy reservation (the public runner accounts
+    // for reservations without active history), so the second call still uses
+    // attempt 2 and cannot silently acquire a fresh model budget.
+    const predecessorStore = f.store;
+    f.store = createJobStore(path.join(predecessorStore.directory, 'successor'));
+    const eligible = structuredClone(failed);
+    Object.assign(eligible, { terminal: false, terminalState: null, status: 'awaiting_ci', reviewHistory: [] });
+    f.store.save(eligible);
+    await tick();
+    const saved = createJobStore(f.store.directory).load(105);
+    assert.equal(models, 2, JSON.stringify({ status: saved.status, failures: saved.failures, preparations: saved.reviewPreparationHistory }));
+    assert.equal(diffs, 4);
+    assert.equal(saved.reviewAttempts, 2);
+    assert.deepEqual(predecessorStore.load(105), failed, 'terminal predecessor evidence is immutable');
+    assert.equal(saved.reviewHistory[0].number, 2);
+    assert.deepEqual(saved.reviewPreparationHistory.slice(0, 3), failed.reviewPreparationHistory);
+    assert.deepEqual(saved.reviewPreparationHistory.map(entry => entry.status), ['retry_wait', 'retry_wait', 'prepared', 'prepared']);
+    assert.equal(saved.review.verdict, 'PASS');
+    assert.equal(saved.review.commit, head);
+    assert.equal(saved.status, 'merged');
+  });
+}

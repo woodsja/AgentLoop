@@ -58,12 +58,15 @@ function runCommand(file, args, executeFile, operation, options = {}) {
   return new Promise((resolve, reject) => {
     const fail = (error, stdout = '', stderr = '') => {
       const sourceCode = error.code;
-      const code = sourceCode === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'review_input_over_budget'
+      const incompleteOutput = sourceCode === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+      const oversizedDiff = file === 'gh' && args[0] === 'pr' && args[1] === 'diff'
+        && /HTTP 406|diff exceeded the maximum number of lines/i.test(String(stdout) + String(stderr) + error.message);
+      const code = incompleteOutput || oversizedDiff ? 'review_input_over_budget'
         : /HTTP 40[13]|authentication|not logged|bad credentials|permission denied/i.test(String(stderr) + error.message) ? 'github_auth_denied'
           : file === 'gh' && /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|connection reset|Could not resolve host|TLS handshake|HTTP 50[234]/i.test(String(sourceCode) + error.message + stderr) ? 'github_transport' : 'review_context_unavailable';
       currentRecorder()?.('review_preparation_error', { operation, sourceCode, message: error.message, stack: error.stack, stdout: String(stdout), stderr: String(stderr), limitBytes: limit, bufferBytes: maxBuffer });
       reject(preparationError(code, `${operation}: ${code} (${sourceCode || 'command failure'}; limit ${limit} bytes; buffer ${maxBuffer} bytes; captured ${Buffer.byteLength(stdout)} bytes)`, {
-        rawStdout: String(stdout), rawStderr: String(stderr), sourceCode, limitBytes: limit, bufferBytes: maxBuffer, observedBytes: Buffer.byteLength(stdout), observedBytesIsLowerBound: Boolean(error), operation,
+        rawStdout: String(stdout), rawStderr: String(stderr), sourceCode, limitBytes: limit, bufferBytes: maxBuffer, observedBytes: Buffer.byteLength(stdout), observedBytesIsLowerBound: incompleteOutput, operation,
       }, error));
     };
     try {
