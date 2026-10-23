@@ -283,3 +283,20 @@ test('abrupt process exits after creation, native linking, receipt commit and la
     }
   }
 });
+
+test('pause during publication reads prevents the first new issue without deleting creation intent', async t => {
+  const f = await fixture(t);
+  const original = f.options.execFile;
+  let paused = false;
+  f.options.execFile = (file, args, opts, cb) => {
+    if (!paused && args.some(a => a.includes('?state=all'))) {
+      paused = true;
+      grantCommand('pause', 'g1', f.options).then(preview => grantCommand('pause', 'g1', { ...f.options, digest: preview.digest }))
+        .then(() => original(file, args, opts, cb), error => cb(error));
+    } else original(file, args, opts, cb);
+  };
+  const result = await f.run('publish');
+  assert.equal(f.writes.length, 0); assert.equal(f.issues.length, 0);
+  assert.ok(result.tickets.every(ticket => ticket.decision !== 'ALLOW'));
+  assert.equal(f.journal().batches['batch-one'].tickets.one.creationAttempted, true);
+});

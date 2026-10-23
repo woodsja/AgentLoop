@@ -36,6 +36,7 @@ async function runTask(projectPath, inputTask, options) {
   }
 
   for (let number = 1; number <= task.maxAttempts; number++) {
+    await options.beforeAttempt?.();
     await emitState('working', number);
     const previousAttempt = attempts.length === 0 ? null : snapshotAttempt(attempts[attempts.length - 1]);
     const context = { attempt: number, previousAttempt };

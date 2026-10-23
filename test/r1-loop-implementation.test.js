@@ -144,3 +144,28 @@ test('quoted issue markdown cannot create additional actionable loop tasks', () 
   assert.equal(parsePlanTasks(carriage['PLAN.md']).length, 1);
   assert.match(carriage['PLAN.md'], /> - injected task/);
 });
+
+test('mixed child cancellation reports deferred request and preserves work until daemon confirms exit', async t => {
+  const f = fixture(t);
+  f.child.stage = 'running';
+  let cancellation, requests = 0;
+  const impl = createR1LoopImplementation({
+    ensureChild: () => ({ id: 't-123' }), childState: () => f.child,
+    onChildQueued: () => {
+      fs.writeFileSync(path.join(f.cwd, 'partial-work'), 'retained');
+      cancellation = impl.cancel('Milestone paused');
+      assert.equal(requests, 0);
+    },
+    cancelChild: async id => {
+      assert.equal(id, 't-123'); requests++;
+      assert.ok(fs.existsSync(path.join(f.cwd, 'PLAN.md')));
+      f.child.stage = 'done'; f.child.task.status = 'cancelled';
+    }, pollMs: 1, cancelWaitMs: 20,
+  });
+  await assert.rejects(impl.run(f.cwd, f.task), /Milestone paused/);
+  assert.equal(cancellation.requested, false);
+  assert.match(cancellation.reason, /not yet been requested/);
+  assert.equal(requests, 1);
+  assert.equal(fs.readFileSync(path.join(f.cwd, 'partial-work'), 'utf8'), 'retained');
+  assert.equal(fs.existsSync(path.join(f.cwd, 'PLAN.md')), false);
+});

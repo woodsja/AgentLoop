@@ -30,21 +30,23 @@ test('creates one worker with configured options and reuses it across runs', () 
     },
   });
 
-  assert.deepEqual(workerOptions, [{ config, timeoutMs: 1234 }]);
+  assert.ok(workerOptions[0].signal instanceof AbortSignal);
+  assert.deepEqual(workerOptions, [{ config, signal: workerOptions[0].signal, timeoutMs: 1234 }]);
   assert.strictEqual(service.run('/project/one', tasks[0]), results[0]);
   assert.strictEqual(service.run('/project/two', tasks[1]), results[1]);
-  assert.deepEqual(workerOptions, [{ config, timeoutMs: 1234 }]);
+  assert.ok(workerOptions[0].signal instanceof AbortSignal);
+  assert.deepEqual(workerOptions, [{ config, signal: workerOptions[0].signal, timeoutMs: 1234 }]);
   assert.deepEqual(writerPaths, ['/project/one', '/project/two']);
   assert.deepEqual(calls, [
     {
       projectPath: '/project/one',
       task: tasks[0],
-      options: { runWorker: worker, onStateChange: writers[0], verificationTimeoutMs: 5678 },
+      options: { beforeAttempt: calls[0].options.beforeAttempt, runWorker: worker, onStateChange: writers[0], verificationTimeoutMs: 5678 },
     },
     {
       projectPath: '/project/two',
       task: tasks[1],
-      options: { runWorker: worker, onStateChange: writers[1], verificationTimeoutMs: 5678 },
+      options: { beforeAttempt: calls[1].options.beforeAttempt, runWorker: worker, onStateChange: writers[1], verificationTimeoutMs: 5678 },
     },
   ]);
   assert.notStrictEqual(calls[0].options.onStateChange, calls[1].options.onStateChange);
@@ -87,4 +89,18 @@ test('propagates state-writer creation errors unchanged', () => {
 
   assert.throws(() => service.run('/project', { id: 'task' }), error => error === failure);
   assert.equal(runTaskCalls, 0);
+});
+
+test('cancellation signals the owned worker and denies the next attempt without inventing a terminal result', async () => {
+  let signal, attempts;
+  const reason = 'owner paused the milestone';
+  const service = createRalphTaskService({
+    createCliWorkerImpl: options => { signal = options.signal; return async () => ({ exitCode: null, signal: 'SIGTERM' }); },
+    createTaskStateWriterImpl: () => async () => {},
+    runTaskImpl: async (_, task, options) => { attempts = options.beforeAttempt; await attempts(); return { status: 'actual-worker-result' }; },
+  });
+  const result = await service.run('/project', {});
+  assert.equal(result.status, 'actual-worker-result'); assert.equal(signal.aborted, false);
+  assert.equal(service.cancel(reason).requested, true); assert.equal(signal.aborted, true);
+  await assert.rejects(attempts(), new RegExp(reason));
 });

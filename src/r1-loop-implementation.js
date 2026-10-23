@@ -64,7 +64,9 @@ function createR1LoopImplementation({
   if (typeof ensureChild !== 'function' || typeof childState !== 'function') {
     throw new TypeError('R1 implementation loop needs parent handoff and durable child status readers.');
   }
+  let cancellationReason;
   return {
+    cancel(reason) { cancellationReason = reason; return { requested: false, reason: 'Child cancellation has not yet been requested; the parent poll will request it through the owning daemon lifecycle.' }; },
     async run(cwd, inputTask) {
       const task = normalizeTaskContract(inputTask);
       const files = syntheticPlan(task);
@@ -103,6 +105,7 @@ function createR1LoopImplementation({
         await onChildQueued(childId);
         const deadline = Date.now() + maxWaitMs;
         while (Date.now() < deadline) {
+          if (cancellationReason) throw new Error(cancellationReason);
           if (isCancelled()) throw new Error('R1 parent cancelled during child implementation.');
           const current = childState(childId);
           if (current?.stage === 'done') {

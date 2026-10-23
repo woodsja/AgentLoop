@@ -931,3 +931,65 @@ test('HTTP access rejects rebinding Hosts and cross-site Origins and keeps legac
   assert.equal(result.status,200);
   assert.equal(result.headers['content-disposition'],`attachment; filename="${id}.ndjson"`);
 });
+
+for (const role of ['worker', 'critic']) {
+  test(`R1 ${role} authorization denial holds the exact session and permits retry without losing history`, t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-milestone-hold-'));
+    const isolated = isolatedDaemon({ allowedProjects: { demo: directory } }, directory);
+    t.after(() => { isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+    const s = isolated.store, d = isolated.daemon;
+    s.ensureDirs();
+    const parent = { id: 't-12345678', workflow: 'r1', status: 'running', milestoneAuthorization: { grantId: 'g1' } };
+    const previous = { n: 1, status: 'failed', phase: 'critic', verdict: 'FAIL', summary: 'Prior review retained' };
+    const cycle = { n: 2, status: 'running', phase: role, workerSummary: 'Implementation retained' };
+    const loop = { id: 't-23456789', type: 'loop', status: 'running', projectPath: directory,
+      engine: 'unavailable-test-engine', cycles: [previous, cycle], cycle: 2,
+      r1Child: { parentJobId: parent.id, attempt: 1 } };
+    s.writeTask(parent, 'running'); s.writeTask(loop, 'running');
+    s.appendLogLine(loop.id, 'Original captured output');
+    let denied = true, checks = 0, finishes = 0;
+    t.mock.method(require('../src/milestone-work'), 'checkCurrent', authorization => {
+      assert.deepEqual(authorization, parent.milestoneAuthorization); checks++;
+      if (denied) throw new Error('Canonical milestone authorization changed (paused).');
+    });
+    d.spawnLoopSession(loop, cycle, role, 'Exact original prompt', () => finishes++);
+    let held = s.readTask(loop.id, 'running');
+    assert.equal(held.status, 'running');
+    assert.deepEqual(held.cycles, loop.cycles);
+    assert.equal(held.authorizationBlocked.role, role);
+    assert.equal(held.authorizationBlocked.prompt, 'Exact original prompt');
+    assert.equal(finishes, 0);
+    assert.equal(s.listTasks('done').length, 0);
+    const evidence = s.readLogLines(loop.id);
+    denied = false;
+    // An unavailable fake engine stops at the process boundary after the fresh
+    // authorization check; no external agent is executed by this test.
+    d.spawnLoopSession(held, cycle, role, held.authorizationBlocked.prompt, details => {
+      finishes++;
+      assert.equal(details.reason, `${role}_start_failed`);
+      assert.match(details.resultText, /Unsupported/);
+    });
+    held = s.readTask(loop.id, 'running');
+    assert.equal(checks, 2); assert.equal(finishes, 1);
+    assert.equal(held.authorizationBlocked, undefined);
+    assert.deepEqual(held.cycles, loop.cycles);
+    assert.deepEqual(s.readLogLines(loop.id).slice(0, evidence.length), evidence);
+  });
+}
+
+for (const missing of [null, 'ENOENT']) {
+  test(`non-milestone R1 session tolerates a parent lookup returning ${missing}`, t => {
+    let finished = false;
+    t.mock.method(store, 'readTask', () => {
+      if (missing === 'ENOENT') throw Object.assign(new Error('Parent moved'), { code: 'ENOENT' });
+      return null;
+    });
+    const loop = { id: 'non-milestone-child', engine: 'unavailable-test-engine',
+      r1Child: { parentJobId: 'moved-parent' } };
+    daemon.spawnLoopSession(loop, { n: 1 }, 'worker', 'prompt', details => {
+      finished = true;
+      assert.match(details.resultText, /Unsupported/);
+    });
+    assert.equal(finished, true);
+  });
+}

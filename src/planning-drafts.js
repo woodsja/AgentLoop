@@ -61,7 +61,7 @@ function confirmIssue(issue, preview) {
 }
 
 /** Retry is reconciliation only: an ambiguous POST must never be repeated automatically. */
-async function publishDraft(draft, { execFile: executeFile = execFile, retry = false } = {}) {
+async function publishDraft(draft, { execFile: executeFile = execFile, retry = false, beforeWrite = () => {} } = {}) {
   const preview = previewDraft(draft);
   if (typeof executeFile !== 'function' || typeof retry !== 'boolean') throw new Error('Invalid draft publication options');
   const endpoint = `repos/${preview.repo}/issues`;
@@ -76,6 +76,7 @@ async function publishDraft(draft, { execFile: executeFile = execFile, retry = f
   if (retry) throw new Error('Draft not found; retry performed no write. Inspect the failed attempt before authorizing a fresh publication.');
   // The API avoids issue-template defaults and supplies only title/body. There
   // is no ready-label, queue, registration, release or scheduler operation here.
+  await beforeWrite();
   const created = await request(['api', '--method', 'POST', endpoint, '-f', `title=${preview.title}`, '-f', `body=${preview.body}`]);
   return confirmIssue(created, preview);
 }

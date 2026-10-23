@@ -63,13 +63,21 @@ async function batchCommand(action, grantId, options) {
       save(file, db, options); raw = fs.readFileSync(file, 'utf8');
       options.record?.('batch_event', job.events.at(-1));
     };
+    const checkCurrentGrant = () => {
+      const current = read(grantFile).grants?.[grantId];
+      if (!current || current.digest !== grantDigest || current.state !== 'active' || !grantIntegrity(current)
+        || !Number.isFinite(Date.parse(current.expiresAt))
+        || Date.parse(current.expiresAt) <= require('./milestone-clock').currentTime(state)) throw new Error('Canonical grant changed or expired; owner review required.');
+      if (JSON.stringify(registration(current.project, current.repo, options)) !== JSON.stringify(current.registration)) throw new Error('Registered grant identity changed.');
+    };
     const gh = args => withExecution(options.recordExecution || options.record || (() => {}),
-      async () => JSON.parse(await runGh(args, options.execFile || execFile, 'Milestone batch')));
+      async () => { if (args.includes('POST')) checkCurrentGrant();
+        return JSON.parse(await runGh(args, options.execFile || execFile, 'Milestone batch')); });
     const publish = (draft, retry) => withExecution(options.recordExecution || options.record || (() => {}),
-      () => publishDraft(draft, { execFile: options.execFile || execFile, retry }));
+      () => publishDraft(draft, { execFile: options.execFile || execFile, retry, beforeWrite: checkCurrentGrant }));
     let invalid;
     try {
-      if (!grant || !grantIntegrity(grant) || grant.state !== 'active' || Date.parse(grant.expiresAt) <= Date.now()
+      if (!grant || !grantIntegrity(grant) || grant.state !== 'active' || Date.parse(grant.expiresAt) <= require('./milestone-clock').currentTime(state)
         || !Number.isFinite(Date.parse(grant.expiresAt)) || !grant.activatedAt
         || !grant.events?.some(e => e.type === 'activated' && e.digest === grant.digest && e.revision === grant.revision)) throw new Error('Require an active owner-approved grant.');
       if (JSON.stringify(registration(grant.project, grant.repo, options)) !== JSON.stringify(grant.registration)) throw new Error('Registered grant identity changed.');

@@ -212,6 +212,20 @@ async function run(argv, dependencies = {}) {
       ...dependencies.milestoneOptions, execFile: dependencies.execFile, jobs: () => store.list(),
       expectedAuthorization: existing?.milestoneAuthorization, expectedIssue: issue,
     });
+  const workOptions = () => ({
+    authorization: job?.milestoneAuthorization, options: dependencies.milestoneOptions, authorize: authorizeMilestone,
+    onInterruptedResult: result => {
+      job.ralph = { ...job.ralph, status: result?.status ?? null, attempts: result?.attempts?.length || 0 };
+    },
+    record: (event, details) => { store.appendIntegrationEvent?.(job, { event, ...details }); },
+  });
+  const attemptOptions = () => ({ ...dependencies.ralphOptions,
+    ...(project.milestoneAuthorization === true && !dependencies.ralphOptions?.recordExecution ? {
+      recordExecution: (event, details) => store.appendIntegrationEvent?.(job, { event, ...details }),
+    } : {}),
+    beforeAttempt: async () => {
+    await authorizeMilestone(); await dependencies.ralphOptions?.beforeAttempt?.();
+  } });
   const cleanupWorkspace = dependencies.cleanupIssueWorkspace || cleanupIssueWorkspace;
   // A scheduled pass over a disabled project is a successful no-op: nothing is
   // discovered, locked, prepared, or cleaned.
@@ -297,7 +311,7 @@ async function run(argv, dependencies = {}) {
             + 'Refuse ambiguous conflicts, divergent architecture, protected policy/configuration edits. '
             + 'Never use ours/theirs blindly. Leave the merge commit to the integration gate.' };
         const integrationService = dependencies.createIntegrationTaskService || createService;
-        const result = await integrationService({ config: storeConfig, ...dependencies.ralphOptions }).run(context.cwd, task);
+        const result = await require('./milestone-work').runAuthorizedWork(integrationService({ config: storeConfig, ...attemptOptions() }), context.cwd, task, workOptions());
         const last = result?.attempts?.at(-1);
         if (last?.worker && (last.worker.exitCode !== 0 || last.worker.timedOut)) {
           return { status: 'needs_planning', taskResult: result };
@@ -443,7 +457,8 @@ async function run(argv, dependencies = {}) {
   let phase = 'reconcile';
   const holdAuthorization = error => {
     job.authorizationBlocked = { at: store.now(), decision: error.decision || 'DENY', message: error.message };
-    handToHuman(job, 'authorization', error.message, store.now);
+    recordFailure(job, 'authorization', error.message, store.now);
+    // Preserve actual terminal execution outcomes; a hold adds no new one.
   };
   try {
     // Re-read under the lock: the selection-time snapshot may be stale.
@@ -466,12 +481,18 @@ async function run(argv, dependencies = {}) {
     let authorization;
     try {
       authorization = await authorizeMilestone();
-      if (job && authorization) job.milestoneAuthorization ||= authorization;
+      if (job && authorization) {
+        if (job.milestoneAuthorization && job.milestoneAuthorization.receiptId !== authorization.receiptId) {
+          job.authorizationHistory ||= []; job.authorizationHistory.push(job.milestoneAuthorization);
+        }
+        job.milestoneAuthorization = authorization;
+        delete job.authorizationBlocked;
+      }
     }
     catch (error) {
       job ||= createJob({ projectName, repo: project.repo, issue: candidate, branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
       holdAuthorization(error); store.save(job);
-      return { issue: candidate, job, outcome: { status: job.terminalState, terminal: true, deliverable: false } };
+      return { issue: candidate, job, outcome: { status: 'authorization_blocked', terminal: false, deliverable: false } };
     }
     // Before a new job allocates anything, leave an explicitly-closing PR
     // entirely to its existing owner. Recovered Ralph jobs deliberately skip
@@ -756,7 +777,7 @@ async function run(argv, dependencies = {}) {
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(preparedProject, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(preparedProject, candidate, instructions);
-      const service = createService({ config: storeConfig, ...dependencies.ralphOptions,
+      const service = createService({ config: storeConfig, ...attemptOptions(),
         recordBaseline: sha => {
           if (!job.ralph.baselineSha) { job.ralph.baselineSha = sha; store.save(job); }
           return job.ralph.baselineSha;
@@ -769,7 +790,7 @@ async function run(argv, dependencies = {}) {
       job.verification = null;
       if (correction) correction.status = 'running';
       store.save(job);
-      result = await service.run(workspace.worktreePath, task);
+      result = await require('./milestone-work').runAuthorizedWork(service, workspace.worktreePath, task, workOptions());
       const attempts = result && Array.isArray(result.attempts) ? result.attempts : [];
       job.ralph = { ...job.ralph, status: result ? result.status ?? null : null, attempts: attempts.length,
         ...(result?.childLoopId ? { childLoopId: result.childLoopId } : {}) };
@@ -893,7 +914,7 @@ async function run(argv, dependencies = {}) {
           holdAuthorization(error);
           store.save(job);
           write(`${error.decision || 'DENY'}: ${error.message}`);
-          return { issue: candidate, workspace, result: null, outcome: { status: job.terminalState, terminal: true, deliverable: false }, job };
+          return { issue: candidate, workspace, result: null, outcome: { status: 'authorization_blocked', terminal: false, deliverable: false }, job };
         } else if (['PYTHON_PREFLIGHT_BLOCKED', 'PROJECT_PREFLIGHT_BLOCKED'].includes(error.code)) {
           job.environmentPreflight = error.outcome;
           job.status = 'blocked_infrastructure';

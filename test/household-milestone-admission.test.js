@@ -202,3 +202,88 @@ test('R1 scanner yields receipted Household work to its existing autopilot', asy
   assert.equal(await jobs.admit(), null);
   assert.equal((await f.execute(true)).number, 106);
 });
+
+async function ownerAction(f, action, extra = {}) {
+  const preview = await grantCommand(action, 'g1', { ...f.options, ...extra, digest: undefined });
+  return grantCommand(action, 'g1', { ...f.options, ...extra, digest: preview.digest });
+}
+test('owner pause after admission and green review retains evidence and resumes across runner restart', async t => {
+  const f = await householdFixture(t); await f.release(); f.checkpoint();
+  const review = f.deps.reviewPullRequest;
+  f.deps.reviewPullRequest = async (...args) => {
+    const result = await review(...args); await ownerAction(f, 'pause'); return result;
+  };
+  await f.execute();
+  const held = f.store.load(106);
+  assert.equal(held.terminal, false); assert.ok(held.authorizationBlocked);
+  assert.equal(held.review.verdict, 'PASS'); assert.equal(held.ci.state, 'green');
+  assert.equal(f.counts().merges, 0);
+  const journal = fs.readFileSync(held.executionJournal.file, 'utf8');
+  assert.match(journal, /verbatim evidence/);
+  await ownerAction(f, 'resume');
+  f.deps.jobStore = createJobStore(f.project.stateDir);
+  await f.execute();
+  assert.equal(f.counts().merges, 1); assert.equal(f.counts().workers, 0);
+  assert.ok(fs.readFileSync(held.executionJournal.file, 'utf8').startsWith(journal));
+});
+test('amendment preserves immutable approved history; receipt restoration requires fresh exact owner approval', async t => {
+  const f = await householdFixture(t); await f.release(); f.checkpoint();
+  const old = f.db().grants.g1, receipt = old.receipts['owner/demo#106'];
+  const proposal = JSON.parse(fs.readFileSync(f.options.inputPath));
+  // ticket helpers reuse inputPath, so construct the complete amendment from immutable terms.
+  const fields = ['project', 'repo', 'spec', 'objective', 'allowedCategories', 'exclusions', 'revision', 'ticketLimit', 'concurrencyLimit', 'expiresAt'];
+  for (const key of Object.keys(proposal)) delete proposal[key];
+  for (const key of fields) proposal[key] = structuredClone(old[key]);
+  delete proposal.spec.contentBase64; proposal.revision = 2; proposal.objective = 'Revised tests only';
+  const inputPath = path.join(f.root, 'amendment.json'); fs.writeFileSync(inputPath, JSON.stringify(proposal));
+  const amended = await ownerAction(f, 'amend', { inputPath });
+  assert.equal(amended.revision, 2); assert.deepEqual(amended.history[0], old);
+  assert.deepEqual(amended.receipts['owner/demo#106'], receipt);
+  assert.equal(await f.execute(), null); assert.equal(f.counts().merges, 0);
+  await ownerAction(f, 'pause'); await ownerAction(f, 'resume');
+  assert.equal(await f.execute(), null, 'resume must not resurrect old receipts');
+  f.request.revision = amended.revision; f.request.grantDigest = amended.digest;
+  await f.approve(); await f.run('release');
+  assert.deepEqual(f.db().grants.g1.receiptHistory, [receipt]);
+  assert.equal(Object.keys(f.db().grants.g1.receipts).length, 1, 're-evaluation does not reset issued quota');
+  await f.execute(); assert.equal(f.counts().merges, 1);
+});
+test('cooperative cancellation records actual work result and retains original execution evidence', async t => {
+  const f = await householdFixture(t); await f.release();
+  let cancelled = 0;
+  f.deps.createRalphTaskService = () => {
+    let finish;
+    return {
+      cancel() { cancelled++; finish({ status: 'needs_planning', attempts: [], captured: 'original worker output' }); return { requested: true, reason: 'fake worker cooperated' }; },
+      run: async () => {
+        const result = new Promise(resolve => { finish = resolve; });
+        await ownerAction(f, 'pause'); return result;
+      },
+    };
+  };
+  await f.execute();
+  assert.equal(cancelled, 1); assert.equal(f.counts().merges, 0);
+  const held = f.store.load(106); assert.ok(held.authorizationBlocked); assert.equal(held.terminal, false);
+  const raw = fs.readFileSync(held.executionJournal.file, 'utf8');
+  assert.match(raw, /milestone_cancellation/); assert.match(raw, /original worker output/);
+  assert.equal(held.workspaceState, 'prepared');
+});
+
+test('native task retries reread the paused grant and preserve the original failed attempt', async t => {
+  const f = await householdFixture(t); f.project.verification = 'false'; await f.release();
+  let attempts = 0;
+  f.deps.createRalphTaskService = options => require('../src/ralph-task-service').createRalphTaskService({
+    ...options,
+    createCliWorkerImpl: () => async () => {
+      attempts++;
+      await ownerAction(f, 'pause');
+      throw new Error('original interrupted worker diagnostic');
+    },
+    createTaskStateWriterImpl: () => async () => {},
+  });
+  await f.execute();
+  assert.equal(attempts, 1); assert.equal(f.counts().merges, 0);
+  const held = f.store.load(106);
+  assert.ok(held.authorizationBlocked); assert.equal(held.terminal, false);
+  assert.match(fs.readFileSync(held.executionJournal.file, 'utf8'), /original interrupted worker diagnostic/);
+});
