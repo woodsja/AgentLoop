@@ -2,7 +2,7 @@
 
 // Separate from cli-worker: the reviewer only receives fixed data on stdin.
 const { spawn } = require('node:child_process');
-const { execFile } = require('./execution-log');
+const { execFile, currentRecorder } = require('./execution-log');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { unattendedOptions } = require('./autopilot-subprocess');
@@ -22,10 +22,12 @@ const REVIEW_MODELS = new Set(['sonnet', 'opus']);
 const REVIEW_BUDGET_USD = Object.freeze({ sonnet: 2, opus: 5 });
 
 function isObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+// GitHub canonicalizes owner/repository casing in returned URLs.
+function matchesGithubUrl(value, expected) { return typeof value === 'string' && value.toLowerCase() === expected.toLowerCase(); }
 function byteLength(value) { return Buffer.byteLength(String(value), 'utf8'); }
 function bounded(value, limit, description) {
   const text = String(value ?? '');
-  if (byteLength(text) > limit) throw new Error(`Claude review failed closed: ${description} exceeds its safe size limit`);
+  if (byteLength(text) > limit) throw preparationError('review_input_over_budget', `${description} exceeds its safe size limit`, { limitBytes: limit, observedBytes: byteLength(text) });
   return text;
 }
 function deliveredSha(value) {
@@ -47,42 +49,65 @@ function reviewerEnvironment(base = process.env) {
   return environment;
 }
 
+function preparationError(code, message, dimensions = {}, cause) {
+  return Object.assign(new Error(`Claude review failed closed: ${message}`, { cause }), { code, ...dimensions });
+}
 function runCommand(file, args, executeFile, operation, options = {}) {
+  const limit = options.limit || MAX_DIFF_BYTES;
+  const maxBuffer = options.maxBuffer || MAX_DIFF_BYTES + 1;
   return new Promise((resolve, reject) => {
+    const fail = (error, stdout = '', stderr = '') => {
+      const sourceCode = error.code;
+      const incompleteOutput = sourceCode === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+      const oversizedDiff = file === 'gh' && args[0] === 'pr' && args[1] === 'diff'
+        && /HTTP 406|diff exceeded the maximum number of lines/i.test(String(stdout) + String(stderr) + error.message);
+      const code = incompleteOutput || oversizedDiff ? 'review_input_over_budget'
+        : /HTTP 40[13]|authentication|not logged|bad credentials|permission denied/i.test(String(stderr) + error.message) ? 'github_auth_denied'
+          : file === 'gh' && /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|connection reset|Could not resolve host|TLS handshake|HTTP 50[234]/i.test(String(sourceCode) + error.message + stderr) ? 'github_transport' : 'review_context_unavailable';
+      currentRecorder()?.('review_preparation_error', { operation, sourceCode, message: error.message, stack: error.stack, stdout: String(stdout), stderr: String(stderr), limitBytes: limit, bufferBytes: maxBuffer });
+      reject(preparationError(code, `${operation}: ${code} (${sourceCode || 'command failure'}; limit ${limit} bytes; buffer ${maxBuffer} bytes; captured ${Buffer.byteLength(stdout)} bytes)`, {
+        rawStdout: String(stdout), rawStderr: String(stderr), sourceCode, limitBytes: limit, bufferBytes: maxBuffer, observedBytes: Buffer.byteLength(stdout), observedBytesIsLowerBound: incompleteOutput, operation,
+      }, error));
+    };
     try {
-      executeFile(file, args, unattendedOptions({ encoding: 'utf8', maxBuffer: options.maxBuffer || MAX_DIFF_BYTES + 1, shell: false }), (error, stdout) => {
-        if (error) return reject(new Error(`Claude review failed closed: ${operation} is unavailable`));
-        try { resolve(bounded(stdout, options.limit || MAX_DIFF_BYTES, operation)); } catch (failure) { reject(failure); }
+      executeFile(file, args, unattendedOptions({ encoding: options.binary ? 'buffer' : 'utf8', maxBuffer, shell: false }), (error, stdout, stderr) => {
+        if (error) return fail(error, stdout, stderr);
+        try {
+          if (options.binary) {
+            if (stdout.length > limit) throw preparationError('review_input_over_budget', `${operation} exceeds its safe size limit`, { limitBytes: limit, observedBytes: stdout.length });
+            resolve(stdout);
+          } else resolve(bounded(stdout, limit, operation));
+        } catch (failure) { reject(failure); }
       });
-    } catch { reject(new Error(`Claude review failed closed: ${operation} is unavailable`)); }
+    } catch (error) { fail(error); }
   });
 }
 
 async function githubReviewMaterial(project, issue, pullRequest, headCommit, executeFile) {
-  if (!isObject(project) || typeof project.repo !== 'string' || !project.repo.trim() || !isObject(issue) || !Number.isSafeInteger(issue.number) || issue.number < 1 || !isObject(pullRequest) || !Number.isSafeInteger(pullRequest.number) || pullRequest.number < 1) throw new TypeError('Claude review requires project, issue, and pull request');
+  if (!isObject(project) || typeof project.repo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.repo) || !isObject(issue) || !Number.isSafeInteger(issue.number) || issue.number < 1 || !isObject(pullRequest) || !Number.isSafeInteger(pullRequest.number) || pullRequest.number < 1) throw new TypeError('Claude review requires project, issue, and pull request');
   const sha = deliveredSha(headCommit);
-  const prArgs = ['pr', 'view', String(pullRequest.number), '--repo', project.repo, '--json', 'number,headRefOid'];
+  const prArgs = ['pr', 'view', String(pullRequest.number), '--repo', project.repo, '--json', 'number,headRefOid,url,isCrossRepository'];
   const [prText, issueText] = await Promise.all([
     runCommand('gh', prArgs, executeFile, 'PR head lookup'),
-    runCommand('gh', ['issue', 'view', String(issue.number), '--repo', project.repo, '--json', 'number,title,body'], executeFile, 'issue context lookup'),
+    runCommand('gh', ['issue', 'view', String(issue.number), '--repo', project.repo, '--json', 'number,title,body,url'], executeFile, 'issue context lookup'),
   ]);
   let pr; let githubIssue;
-  try { pr = JSON.parse(prText); githubIssue = JSON.parse(issueText); } catch { throw new Error('Claude review failed closed: GitHub returned malformed review context'); }
-  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha || !isObject(githubIssue) || githubIssue.number !== issue.number || typeof githubIssue.title !== 'string' || typeof githubIssue.body !== 'string') throw new Error('Claude review failed closed: GitHub review context does not match the delivered PR and issue');
+  try { pr = JSON.parse(prText); githubIssue = JSON.parse(issueText); } catch { throw preparationError('review_context_malformed', 'GitHub returned malformed review context'); }
+  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha || pr.isCrossRepository !== false || !matchesGithubUrl(pr.url, `https://github.com/${project.repo}/pull/${pullRequest.number}`) || !isObject(githubIssue) || githubIssue.number !== issue.number || !matchesGithubUrl(githubIssue.url, `https://github.com/${project.repo}/issues/${issue.number}`) || typeof githubIssue.title !== 'string' || typeof githubIssue.body !== 'string') throw preparationError('review_identity_mismatch', 'GitHub review context does not match the delivered PR and issue');
   const diff = await runCommand('gh', ['pr', 'diff', String(pullRequest.number), '--repo', project.repo], executeFile, 'PR diff lookup', { limit: MAX_DIFF_BYTES });
-  if (!diff.trim()) throw new Error('Claude review failed closed: PR diff is absent');
+  if (!diff.trim()) throw preparationError('review_diff_absent', 'PR diff is absent');
   let finalPr;
-  try { finalPr = JSON.parse(await runCommand('gh', prArgs, executeFile, 'PR head recheck')); } catch { throw new Error('Claude review failed closed: GitHub returned malformed PR head'); }
-  if (!isObject(finalPr) || finalPr.number !== pullRequest.number || finalPr.headRefOid !== sha) throw new Error('Claude review failed closed: PR head changed while the diff was collected');
+  try { finalPr = JSON.parse(await runCommand('gh', prArgs, executeFile, 'PR head recheck')); } catch (error) { if (error.code) throw error; throw preparationError('review_context_malformed', 'GitHub returned malformed PR head'); }
+  if (!isObject(finalPr) || finalPr.number !== pullRequest.number || finalPr.headRefOid !== sha || finalPr.isCrossRepository !== false || !matchesGithubUrl(finalPr.url, `https://github.com/${project.repo}/pull/${pullRequest.number}`)) throw preparationError('review_identity_mismatch', 'PR head changed while the diff was collected');
   return { diff, issue: githubIssue };
 }
 
 async function assertPrHeadUnchanged(project, pullRequest, headCommit, executeFile, operation = 'model review') {
   const sha = deliveredSha(headCommit);
-  const prArgs = ['pr', 'view', String(pullRequest.number), '--repo', project.repo, '--json', 'number,headRefOid'];
+  const prArgs = ['pr', 'view', String(pullRequest.number), '--repo', project.repo, '--json', 'number,headRefOid,url,isCrossRepository'];
   let pr;
-  try { pr = JSON.parse(await runCommand('gh', prArgs, executeFile, 'PR head recheck')); } catch { throw new Error('Claude review failed closed: GitHub returned malformed PR head'); }
-  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha) throw new Error(`Claude review failed closed: PR head changed during ${operation}`);
+  try { pr = JSON.parse(await runCommand('gh', prArgs, executeFile, 'PR head recheck')); } catch (error) { if (error.code) throw error; throw preparationError('review_context_malformed', 'GitHub returned malformed PR head'); }
+  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha || pr.isCrossRepository !== false || !matchesGithubUrl(pr.url, `https://github.com/${project.repo}/pull/${pullRequest.number}`)) throw preparationError('review_identity_mismatch', `PR head changed during ${operation}`);
 }
 
 async function repositoryStandards(project, headCommit, executeFile) {
@@ -94,13 +119,13 @@ async function repositoryStandards(project, headCommit, executeFile) {
   // labels or git object arguments.
   const names = await runCommand('git', ['-C', project.checkout, 'ls-tree', '-r', '-z', '--name-only', sha], executeFile, 'repository standards lookup', { limit: MAX_STANDARDS_TREE_BYTES, maxBuffer: MAX_STANDARDS_TREE_BYTES });
   const paths = [...new Set(names.split('\0').filter(path => (path === 'AGENTS.md' || path.endsWith('/AGENTS.md')) && !/[\r\n]/.test(path)))];
-  if (paths.length > MAX_STANDARDS_FILES) throw new Error('Claude review failed closed: repository standards guidance has too many files');
+  if (paths.length > MAX_STANDARDS_FILES) throw preparationError('review_input_over_budget', 'repository standards guidance has too many files', { limitFiles: MAX_STANDARDS_FILES, observedFiles: paths.length });
   const standards = [];
   let totalBytes = 0;
   for (const path of paths) {
     const content = await runCommand('git', ['-C', project.checkout, 'show', `${sha}:${path}`], executeFile, `repository standard ${path}`, { limit: MAX_CONTEXT_BYTES });
     totalBytes += byteLength(path) + byteLength(content);
-    if (totalBytes > MAX_CONTEXT_BYTES) throw new Error('Claude review failed closed: repository standards guidance exceeds its safe size limit');
+    if (totalBytes > MAX_CONTEXT_BYTES) throw preparationError('review_input_over_budget', 'repository standards guidance exceeds its safe size limit', { limitBytes: MAX_CONTEXT_BYTES, observedBytes: totalBytes });
     standards.push({ path, content });
   }
   return standards;
@@ -238,15 +263,29 @@ function createClaudeReviewAdapter(options = {}) {
   const executeFile = options.execFile || execFile; const executeSpawn = options.spawn || spawn; const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS; const terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError('Claude review timeoutMs must be a positive integer');
   if (!Number.isSafeInteger(terminationGraceMs) || terminationGraceMs < 1) throw new TypeError('Claude review terminationGraceMs must be a positive integer');
-  return Object.assign(async context => {
-    const { project, issue, pullRequest, headCommit, verification, ci } = context || {}; const model = reviewerModel(project);
-    if (!hasPassingVerification(verification, headCommit)) throw new Error('Claude review failed closed: passing deterministic verification for the exact delivered SHA is required');
+  const preparedObjects = new WeakSet();
+  const prepare = async context => {
+    // Snapshot all mutable caller data before asynchronous collection.
+    const { project, issue, pullRequest, headCommit, verification, ci } = structuredClone(context || {});
+    const model = reviewerModel(project);
+    if (!hasPassingVerification(verification, headCommit)) throw preparationError('review_verification_invalid', 'passing deterministic verification for the exact delivered SHA is required');
     const material = await githubReviewMaterial(project, issue, pullRequest, headCommit, executeFile);
     const standards = await repositoryStandards(project, headCommit, executeFile);
-    const output = await runClaude(executeSpawn, model, buildReviewPrompt({ repo: project.repo, pullRequest, headCommit, issue: material.issue, standards, verification, ci, diff: material.diff }), timeoutMs, terminationGraceMs);
+    const packaged = await require('./review-evidence').validateEvidence({ project, pullRequest, headCommit, diff: material.diff, read: (args, options) => runCommand('git', ['-C', project.checkout, ...args], executeFile, 'evidence integrity lookup', options), github: args => runCommand('gh', args, executeFile, 'evidence base lookup') });
+    const prompt = buildReviewPrompt({ repo: project.repo, pullRequest, headCommit, issue: material.issue, standards, verification, ci, diff: material.diff + packaged });
+    const prepared = Object.freeze({ project: Object.freeze(project), pullRequest: Object.freeze(pullRequest), headCommit, model, prompt });
+    preparedObjects.add(prepared);
+    return prepared;
+  };
+  return Object.assign(async context => {
+    const prepared = context?.prepared || await prepare(context);
+    if (!preparedObjects.has(prepared)) throw preparationError('review_identity_mismatch', 'prepared material belongs to another adapter');
+    preparedObjects.delete(prepared); // one invocation per preparation
+    const { project, pullRequest, headCommit, model, prompt } = prepared;
+    const output = await runClaude(executeSpawn, model, prompt, timeoutMs, terminationGraceMs);
     await assertPrHeadUnchanged(project, pullRequest, headCommit, executeFile);
     return parseVerdict(output, model, headCommit);
-  }, { reviewer: 'claude' });
+  }, { reviewer: 'claude', prepare });
 }
 
 module.exports = { MAX_DIFF_BYTES, MAX_OUTPUT_BYTES, createClaudeReviewAdapter, githubReviewMaterial, repositoryStandards, buildReviewPrompt, parseVerdict, reviewerEnvironment, assertPrHeadUnchanged };

@@ -319,6 +319,13 @@ function validateJob(job, filePath) {
               : !hasValidCi(job) ? 'invalid CI state'
                 : job.verification != null && !isVerificationEvidence(job.verification) ? 'invalid deterministic verification state'
                 : !hasValidReview(job) ? 'invalid independent review state'
+                : job.reviewPreparationHistory !== undefined && (!Array.isArray(job.reviewPreparationHistory) || job.reviewPreparationHistory.length > 24
+                  || !job.reviewPreparationHistory.every((entry, index) => isPlainObject(entry) && entry.number === index + 1
+                    && typeof entry.commit === 'string' && entry.commit.length > 0 && typeof entry.startedAt === 'string'
+                    && ['running', 'prepared', 'blocked', 'retry_wait'].includes(entry.status)
+                    && (entry.status === 'running' || typeof entry.completedAt === 'string')
+                    && (entry.status !== 'retry_wait' || Number.isFinite(Date.parse(entry.nextEligibleAt)))
+                    && (!entry.diagnostics || typeof entry.diagnostics.code === 'string' && typeof entry.diagnostics.message === 'string' && entry.diagnostics.message.length <= 2048))) ? 'invalid review preparation history'
                 : !hasValidReviewHistory(job) ? 'invalid review attempt history'
                 : !hasValidReviewSkip(job) ? 'invalid review skip state'
                 : !hasValidReviewCorrection(job) ? 'invalid reviewer corrective cycle state'

@@ -766,3 +766,277 @@ test('malformed delivered or observed commit identities stop immediately without
     assert.equal(f.store.load(105).runs, 0);
   }
 });
+
+test('one-shot persisted R1 preflights the incident diff at the real Node buffer boundary without spending another review', async t => {
+  const f = await fixture(t);
+  await synchronizeIssueBranch(f, f.options);
+  const head = f.job.delivery.commit;
+  const state = require('../src/autopilot-state');
+  const oldAttempt = state.beginReviewAttempt(f.job, f.store.now, { reviewer: 'claude:sonnet', model: 'sonnet', policy: 'always', commit: f.oldHead });
+  state.recordReview(f.job, { reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: f.oldHead, policy: 'always', findings: 'Correct the original failure', attempt: oldAttempt }, f.store.now);
+  f.store.save(f.job);
+  const before = f.store.load(105);
+  const native = require('../src/execution-log').execFile;
+  const sourceFile = path.join(f.workspace.worktreePath, 'second.js');
+  const originalSource = fs.readFileSync(sourceFile);
+  fs.writeFileSync(sourceFile, 'x');
+  const initialDiff = git(f.workspace.worktreePath, 'diff') + '\n';
+  fs.writeFileSync(sourceFile, 'x'.repeat(1 + 258218 - Buffer.byteLength(initialDiff)));
+  const incidentDiff = git(f.workspace.worktreePath, 'diff') + '\n';
+  fs.writeFileSync(sourceFile, originalSource);
+  assert.equal(Buffer.byteLength(incidentDiff), 258218);
+  const diffFile = path.join(f.store.directory, 'incident.diff');
+  fs.writeFileSync(diffFile, incidentDiff);
+  let claudeCalls = 0, diffCalls = 0, sourceError;
+  const review = require('../src/autopilot-review').createClaudeReviewAdapter({
+    execFile(file, args, options, callback) {
+      if (file === 'git') return native(file, args, options, callback);
+      if (args[0] === 'issue') return callback(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
+      if (args[1] === 'view') return callback(null, JSON.stringify({ number: 117, headRefOid: head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+      assert.equal(args[1], 'diff'); diffCalls++;
+      assert.equal(options.maxBuffer, 245761);
+      return native('cat', [diffFile], options, (error, stdout, stderr) => {
+        sourceError = error;
+        callback(error, stdout, stderr);
+      });
+    }, spawn() { claudeCalls++; throw new Error('must not start Claude'); },
+  });
+  const clock = { time: Date.now(), green: true };
+  const tick = retryRunner(f, native, clock, { independentReview: review, mergePullRequest: async () => { throw new Error('must not merge'); } });
+  const captured = [];
+  await require('../src/execution-log').withExecution((event, details) => {
+    captured.push({ event, ...details });
+    f.store.appendIntegrationEvent(f.job, { event, ...details });
+  }, tick);
+  const diffCommand = captured.find(entry => entry.event === 'command' && entry.command === 'cat');
+  const rawDiff = Buffer.concat(captured.filter(entry => entry.commandId === diffCommand.commandId && entry.event === 'output' && entry.stream === 'stdout').map(entry => Buffer.from(entry.base64, 'base64')));
+  assert.equal(rawDiff.toString('utf8'), incidentDiff, 'complete captured diff survives the callback buffer limit in the owner journal');
+  assert.equal(sourceError.code, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+  const after = createJobStore(f.store.directory).load(105);
+  assert.equal(after.reviewAttempts, before.reviewAttempts);
+  assert.deepEqual(after.reviewHistory, before.reviewHistory);
+  assert.equal(claudeCalls, 0);
+  const failure = after.reviewPreparationHistory.at(-1);
+  assert.equal(failure.status, 'blocked');
+  assert.equal(failure.diagnostics.code, 'review_input_over_budget');
+  assert.equal(failure.diagnostics.sourceCode, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+  assert.equal(failure.diagnostics.observedBytesIsLowerBound, true);
+  assert.equal(failure.diagnostics.limitBytes, 245760);
+  assert.equal(failure.diagnostics.bufferBytes, 245761);
+  assert.ok(failure.diagnostics.observedBytes >= 245761);
+  assert.match(fs.readFileSync(failure.rawEvidence.file, 'utf8'), /ERR_CHILD_PROCESS_STDIO_MAXBUFFER/);
+  await tick();
+  assert.equal(diffCalls, 1);
+  assert.equal(claudeCalls, 0);
+});
+
+for (const mode of ['transient', 'auth', 'oversized diff', 'interrupted', 'stale initial head', 'stale rechecked head', 'empty diff']) {
+  test(`one-shot review preparation ${mode} is bounded and restart-safe without paid attempts`, async t => {
+    const f = await fixture(t);
+    await synchronizeIssueBranch(f, f.options);
+    const head = f.job.delivery.commit;
+    const native = require('node:child_process').execFile;
+    let diffs = 0, models = 0, heads = 0;
+    const adapter = require('../src/autopilot-review').createClaudeReviewAdapter({ execFile(file, args, opts, cb) {
+      if (file === 'git') return native(file, args, opts, cb);
+      if (args[0] === 'issue') return cb(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
+      if (args[1] === 'view') {
+        heads++;
+        const stale = mode === 'stale initial head' || mode === 'stale rechecked head' && heads === 2;
+        return cb(null, JSON.stringify({ number: 117, headRefOid: stale ? f.oldHead : head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+      }
+      diffs++;
+      if (mode === 'empty diff') return cb(null, ' \n');
+      if (mode === 'stale rechecked head') return cb(null, 'diff --git a/source.js b/source.js\n+change\n');
+      const message = mode === 'auth' ? 'HTTP 401: Bad credentials' : mode === 'oversized diff' ? 'HTTP 406: diff exceeded the maximum number of lines (20000)' : 'HTTP 503: transport interrupted';
+      return native('python3', ['-c', `import sys;sys.stderr.write(${JSON.stringify(message)});sys.exit(1)`], opts, cb);
+    }, spawn() { models++; throw new Error('must not call Claude'); } });
+    const clock = { time: Date.now(), green: true };
+    if (mode === 'interrupted') {
+      f.job.reviewPreparationHistory = [{ number: 1, commit: head, status: 'running', startedAt: new Date(clock.time).toISOString() }];
+      f.store.save(f.job);
+    }
+    const tick = retryRunner(f, native, clock, { independentReview: adapter });
+    await tick();
+    let saved = f.store.load(105);
+    assert.equal(saved.reviewAttempts, 0);
+    assert.equal(models, 0);
+    if (mode === 'transient') {
+      assert.equal(saved.reviewPreparationHistory[0].status, 'retry_wait');
+      assert.equal(saved.reviewPreparationHistory[0].diagnostics.code, 'github_transport');
+      await tick(); assert.equal(diffs, 1, 'deadline survives reload');
+      clock.time += 30001; await tick();
+      clock.time += 30001; await tick();
+      saved = f.store.load(105);
+      assert.equal(saved.reviewPreparationHistory.length, 3);
+      assert.equal(saved.reviewPreparationHistory.at(-1).status, 'blocked');
+      assert.equal(diffs, 3);
+      assert.equal(saved.terminal, true);
+      await tick(); assert.equal(diffs, 3);
+    } else {
+      assert.equal(saved.terminal, true);
+      assert.equal(diffs, ['auth', 'oversized diff', 'stale rechecked head', 'empty diff'].includes(mode) ? 1 : 0);
+      if (mode === 'auth' || mode === 'oversized diff') {
+        const failure = saved.reviewPreparationHistory[0];
+        assert.equal(failure.diagnostics.code, mode === 'auth' ? 'github_auth_denied' : 'review_input_over_budget');
+        assert.equal(failure.diagnostics.sourceCode, 1);
+        assert.equal(failure.diagnostics.observedBytesIsLowerBound, false);
+        assert.match(fs.readFileSync(failure.rawEvidence.file, 'utf8'), mode === 'auth' ? /Bad credentials/ : /diff exceeded the maximum number of lines/);
+      }
+      if (mode.startsWith('stale') || mode === 'empty diff') {
+        assert.equal(saved.reviewPreparationHistory[0].diagnostics.code, mode === 'empty diff' ? 'review_diff_absent' : 'review_identity_mismatch');
+      }
+      const lookups = heads;
+      await tick();
+      assert.equal(heads, lookups, 'permanent preparation failures never retry');
+      assert.equal(f.store.load(105).reviewPreparationHistory.length, 1);
+      assert.equal(diffs, ['auth', 'oversized diff', 'stale rechecked head', 'empty diff'].includes(mode) ? 1 : 0);
+    }
+  });
+}
+
+for (const verdict of ['NEEDS_CHANGES', 'timeout', 'invalid']) {
+  test(`one-shot prepared reviewer ${verdict} spends exactly one paid attempt`, async t => {
+    const f = await fixture(t);
+    await synchronizeIssueBranch(f, f.options);
+    const head = f.job.delivery.commit;
+    const native = require('node:child_process').execFile;
+    let calls = 0;
+    const review = require('../src/autopilot-review').createClaudeReviewAdapter({ timeoutMs: 20, execFile(file, args, opts, cb) {
+      if (file === 'git') return native(file, args, opts, cb);
+      if (args[0] === 'issue') return cb(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
+      if (args[1] === 'diff') return native('git', ['-C', f.project.checkout, 'diff', f.target, head], opts, cb);
+      cb(null, JSON.stringify({ number: 117, headRefOid: head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+    }, spawn() {
+      calls++;
+      const saved = f.store.load(105);
+      assert.equal(saved.reviewAttempts, 1);
+      assert.equal(saved.reviewPreparationHistory[0].status, 'prepared');
+      const { EventEmitter } = require('node:events');
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = new EventEmitter();
+      child.kill = () => { queueMicrotask(() => child.emit('close', 1)); return true; };
+      child.stdin.end = () => {
+        if (verdict === 'timeout') return;
+        queueMicrotask(() => {
+          child.stdout.emit('data', verdict === 'invalid' ? 'not a verdict' : JSON.stringify({ is_error: false, result: JSON.stringify({ verdict, commit: head, findings: 'Fix the defect' }) }));
+          child.emit('close', 0);
+        });
+      };
+      return child;
+    } });
+    await retryRunner(f, native, { time: Date.now(), green: true }, { independentReview: review })();
+    const saved = f.store.load(105);
+    assert.equal(saved.reviewAttempts, 1);
+    assert.equal(calls, 1);
+    assert.equal(saved.reviewHistory.length, 1);
+    assert.equal(saved.reviewHistory[0].status, verdict === 'NEEDS_CHANGES' ? 'completed' : verdict === 'timeout' ? 'timed_out' : 'invalid_verdict');
+    if (verdict === 'NEEDS_CHANGES') {
+      assert.equal(saved.review.verdict, verdict);
+      assert.equal(saved.status, 'review_correction_eligible');
+    } else assert.equal(saved.terminal, true);
+  });
+}
+
+
+test('exhausted exact-head review budget skips preparation and its context fetches', async t => {
+  const f = await fixture(t);
+  await synchronizeIssueBranch(f, f.options);
+  const state = require('../src/autopilot-state');
+  for (let index = 0; index < 2; index++) {
+    const attempt = state.beginReviewAttempt(f.job, f.store.now, { reviewer: 'claude:sonnet', model: 'sonnet', policy: 'always', commit: f.job.delivery.commit });
+    state.recordReview(f.job, { reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: f.job.delivery.commit, policy: 'always', findings: 'Correct the failure', attempt }, f.store.now);
+  }
+  f.store.save(f.job);
+  const before = f.store.load(105);
+  let fetches = 0, models = 0, preparations = 0;
+  const review = require('../src/autopilot-review').createClaudeReviewAdapter({
+    execFile() { fetches++; throw new Error('must not fetch review context'); },
+    spawn() { models++; throw new Error('must not start Claude'); },
+  });
+  const prepare = review.prepare;
+  review.prepare = context => { preparations++; return prepare(context); };
+  const tick = retryRunner(f, require('node:child_process').execFile, { time: Date.now(), green: true }, { independentReview: review });
+  await tick();
+  await tick();
+  const saved = f.store.load(105);
+  assert.deepEqual([preparations, fetches, models], [0, 0, 0]);
+  assert.equal(saved.reviewPreparationHistory?.length ?? 0, 0);
+  assert.equal(saved.reviewAttempts, before.reviewAttempts);
+  assert.deepEqual(saved.reviewHistory, before.reviewHistory);
+  assert.equal(saved.terminalState, 'ready_for_human');
+  assert.match(saved.failures.at(-1).message, /review attempt limit/);
+});
+
+for (const firstVerdict of ['timeout', 'invalid']) {
+  test(`one-shot successful preparation does not exhaust retry budget before eligible second review after ${firstVerdict}`, async t => {
+    const f = await fixture(t);
+    await synchronizeIssueBranch(f, f.options);
+    const head = f.job.delivery.commit;
+    const native = require('node:child_process').execFile;
+    let diffs = 0, models = 0;
+    const review = require('../src/autopilot-review').createClaudeReviewAdapter({ timeoutMs: 20,
+      execFile(file, args, opts, cb) {
+        if (file === 'git') return native(file, args, opts, cb);
+        if (args[0] === 'issue') return cb(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
+        if (args[1] === 'diff') {
+          diffs++;
+          if (diffs <= 2) return cb(Object.assign(new Error('HTTP 503: unavailable'), { code: 1 }), '', 'HTTP 503: unavailable');
+          return native('git', ['-C', f.project.checkout, 'diff', f.target, head], opts, cb);
+        }
+        cb(null, JSON.stringify({ number: 117, headRefOid: head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+      },
+      spawn() {
+        models++;
+        const saved = f.store.load(105);
+        assert.equal(saved.reviewAttempts, models, 'paid budget is reserved durably and never reset');
+        assert.equal(saved.reviewPreparationHistory.at(-1).status, 'prepared');
+        const { EventEmitter } = require('node:events');
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = new EventEmitter();
+        child.kill = () => { queueMicrotask(() => child.emit('close', 1)); return true; };
+        child.stdin.end = () => {
+          if (models === 1 && firstVerdict === 'timeout') return;
+          queueMicrotask(() => {
+            child.stdout.emit('data', models === 1 ? 'invalid verdict' : JSON.stringify({ is_error: false, result: JSON.stringify({ verdict: 'PASS', commit: head, findings: '' }) }));
+            child.emit('close', 0);
+          });
+        };
+        return child;
+      },
+    });
+    const clock = { time: Date.now(), green: true };
+    const tick = retryRunner(f, native, clock, { independentReview: review });
+    await tick();
+    clock.time += 30001; await tick();
+    assert.deepEqual(f.store.load(105).reviewPreparationHistory.map(entry => entry.status), ['retry_wait', 'retry_wait']);
+    clock.time += 30001; await tick();
+    const failed = f.store.load(105);
+    assert.deepEqual(failed.reviewPreparationHistory.map(entry => entry.status), ['retry_wait', 'retry_wait', 'prepared']);
+    assert.equal(failed.reviewAttempts, 1);
+    assert.equal(failed.reviewHistory[0].status, firstVerdict === 'timeout' ? 'timed_out' : 'invalid_verdict');
+    assert.equal(failed.terminal, true, 'existing terminal policy is preserved');
+    // A terminal failed attempt cannot be rearmed. Arrange a separate eligible
+    // successor store, keeping the predecessor and its raw history immutable.
+    // Carry the paid counter as a legacy reservation (the public runner accounts
+    // for reservations without active history), so the second call still uses
+    // attempt 2 and cannot silently acquire a fresh model budget.
+    const predecessorStore = f.store;
+    f.store = createJobStore(path.join(predecessorStore.directory, 'successor'));
+    const eligible = structuredClone(failed);
+    Object.assign(eligible, { terminal: false, terminalState: null, status: 'awaiting_ci', reviewHistory: [] });
+    f.store.save(eligible);
+    await tick();
+    const saved = createJobStore(f.store.directory).load(105);
+    assert.equal(models, 2, JSON.stringify({ status: saved.status, failures: saved.failures, preparations: saved.reviewPreparationHistory }));
+    assert.equal(diffs, 4);
+    assert.equal(saved.reviewAttempts, 2);
+    assert.deepEqual(predecessorStore.load(105), failed, 'terminal predecessor evidence is immutable');
+    assert.equal(saved.reviewHistory[0].number, 2);
+    assert.deepEqual(saved.reviewPreparationHistory.slice(0, 3), failed.reviewPreparationHistory);
+    assert.deepEqual(saved.reviewPreparationHistory.map(entry => entry.status), ['retry_wait', 'retry_wait', 'prepared', 'prepared']);
+    assert.equal(saved.review.verdict, 'PASS');
+    assert.equal(saved.review.commit, head);
+    assert.equal(saved.status, 'merged');
+  });
+}

@@ -26,8 +26,8 @@ function commands({ head = sha, heads, diff = 'diff --git a/a.js b/a.js\n+safe p
     assert.equal(options.killSignal, 'SIGTERM');
     assert.equal(options.env.GH_PROMPT_DISABLED, '1');
     assert.equal(options.env.GIT_TERMINAL_PROMPT, '0');
-    if (file === 'gh' && args[0] === 'pr' && args[1] === 'view') callback(null, JSON.stringify({ number: 42, headRefOid: heads ? heads[headLookups++] : head }));
-    else if (file === 'gh' && args[0] === 'issue') callback(null, JSON.stringify({ number: 7, title: issue.title, body: issue.body }));
+    if (file === 'gh' && args[0] === 'pr' && args[1] === 'view') callback(null, JSON.stringify({ number: 42, url: 'https://github.com/example/repo/pull/42', isCrossRepository: false, headRefOid: heads ? heads[headLookups++] : head }));
+    else if (file === 'gh' && args[0] === 'issue') callback(null, JSON.stringify({ number: 7, url: 'https://github.com/example/repo/issues/7', title: issue.title, body: issue.body }));
     else if (file === 'gh' && args[0] === 'pr' && args[1] === 'diff') callback(null, diff);
     else if (file === 'git' && args.includes('ls-tree')) callback(null, 'AGENTS.md\0src/AGENTS.md\0README.md\0');
     else if (file === 'git' && args.includes('show')) callback(null, `standards for ${args.at(-1)}`);
@@ -51,14 +51,14 @@ test('Claude reviewer gathers current PR diff, immutable standards, CI evidence,
   const result = await adapter(command, claude)({ project, issue, pullRequest, headCommit: sha, verification: verificationEvidence, ci: { state: 'green', details: 'checks passed' } });
   assert.deepEqual(result, { reviewer: 'claude:sonnet', verdict: 'PASS', commit: sha });
   assert.deepEqual(command.calls.map(([file, args]) => [file, args]), [
-    ['gh', ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,headRefOid']],
-    ['gh', ['issue', 'view', '7', '--repo', 'example/repo', '--json', 'number,title,body']],
+    ['gh', ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,headRefOid,url,isCrossRepository']],
+    ['gh', ['issue', 'view', '7', '--repo', 'example/repo', '--json', 'number,title,body,url']],
     ['gh', ['pr', 'diff', '42', '--repo', 'example/repo']],
-    ['gh', ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,headRefOid']],
+    ['gh', ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,headRefOid,url,isCrossRepository']],
     ['git', ['-C', '/safe/checkout', 'ls-tree', '-r', '-z', '--name-only', sha]],
     ['git', ['-C', '/safe/checkout', 'show', `${sha}:AGENTS.md`]],
     ['git', ['-C', '/safe/checkout', 'show', `${sha}:src/AGENTS.md`]],
-    ['gh', ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,headRefOid']],
+    ['gh', ['pr', 'view', '42', '--repo', 'example/repo', '--json', 'number,headRefOid,url,isCrossRepository']],
   ]);
   const [commandName, args, options, child] = claude.calls[0];
   assert.equal(commandName, 'claude');
@@ -308,3 +308,157 @@ test('full original verifier output persists through durable Ralph job state whi
   assert.deepEqual(after,original);
   assert.ok(fs.existsSync(path.join(directory,'issue-7.execution.ndjson')));
 });
+
+test('prepared material is immutable, adapter-bound and one-use; caller mutations cannot change its head or prompt', async () => {
+  const command = commands(), claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  const review = adapter(command, claude);
+  const context = { project: { ...project }, issue: { ...issue }, pullRequest: { ...pullRequest }, headCommit: sha, verification: { ...verificationEvidence } };
+  const prepared = await review.prepare(context);
+  const lookups = command.calls.length;
+  context.project.repo = 'wrong/repo'; context.verification.stdout = 'fabricated';
+  assert.equal(Object.isFrozen(prepared), true);
+  await assert.rejects(adapter(commands(), reviewer())({ prepared }), /another adapter/);
+  assert.equal((await review({ prepared })).verdict, 'PASS');
+  assert.equal(command.calls.length, lookups + 1, 'only remote head recheck follows preparation');
+  await assert.rejects(review({ prepared }), /another adapter/);
+  assert.equal(claude.calls.length, 1);
+});
+
+test('actual Git patch with losslessly packaged logs preserves every source change and validates archived bytes before Claude', async t => {
+  const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'packaged-review-'));
+  t.after(() => fs.rmSync(checkout, { recursive: true, force: true }));
+  const git = (...args) => {
+    try { return execFileSync('git', args, { cwd: checkout, encoding: 'utf8', stdio: 'pipe' }); }
+    catch (error) { if (error.status === 0) return error.stdout; throw error; }
+  };
+  git('init', '-b', 'main'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
+  fs.writeFileSync(path.join(checkout, 'source.js'), 'module.exports = 1;\n');
+  git('add', '.'); git('commit', '-m', 'base');
+  const base = git('rev-parse', 'HEAD').trim();
+  fs.mkdirSync(path.join(checkout, 'docs/evidence/review'), { recursive: true });
+  const original = 'docs/evidence/verification.log';
+  const logs = Buffer.from('complete original stdout/stderr\n' + 'ok verification\n'.repeat(18000));
+  fs.writeFileSync(path.join(checkout, original), logs);
+  fs.writeFileSync(path.join(checkout, 'source.js'), 'module.exports = 2;\n');
+  git('add', '.'); git('commit', '-m', 'source and full logs');
+  const sourceCommit = git('rev-parse', 'HEAD').trim();
+  const archive = 'docs/evidence/review/verification.log.gz';
+  const gzip = require('node:zlib').gzipSync(logs);
+  const digest = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
+  const valid = { version: 1, entries: [{ original, archive, sourceCommit, bytes: logs.length, sha256: digest(logs), gzip_sha256: digest(gzip) }] };
+  fs.writeFileSync(path.join(checkout, original), 'changed original bytes\n');
+  git('add', '.'); git('commit', '-m', 'change original log after manifest recorded');
+  const changedSourceCommit = git('rev-parse', 'HEAD').trim();
+  assert.notEqual(git('show', `${changedSourceCommit}:${original}`), logs.toString());
+  fs.unlinkSync(path.join(checkout, original));
+  const manifestPath = path.join(checkout, 'docs/evidence/review/manifest.json');
+  for (const mode of ['valid', 'wrong digest', 'corrupt gzip', 'changed source', 'missing source', 'source masquerade', 'over budget']) {
+    fs.writeFileSync(path.join(checkout, archive), mode === 'corrupt gzip' ? Buffer.from('broken gzip') : gzip);
+    const manifest = structuredClone(valid);
+    if (mode === 'wrong digest') manifest.entries[0].sha256 = '0'.repeat(64);
+    if (mode === 'changed source') manifest.entries[0].sourceCommit = changedSourceCommit;
+    if (mode === 'missing source') manifest.entries[0].sourceCommit = base;
+    if (mode === 'source masquerade') manifest.entries[0].original = 'source.js';
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    fs.writeFileSync(path.join(checkout, 'source.js'), mode === 'over budget' ? 'x'.repeat(258218) : 'module.exports = 2;\n');
+    git('add', '.'); git('commit', '--allow-empty', '-m', mode);
+    const head = git('rev-parse', 'HEAD').trim();
+    const diff = git('diff', base, head);
+    const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: head, findings: '' }) });
+    const review = createClaudeReviewAdapter({ spawn: claude.spawn, execFile(file, args, options, cb) {
+      if (file === 'git') return execFile(file, args, options, cb);
+      if (args[0] === 'issue') return cb(null, JSON.stringify({ ...issue, url: 'https://github.com/example/repo/issues/7' }));
+      if (args[1] === 'diff') return cb(null, diff);
+      return cb(null, JSON.stringify({ number: 42, headRefOid: head, url: 'https://github.com/example/repo/pull/42', isCrossRepository: false, baseRefOid: base }));
+    } });
+    const context = { project: { ...project, checkout }, issue, pullRequest, headCommit: head, verification: { ...verificationEvidence, commit: head } };
+    if (mode === 'valid') {
+      assert.equal((await review(context)).verdict, 'PASS');
+      assert.match(claude.calls[0][3].prompt, /module.exports = 2/);
+      assert.match(claude.calls[0][3].prompt, /Validated lossless evidence manifest/);
+      assert.ok(!diff.includes('ok verification'), 'complete log remains lossless in gzip and ancestor Git blob');
+    } else {
+      await assert.rejects(review(context), error => {
+        assert.equal(error.code, mode === 'over budget' ? 'review_input_over_budget' : 'review_evidence_integrity');
+        assert.equal((error.message.match(/Claude review failed closed:/g) || []).length, 1);
+        if (mode === 'changed source') assert.match(error.message, /compressed or original bytes\/digests differ/);
+        if (mode === 'missing source') {
+          assert.equal(error.sourceCode, 128);
+          assert.equal(error.rawStdout, '');
+          assert.match(error.rawStderr, /does not exist/);
+          assert.equal(error.cause.code, 'review_context_unavailable');
+          assert.equal(error.cause.cause.code, 128);
+        }
+        return true;
+      });
+      assert.equal(claude.calls.length, 0);
+    }
+  }
+});
+
+for (const scenario of [
+  { name: 'wrong repository', change: value => ({ ...value, url: 'https://github.com/other/repo/pull/42' }), code: 'review_identity_mismatch' },
+  { name: 'wrong PR', change: value => ({ ...value, number: 99 }), code: 'review_identity_mismatch' },
+  { name: 'fork identity', change: value => ({ ...value, isCrossRepository: true }), code: 'review_identity_mismatch' },
+  { name: 'malformed context', change: () => '{bad JSON', code: 'review_context_malformed' },
+]) {
+  test(`preparation specifically blocks ${scenario.name} before model invocation`, async () => {
+    const command = commands(), execute = command.execFile, claude = reviewer();
+    command.execFile = (file, args, options, cb) => execute(file, args, options, (error, stdout) => {
+      if (file === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        const changed = scenario.change(JSON.parse(stdout));
+        return cb(error, typeof changed === 'string' ? changed : JSON.stringify(changed));
+      }
+      cb(error, stdout);
+    });
+    await assert.rejects(adapter(command, claude).prepare({ project, issue, pullRequest, headCommit: sha, verification: verificationEvidence }), error => error.code === scenario.code);
+    assert.equal(claude.calls.length, 0);
+    assert.ok(!command.calls.some(([file, args]) => file === 'gh' && args[1] === 'diff'), 'identity fails before diff fetch');
+  });
+}
+
+test('source changes documenting the evidence protocol are reviewed without requiring an evidence manifest', async () => {
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  const command = commands({ diff: "diff --git a/src/example.js b/src/example.js\n+const root = 'docs/evidence/review/';\n" });
+  assert.equal((await adapter(command, claude)({ project, issue, pullRequest, headCommit: sha, verification: verificationEvidence })).verdict, 'PASS');
+  assert.match(claude.calls[0][3].prompt, /docs\/evidence\/review/);
+});
+
+
+test('canonical GitHub repository casing is accepted during preparation and post-model head recheck', async () => {
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  const result = await adapter(commands(), claude)({ project: { ...project, repo: 'Example/Repo' }, issue, pullRequest, headCommit: sha, verification: verificationEvidence });
+  assert.equal(result.verdict, 'PASS');
+  assert.equal(claude.calls.length, 1);
+});
+
+for (const scenario of [
+  { name: 'buffer overflow', sourceCode: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', stderr: 'buffer full', code: 'review_input_over_budget', lowerBound: true },
+  { name: 'GitHub excessive diff HTTP 406', sourceCode: 1, stderr: 'HTTP 406: diff exceeded the maximum number of lines (20000)', code: 'review_input_over_budget' },
+  { name: 'GitHub excessive diff message', sourceCode: 1, stderr: 'diff exceeded the maximum number of lines', code: 'review_input_over_budget' },
+  { name: 'auth failure', sourceCode: 1, stderr: 'HTTP 401: Bad credentials', code: 'github_auth_denied' },
+  { name: 'network failure', sourceCode: 'ECONNRESET', stderr: 'connection reset', code: 'github_transport' },
+  { name: 'ordinary failure', sourceCode: 1, stderr: 'command failed', code: 'review_context_unavailable' },
+  { name: 'Git exit 128', sourceCode: 128, stderr: 'fatal: invalid object name', code: 'review_context_unavailable', git: true },
+]) {
+  test(`review adapter retains complete raw cause and truthful byte diagnostics for ${scenario.name}`, async () => {
+    const command = commands(), execute = command.execFile, claude = reviewer();
+    const original = Object.assign(new Error(scenario.stderr), { code: scenario.sourceCode });
+    const stdout = 'captured output: π\n';
+    command.execFile = (file, args, options, cb) => {
+      if (scenario.git ? file === 'git' : file === 'gh' && args[1] === 'diff') return cb(original, stdout, scenario.stderr);
+      return execute(file, args, options, cb);
+    };
+    await assert.rejects(adapter(command, claude).prepare({ project, issue, pullRequest, headCommit: sha, verification: verificationEvidence }), error => {
+      assert.equal(error.code, scenario.code);
+      assert.equal(error.sourceCode, scenario.sourceCode);
+      assert.equal(error.cause, original);
+      assert.equal(error.rawStdout, stdout);
+      assert.equal(error.rawStderr, scenario.stderr);
+      assert.equal(error.observedBytes, Buffer.byteLength(stdout));
+      assert.equal(error.observedBytesIsLowerBound, Boolean(scenario.lowerBound));
+      return true;
+    });
+    assert.equal(claude.calls.length, 0);
+  });
+}
