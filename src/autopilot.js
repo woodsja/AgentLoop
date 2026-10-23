@@ -581,21 +581,69 @@ async function run(argv, dependencies = {}) {
             const model = reviewPullRequest.model || project.reviewModel || 'sonnet';
             const reviewer = reviewPullRequest.reviewer === 'claude' || reviewPullRequest === realReviewAdapter
               ? `claude:${model}` : reviewPullRequest.reviewer || 'independent-review-adapter';
+            const reviewContext = {
+              project, issue: candidate, pullRequest: { ...job.pr, headCommit: job.delivery.commit },
+              headCommit: job.delivery.commit, verification: job.verification, ci: job.ci,
+            };
+            let prepared;
+            if (typeof reviewPullRequest.prepare === 'function') {
+              phase = 'review_preparation';
+              const history = job.reviewPreparationHistory ||= [];
+              const previous = history.at(-1);
+              const sameHead = history.filter(entry => entry.commit === job.delivery.commit);
+              if (history.length >= 24 || previous && previous.commit === job.delivery.commit
+                && (previous.status === 'running' || previous.status === 'blocked' || sameHead.length >= 3)) {
+                if (previous?.status === 'running') {
+                  Object.assign(previous, { status: 'blocked', completedAt: store.now(),
+                    diagnostics: { code: 'review_preparation_interrupted', message: 'Preparation was interrupted before model start; owner correction is required.' },
+                    rawEvidence: job.executionJournal,
+                  });
+                  store.appendIntegrationEvent?.(job, { event: 'review_preparation_interrupted', commit: previous.commit });
+                }
+                handToHuman(job, phase, 'Review preparation requires owner correction; retained diagnostics and evidence are in reviewPreparationHistory.', store.now);
+                store.save(job);
+                return { issue: candidate, job, outcome: { status: READY_FOR_HUMAN } };
+              }
+              if (previous?.commit === job.delivery.commit && previous.nextEligibleAt && Date.parse(store.now()) < Date.parse(previous.nextEligibleAt)) {
+                store.save(job);
+                return { issue: candidate, job, outcome: { status: 'awaiting_ci' } };
+              }
+              const preparation = { number: history.length + 1, commit: job.delivery.commit, status: 'running', startedAt: store.now() };
+              history.push(preparation);
+              // An interrupted preparation is never automatically repeated.
+              store.save(job);
+              try {
+                prepared = await reviewPullRequest.prepare(reviewContext);
+                Object.assign(preparation, { status: 'prepared', completedAt: store.now() });
+                store.save(job);
+              } catch (error) {
+                const retry = error.code === 'github_transport' && sameHead.length < 2;
+                const diagnostic = {
+                  code: error.code || 'review_context_invalid', sourceCode: error.sourceCode,
+                  operation: error.operation, limitBytes: error.limitBytes, bufferBytes: error.bufferBytes,
+                  observedBytes: error.observedBytes, observedBytesIsLowerBound: error.observedBytesIsLowerBound,
+                  message: errorMessage(error), stack: error.stack, rawStdout: error.rawStdout, rawStderr: error.rawStderr, cause: error.cause && { message: error.cause.message, code: error.cause.code, stack: error.cause.stack },
+                };
+                store.appendIntegrationEvent?.(job, { event: 'review_preparation_failed', ...diagnostic });
+                Object.assign(preparation, { status: retry ? 'retry_wait' : 'blocked', completedAt: store.now(),
+                  diagnostics: { ...diagnostic, message: diagnostic.message.slice(0, 2048), stack: undefined, cause: undefined, rawStdout: undefined, rawStderr: undefined },
+                  rawEvidence: job.executionJournal || { file: store.jobPath(job.issue.number).replace(/\.json$/, '.execution.ndjson') },
+                  ...(retry ? { nextEligibleAt: new Date(Date.parse(store.now()) + 30000).toISOString() } : {}),
+                });
+                if (!retry) handToHuman(job, phase, errorMessage(error), store.now);
+                store.save(job);
+                return { issue: candidate, job, outcome: { status: retry ? 'awaiting_ci' : READY_FOR_HUMAN } };
+              }
+            }
+            phase = 'review';
             const attempt = beginReviewAttempt(job, store.now, { reviewer, model, policy: project.reviewPolicy, commit: job.delivery.commit });
-            // Consume the attempt number durably before the paid reviewer runs.
+            // All input is now valid. Reserve durably immediately before the
+            // paid invocation; a crash here cannot duplicate a model call.
             store.save(job);
             let review;
             try {
               review = typeof reviewPullRequest === 'function'
-                ? await reviewPullRequest({
-                  project,
-                  issue: candidate,
-                  pullRequest: { ...job.pr, headCommit: job.delivery.commit },
-                  headCommit: job.delivery.commit,
-                  verification: job.verification,
-                  ci: job.ci,
-                })
-                : null;
+                ? await reviewPullRequest(prepared ? { prepared } : reviewContext) : null;
             } catch (error) {
               const failed = failReviewAttempt(job, attempt.number, error, store.now);
               store.save(job);

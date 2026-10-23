@@ -37,6 +37,12 @@ without attributed history count against the current SHA. No review history is
 reset. A malformed verdict, exception or interrupted reviewer remains fail
 closed under the existing review policy.
 
+Review context preparation runs before a paid attempt is reserved. Oversized
+diffs, identity/integrity failures, and interrupted preparation require owner
+correction; transient preparation failures have a separate persisted retry
+budget. See [review preparation and lossless evidence packaging](review-evidence.md)
+for diagnostics, exact byte/digest checks, and the owner packaging protocol.
+
 `integrationActive` records the current transition before merge, worker,
 commit, verifier and push side effects. `integrationHistory` retains finalized
 records with identities, old/target/final SHAs, affected paths, stages, worker

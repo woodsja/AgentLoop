@@ -766,3 +766,154 @@ test('malformed delivered or observed commit identities stop immediately without
     assert.equal(f.store.load(105).runs, 0);
   }
 });
+
+test('one-shot persisted R1 preflights the incident diff at the real Node buffer boundary without spending another review', async t => {
+  const f = await fixture(t);
+  await synchronizeIssueBranch(f, f.options);
+  const head = f.job.delivery.commit;
+  const state = require('../src/autopilot-state');
+  const oldAttempt = state.beginReviewAttempt(f.job, f.store.now, { reviewer: 'claude:sonnet', model: 'sonnet', policy: 'always', commit: f.oldHead });
+  state.recordReview(f.job, { reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: f.oldHead, policy: 'always', findings: 'Correct the original failure', attempt: oldAttempt }, f.store.now);
+  f.store.save(f.job);
+  const before = f.store.load(105);
+  const native = require('../src/execution-log').execFile;
+  const sourceFile = path.join(f.workspace.worktreePath, 'second.js');
+  const originalSource = fs.readFileSync(sourceFile);
+  fs.writeFileSync(sourceFile, 'x');
+  const initialDiff = git(f.workspace.worktreePath, 'diff') + '\n';
+  fs.writeFileSync(sourceFile, 'x'.repeat(1 + 258218 - Buffer.byteLength(initialDiff)));
+  const incidentDiff = git(f.workspace.worktreePath, 'diff') + '\n';
+  fs.writeFileSync(sourceFile, originalSource);
+  assert.equal(Buffer.byteLength(incidentDiff), 258218);
+  const diffFile = path.join(f.store.directory, 'incident.diff');
+  fs.writeFileSync(diffFile, incidentDiff);
+  let claudeCalls = 0, diffCalls = 0, sourceError;
+  const review = require('../src/autopilot-review').createClaudeReviewAdapter({
+    execFile(file, args, options, callback) {
+      if (file === 'git') return native(file, args, options, callback);
+      if (args[0] === 'issue') return callback(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
+      if (args[1] === 'view') return callback(null, JSON.stringify({ number: 117, headRefOid: head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+      assert.equal(args[1], 'diff'); diffCalls++;
+      assert.equal(options.maxBuffer, 245761);
+      return native('cat', [diffFile], options, (error, stdout, stderr) => {
+        sourceError = error;
+        callback(error, stdout, stderr);
+      });
+    }, spawn() { claudeCalls++; throw new Error('must not start Claude'); },
+  });
+  const clock = { time: Date.now(), green: true };
+  const tick = retryRunner(f, native, clock, { independentReview: review, mergePullRequest: async () => { throw new Error('must not merge'); } });
+  const captured = [];
+  await require('../src/execution-log').withExecution((event, details) => {
+    captured.push({ event, ...details });
+    f.store.appendIntegrationEvent(f.job, { event, ...details });
+  }, tick);
+  const diffCommand = captured.find(entry => entry.event === 'command' && entry.command === 'cat');
+  const rawDiff = Buffer.concat(captured.filter(entry => entry.commandId === diffCommand.commandId && entry.event === 'output' && entry.stream === 'stdout').map(entry => Buffer.from(entry.base64, 'base64')));
+  assert.equal(rawDiff.toString('utf8'), incidentDiff, 'complete captured diff survives the callback buffer limit in the owner journal');
+  assert.equal(sourceError.code, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+  const after = createJobStore(f.store.directory).load(105);
+  assert.equal(after.reviewAttempts, before.reviewAttempts);
+  assert.deepEqual(after.reviewHistory, before.reviewHistory);
+  assert.equal(claudeCalls, 0);
+  const failure = after.reviewPreparationHistory.at(-1);
+  assert.equal(failure.status, 'blocked');
+  assert.equal(failure.diagnostics.code, 'review_input_over_budget');
+  assert.equal(failure.diagnostics.sourceCode, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+  assert.equal(failure.diagnostics.limitBytes, 245760);
+  assert.equal(failure.diagnostics.bufferBytes, 245761);
+  assert.ok(failure.diagnostics.observedBytes >= 245761);
+  assert.match(fs.readFileSync(failure.rawEvidence.file, 'utf8'), /ERR_CHILD_PROCESS_STDIO_MAXBUFFER/);
+  await tick();
+  assert.equal(diffCalls, 1);
+  assert.equal(claudeCalls, 0);
+});
+
+for (const mode of ['transient', 'auth', 'interrupted']) {
+  test(`one-shot review preparation ${mode} is bounded and restart-safe without paid attempts`, async t => {
+    const f = await fixture(t);
+    await synchronizeIssueBranch(f, f.options);
+    const head = f.job.delivery.commit;
+    const native = require('node:child_process').execFile;
+    let diffs = 0, models = 0;
+    const adapter = require('../src/autopilot-review').createClaudeReviewAdapter({ execFile(file, args, opts, cb) {
+      if (file === 'git') return native(file, args, opts, cb);
+      if (args[0] === 'issue') return cb(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
+      if (args[1] === 'view') return cb(null, JSON.stringify({ number: 117, headRefOid: head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+      diffs++;
+      const message = mode === 'auth' ? 'HTTP 401: Bad credentials' : 'HTTP 503: transport interrupted';
+      return native('python3', ['-c', `import sys;sys.stderr.write(${JSON.stringify(message)});sys.exit(1)`], opts, cb);
+    }, spawn() { models++; throw new Error('must not call Claude'); } });
+    const clock = { time: Date.now(), green: true };
+    if (mode === 'interrupted') {
+      f.job.reviewPreparationHistory = [{ number: 1, commit: head, status: 'running', startedAt: new Date(clock.time).toISOString() }];
+      f.store.save(f.job);
+    }
+    const tick = retryRunner(f, native, clock, { independentReview: adapter });
+    await tick();
+    let saved = f.store.load(105);
+    assert.equal(saved.reviewAttempts, 0);
+    assert.equal(models, 0);
+    if (mode === 'transient') {
+      assert.equal(saved.reviewPreparationHistory[0].status, 'retry_wait');
+      assert.equal(saved.reviewPreparationHistory[0].diagnostics.code, 'github_transport');
+      await tick(); assert.equal(diffs, 1, 'deadline survives reload');
+      clock.time += 30001; await tick();
+      clock.time += 30001; await tick();
+      saved = f.store.load(105);
+      assert.equal(saved.reviewPreparationHistory.length, 3);
+      assert.equal(saved.reviewPreparationHistory.at(-1).status, 'blocked');
+      assert.equal(diffs, 3);
+      assert.equal(saved.terminal, true);
+      await tick(); assert.equal(diffs, 3);
+    } else {
+      assert.equal(saved.terminal, true);
+      assert.equal(diffs, mode === 'auth' ? 1 : 0);
+      if (mode === 'auth') assert.equal(saved.reviewPreparationHistory[0].diagnostics.code, 'github_auth_denied');
+      await tick(); assert.equal(diffs, mode === 'auth' ? 1 : 0);
+    }
+  });
+}
+
+for (const verdict of ['NEEDS_CHANGES', 'timeout', 'invalid']) {
+  test(`one-shot prepared reviewer ${verdict} spends exactly one paid attempt`, async t => {
+    const f = await fixture(t);
+    await synchronizeIssueBranch(f, f.options);
+    const head = f.job.delivery.commit;
+    const native = require('node:child_process').execFile;
+    let calls = 0;
+    const review = require('../src/autopilot-review').createClaudeReviewAdapter({ timeoutMs: 20, execFile(file, args, opts, cb) {
+      if (file === 'git') return native(file, args, opts, cb);
+      if (args[0] === 'issue') return cb(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
+      if (args[1] === 'diff') return native('git', ['-C', f.project.checkout, 'diff', f.target, head], opts, cb);
+      cb(null, JSON.stringify({ number: 117, headRefOid: head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+    }, spawn() {
+      calls++;
+      const saved = f.store.load(105);
+      assert.equal(saved.reviewAttempts, 1);
+      assert.equal(saved.reviewPreparationHistory[0].status, 'prepared');
+      const { EventEmitter } = require('node:events');
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = new EventEmitter();
+      child.kill = () => { queueMicrotask(() => child.emit('close', 1)); return true; };
+      child.stdin.end = () => {
+        if (verdict === 'timeout') return;
+        queueMicrotask(() => {
+          child.stdout.emit('data', verdict === 'invalid' ? 'not a verdict' : JSON.stringify({ is_error: false, result: JSON.stringify({ verdict, commit: head, findings: 'Fix the defect' }) }));
+          child.emit('close', 0);
+        });
+      };
+      return child;
+    } });
+    await retryRunner(f, native, { time: Date.now(), green: true }, { independentReview: review })();
+    const saved = f.store.load(105);
+    assert.equal(saved.reviewAttempts, 1);
+    assert.equal(calls, 1);
+    assert.equal(saved.reviewHistory.length, 1);
+    assert.equal(saved.reviewHistory[0].status, verdict === 'NEEDS_CHANGES' ? 'completed' : verdict === 'timeout' ? 'timed_out' : 'invalid_verdict');
+    if (verdict === 'NEEDS_CHANGES') {
+      assert.equal(saved.review.verdict, verdict);
+      assert.equal(saved.status, 'review_correction_eligible');
+    } else assert.equal(saved.terminal, true);
+  });
+}

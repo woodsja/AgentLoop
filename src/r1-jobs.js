@@ -76,6 +76,7 @@ function evidence(job) {
     review: review(job.review),
     environmentPreflight: job.environmentPreflight,
     reviewAttempts: job.reviewAttempts,
+    reviewPreparationHistory: job.reviewPreparationHistory || [],
     reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: ownerText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && ownerText(entry.diagnostics) })),
     diagnostics: (job.failures || []).map(failure => ({ ...failure, message: ownerText(failure.message) })),
   };
