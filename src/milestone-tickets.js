@@ -13,7 +13,7 @@ const ticketDigest = issue => hash(JSON.stringify([issue.title, issue.body]));
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 function requestInput(options) {
-  const r = read(options.inputPath);
+  const r = options.request || read(options.inputPath);
   const fields = ['repo', 'issue', 'grantDigest', 'revision', 'spec', 'ticketDigest', 'category', 'scope', 'reason'];
   if (!r || Object.keys(r).sort().join() !== fields.sort().join()
     || typeof r.repo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(r.repo)
@@ -92,6 +92,9 @@ async function ticketCommand(action, id, options) {
     try { rejection = checkGrant(); } catch (e) { rejection = e.message; }
     if (rejection) { const out = result('DENY', rejection); record('preview', out); return finish(out); }
     const key = `${request.repo}#${request.issue}`;
+    if (Object.entries(db.grants).some(([otherId, other]) => otherId !== id && Object.hasOwn(other.receipts || {}, key))) {
+      return finish(result('NEEDS_APPROVAL', 'Another grant already retains a receipt for this issue; owner reconciliation required.'));
+    }
     receipt = Object.hasOwn(g.receipts, key) ? g.receipts[key] : null;
     if (receipt && (receipt.digest !== digest || receipt.grantId !== id || receipt.grantDigest !== g.digest || receipt.revision !== g.revision
       || JSON.stringify(receipt.request) !== JSON.stringify(request) || !receipt.issue
@@ -101,10 +104,22 @@ async function ticketCommand(action, id, options) {
 
     const gh = args => withExecution(options.recordExecution || options.record || (() => {}),
       async () => JSON.parse(await runGh(args, options.execFile || execFile, 'Milestone ticket authorization')));
+    const native = options.nativeBlockers === true || Array.isArray(receipt?.issue?.nativeBlockers);
+    if (options.nativeBlockers === true && receipt && !Array.isArray(receipt.issue.nativeBlockers)) {
+      return finish(result('NEEDS_APPROVAL', 'Existing receipt does not bind native blockers; retain it for owner reconciliation.'));
+    }
+    const checkIssue = async () => {
+      issue = await gh(['api', endpoint]); blockers = validIssue(issue, request, label, receipt);
+      if (native) {
+        const actual = await require('./milestone-blockers').nativeBlockers(request.repo, issue.number, gh);
+        if (JSON.stringify(actual) !== JSON.stringify([...blockers].sort((a, b) => a - b))) throw new Error('Native blockers conflict with exact Depends on metadata; owner review required.');
+        if (receipt && JSON.stringify(receipt.issue.nativeBlockers) !== JSON.stringify(actual)) throw new Error('Receipted native blocker evidence changed; owner review required.');
+      }
+    };
     const endpoint = `repos/${request.repo}/issues/${request.issue}`;
     try {
       if (typeof label !== 'string' || !label.trim() || /[\x00-\x1f\x7f]/.test(label)) throw new Error('Missing configured ready label.');
-      issue = await gh(['api', endpoint]); blockers = validIssue(issue, request, label, receipt);
+      await checkIssue();
     } catch (e) { const out = result('WAIT', e.message); record('preview', out); return finish(out); }
     const approval = g.ticketApprovals[digest];
     const scopeApproved = approval?.digest === digest && JSON.stringify(approval.request) === JSON.stringify(request)
@@ -115,6 +130,25 @@ async function ticketCommand(action, id, options) {
     else if (request.scope === 'ambiguous') out = result('NEEDS_APPROVAL', 'Semantic scope is ambiguous. Resolve scope against the objective, specification and every exclusion with the owner; submit a new exact request.');
     else if (!scopeApproved) out = result('NEEDS_APPROVAL', 'Owner must confirm this exact ticket fits the approved objective/specification, category and all exclusions. A planner category or model verdict cannot authorize scope.');
     else out = result('ALLOW', 'Owner confirmed exact semantic scope within this active grant; immutable ticket and quota checks passed.');
+    if (out.decision === 'ALLOW' && options.checkDependencies) {
+      try {
+        const { createJobStore, resolveStateDir } = require('./autopilot-state');
+        const jobs = createJobStore(resolveStateDir(g.project, project, state)).list();
+        let reason;
+        if (!require('./r1-dependencies').eligibleIssues([issue], jobs, g.project, g.repo, (_, message) => { reason = message; }).length) out = result('WAIT', reason);
+      } catch (e) { out = result('WAIT', e.message); }
+    }
+    if (out.decision === 'ALLOW' && !receipt) {
+      try {
+        let active = 0;
+        for (const r of Object.values(g.receipts)) {
+          const current = await gh(['api', `repos/${g.repo}/issues/${r.request.issue}`]);
+          if (!current || current.number !== r.request.issue || current.html_url !== `https://github.com/${g.repo}/issues/${r.request.issue}` || !['open', 'closed'].includes(current.state)) throw new Error('Cannot establish active ticket quota.');
+          if (current.state === 'open') active++;
+        }
+        if (active >= g.concurrencyLimit) out = result('WAIT', 'Grant active ticket quota exhausted.');
+      } catch (e) { out = result('WAIT', e.message); }
+    }
     record('preview', out);
     if (action === 'preview' || ['DENY', 'WAIT'].includes(out.decision) || request.scope === 'ambiguous') return finish(out);
     if (action === 'approve' && out.decision === 'NEEDS_APPROVAL') {
@@ -123,7 +157,7 @@ async function ticketCommand(action, id, options) {
       if (!await options.approve(`Confirm ticket ${key}, request ${digest}, is entirely within grant ${id}, its approved specification, category ${request.category}, and every exclusion?`) || options.isCancelled?.()) return finish(result('NEEDS_APPROVAL', 'Owner scope confirmation cancelled.'));
       try {
         const why = checkGrant(); if (why) throw new Error(why);
-        issue = await gh(['api', endpoint]); blockers = validIssue(issue, request, label, receipt);
+        await checkIssue();
       } catch (e) { return finish(result('WAIT', e.message)); }
       g.ticketApprovals[digest] = { digest, actor: os.userInfo().username, at: new Date().toISOString(), request };
       out = result('ALLOW', 'Owner confirmed this exact scope; release remains a separate command.');
@@ -134,10 +168,11 @@ async function ticketCommand(action, id, options) {
     // label-write API; later admission must independently validate the receipt.
     try {
       const why = checkGrant(); if (why) throw new Error(why);
-      issue = await gh(['api', endpoint]); blockers = validIssue(issue, request, label, receipt);
+      await checkIssue();
     } catch (e) { return finish(result('WAIT', e.message)); }
     if (!receipt) {
       receipt = { id: crypto.randomUUID(), digest, grantId: id, grantDigest: g.digest, revision: g.revision, request, issue: { number: issue.number, title: issue.title, body: issue.body }, at: new Date().toISOString() };
+      if (native) receipt.issue.nativeBlockers = [...blockers].sort((a, b) => a - b);
       g.receipts[key] = receipt;
       event('authorized', evidence(result('ALLOW', 'Durable exact-ticket receipt reserved one quota unit.')));
       commit(); // Durable quota reservation and receipt MUST precede the executable label.
