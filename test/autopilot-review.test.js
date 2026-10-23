@@ -346,13 +346,18 @@ test('actual Git patch with losslessly packaged logs preserves every source chan
   const gzip = require('node:zlib').gzipSync(logs);
   const digest = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
   const valid = { version: 1, entries: [{ original, archive, sourceCommit, bytes: logs.length, sha256: digest(logs), gzip_sha256: digest(gzip) }] };
+  fs.writeFileSync(path.join(checkout, original), 'changed original bytes\n');
+  git('add', '.'); git('commit', '-m', 'change original log after manifest recorded');
+  const changedSourceCommit = git('rev-parse', 'HEAD').trim();
+  assert.notEqual(git('show', `${changedSourceCommit}:${original}`), logs.toString());
   fs.unlinkSync(path.join(checkout, original));
   const manifestPath = path.join(checkout, 'docs/evidence/review/manifest.json');
-  for (const mode of ['valid', 'wrong digest', 'corrupt gzip', 'changed source', 'source masquerade', 'over budget']) {
+  for (const mode of ['valid', 'wrong digest', 'corrupt gzip', 'changed source', 'missing source', 'source masquerade', 'over budget']) {
     fs.writeFileSync(path.join(checkout, archive), mode === 'corrupt gzip' ? Buffer.from('broken gzip') : gzip);
     const manifest = structuredClone(valid);
     if (mode === 'wrong digest') manifest.entries[0].sha256 = '0'.repeat(64);
-    if (mode === 'changed source') manifest.entries[0].sourceCommit = base;
+    if (mode === 'changed source') manifest.entries[0].sourceCommit = changedSourceCommit;
+    if (mode === 'missing source') manifest.entries[0].sourceCommit = base;
     if (mode === 'source masquerade') manifest.entries[0].original = 'source.js';
     fs.writeFileSync(manifestPath, JSON.stringify(manifest));
     fs.writeFileSync(path.join(checkout, 'source.js'), mode === 'over budget' ? 'x'.repeat(258218) : 'module.exports = 2;\n');
@@ -373,7 +378,19 @@ test('actual Git patch with losslessly packaged logs preserves every source chan
       assert.match(claude.calls[0][3].prompt, /Validated lossless evidence manifest/);
       assert.ok(!diff.includes('ok verification'), 'complete log remains lossless in gzip and ancestor Git blob');
     } else {
-      await assert.rejects(review(context), error => error.code === (mode === 'over budget' ? 'review_input_over_budget' : 'review_evidence_integrity'));
+      await assert.rejects(review(context), error => {
+        assert.equal(error.code, mode === 'over budget' ? 'review_input_over_budget' : 'review_evidence_integrity');
+        assert.equal((error.message.match(/Claude review failed closed:/g) || []).length, 1);
+        if (mode === 'changed source') assert.match(error.message, /compressed or original bytes\/digests differ/);
+        if (mode === 'missing source') {
+          assert.equal(error.sourceCode, 128);
+          assert.equal(error.rawStdout, '');
+          assert.match(error.rawStderr, /does not exist/);
+          assert.equal(error.cause.code, 'review_context_unavailable');
+          assert.equal(error.cause.cause.code, 128);
+        }
+        return true;
+      });
       assert.equal(claude.calls.length, 0);
     }
   }
@@ -405,4 +422,12 @@ test('source changes documenting the evidence protocol are reviewed without requ
   const command = commands({ diff: "diff --git a/src/example.js b/src/example.js\n+const root = 'docs/evidence/review/';\n" });
   assert.equal((await adapter(command, claude)({ project, issue, pullRequest, headCommit: sha, verification: verificationEvidence })).verdict, 'PASS');
   assert.match(claude.calls[0][3].prompt, /docs\/evidence\/review/);
+});
+
+
+test('canonical GitHub repository casing is accepted during preparation and post-model head recheck', async () => {
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  const result = await adapter(commands(), claude)({ project: { ...project, repo: 'Example/Repo' }, issue, pullRequest, headCommit: sha, verification: verificationEvidence });
+  assert.equal(result.verdict, 'PASS');
+  assert.equal(claude.calls.length, 1);
 });

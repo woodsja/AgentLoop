@@ -22,6 +22,8 @@ const REVIEW_MODELS = new Set(['sonnet', 'opus']);
 const REVIEW_BUDGET_USD = Object.freeze({ sonnet: 2, opus: 5 });
 
 function isObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+// GitHub canonicalizes owner/repository casing in returned URLs.
+function matchesGithubUrl(value, expected) { return typeof value === 'string' && value.toLowerCase() === expected.toLowerCase(); }
 function byteLength(value) { return Buffer.byteLength(String(value), 'utf8'); }
 function bounded(value, limit, description) {
   const text = String(value ?? '');
@@ -88,12 +90,12 @@ async function githubReviewMaterial(project, issue, pullRequest, headCommit, exe
   ]);
   let pr; let githubIssue;
   try { pr = JSON.parse(prText); githubIssue = JSON.parse(issueText); } catch { throw preparationError('review_context_malformed', 'GitHub returned malformed review context'); }
-  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha || pr.isCrossRepository !== false || pr.url !== `https://github.com/${project.repo}/pull/${pullRequest.number}` || !isObject(githubIssue) || githubIssue.number !== issue.number || githubIssue.url !== `https://github.com/${project.repo}/issues/${issue.number}` || typeof githubIssue.title !== 'string' || typeof githubIssue.body !== 'string') throw preparationError('review_identity_mismatch', 'GitHub review context does not match the delivered PR and issue');
+  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha || pr.isCrossRepository !== false || !matchesGithubUrl(pr.url, `https://github.com/${project.repo}/pull/${pullRequest.number}`) || !isObject(githubIssue) || githubIssue.number !== issue.number || !matchesGithubUrl(githubIssue.url, `https://github.com/${project.repo}/issues/${issue.number}`) || typeof githubIssue.title !== 'string' || typeof githubIssue.body !== 'string') throw preparationError('review_identity_mismatch', 'GitHub review context does not match the delivered PR and issue');
   const diff = await runCommand('gh', ['pr', 'diff', String(pullRequest.number), '--repo', project.repo], executeFile, 'PR diff lookup', { limit: MAX_DIFF_BYTES });
   if (!diff.trim()) throw preparationError('review_diff_absent', 'PR diff is absent');
   let finalPr;
   try { finalPr = JSON.parse(await runCommand('gh', prArgs, executeFile, 'PR head recheck')); } catch (error) { if (error.code) throw error; throw preparationError('review_context_malformed', 'GitHub returned malformed PR head'); }
-  if (!isObject(finalPr) || finalPr.number !== pullRequest.number || finalPr.headRefOid !== sha || finalPr.isCrossRepository !== false || finalPr.url !== `https://github.com/${project.repo}/pull/${pullRequest.number}`) throw preparationError('review_identity_mismatch', 'PR head changed while the diff was collected');
+  if (!isObject(finalPr) || finalPr.number !== pullRequest.number || finalPr.headRefOid !== sha || finalPr.isCrossRepository !== false || !matchesGithubUrl(finalPr.url, `https://github.com/${project.repo}/pull/${pullRequest.number}`)) throw preparationError('review_identity_mismatch', 'PR head changed while the diff was collected');
   return { diff, issue: githubIssue };
 }
 
@@ -102,7 +104,7 @@ async function assertPrHeadUnchanged(project, pullRequest, headCommit, executeFi
   const prArgs = ['pr', 'view', String(pullRequest.number), '--repo', project.repo, '--json', 'number,headRefOid,url,isCrossRepository'];
   let pr;
   try { pr = JSON.parse(await runCommand('gh', prArgs, executeFile, 'PR head recheck')); } catch (error) { if (error.code) throw error; throw preparationError('review_context_malformed', 'GitHub returned malformed PR head'); }
-  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha || pr.isCrossRepository !== false || pr.url !== `https://github.com/${project.repo}/pull/${pullRequest.number}`) throw preparationError('review_identity_mismatch', `PR head changed during ${operation}`);
+  if (!isObject(pr) || pr.number !== pullRequest.number || pr.headRefOid !== sha || pr.isCrossRepository !== false || !matchesGithubUrl(pr.url, `https://github.com/${project.repo}/pull/${pullRequest.number}`)) throw preparationError('review_identity_mismatch', `PR head changed during ${operation}`);
 }
 
 async function repositoryStandards(project, headCommit, executeFile) {

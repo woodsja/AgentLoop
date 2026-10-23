@@ -829,18 +829,24 @@ test('one-shot persisted R1 preflights the incident diff at the real Node buffer
   assert.equal(claudeCalls, 0);
 });
 
-for (const mode of ['transient', 'auth', 'interrupted']) {
+for (const mode of ['transient', 'auth', 'interrupted', 'stale initial head', 'stale rechecked head', 'empty diff']) {
   test(`one-shot review preparation ${mode} is bounded and restart-safe without paid attempts`, async t => {
     const f = await fixture(t);
     await synchronizeIssueBranch(f, f.options);
     const head = f.job.delivery.commit;
     const native = require('node:child_process').execFile;
-    let diffs = 0, models = 0;
+    let diffs = 0, models = 0, heads = 0;
     const adapter = require('../src/autopilot-review').createClaudeReviewAdapter({ execFile(file, args, opts, cb) {
       if (file === 'git') return native(file, args, opts, cb);
       if (args[0] === 'issue') return cb(null, JSON.stringify({ ...f.issue, url: 'https://github.com/example/repo/issues/105' }));
-      if (args[1] === 'view') return cb(null, JSON.stringify({ number: 117, headRefOid: head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+      if (args[1] === 'view') {
+        heads++;
+        const stale = mode === 'stale initial head' || mode === 'stale rechecked head' && heads === 2;
+        return cb(null, JSON.stringify({ number: 117, headRefOid: stale ? f.oldHead : head, url: 'https://github.com/example/repo/pull/117', isCrossRepository: false }));
+      }
       diffs++;
+      if (mode === 'empty diff') return cb(null, ' \n');
+      if (mode === 'stale rechecked head') return cb(null, 'diff --git a/source.js b/source.js\n+change\n');
       const message = mode === 'auth' ? 'HTTP 401: Bad credentials' : 'HTTP 503: transport interrupted';
       return native('python3', ['-c', `import sys;sys.stderr.write(${JSON.stringify(message)});sys.exit(1)`], opts, cb);
     }, spawn() { models++; throw new Error('must not call Claude'); } });
@@ -868,9 +874,16 @@ for (const mode of ['transient', 'auth', 'interrupted']) {
       await tick(); assert.equal(diffs, 3);
     } else {
       assert.equal(saved.terminal, true);
-      assert.equal(diffs, mode === 'auth' ? 1 : 0);
+      assert.equal(diffs, ['auth', 'stale rechecked head', 'empty diff'].includes(mode) ? 1 : 0);
       if (mode === 'auth') assert.equal(saved.reviewPreparationHistory[0].diagnostics.code, 'github_auth_denied');
-      await tick(); assert.equal(diffs, mode === 'auth' ? 1 : 0);
+      if (mode.startsWith('stale') || mode === 'empty diff') {
+        assert.equal(saved.reviewPreparationHistory[0].diagnostics.code, mode === 'empty diff' ? 'review_diff_absent' : 'review_identity_mismatch');
+      }
+      const lookups = heads;
+      await tick();
+      assert.equal(heads, lookups, 'permanent preparation failures never retry');
+      assert.equal(f.store.load(105).reviewPreparationHistory.length, 1);
+      assert.equal(diffs, ['auth', 'stale rechecked head', 'empty diff'].includes(mode) ? 1 : 0);
     }
   });
 }
@@ -917,3 +930,33 @@ for (const verdict of ['NEEDS_CHANGES', 'timeout', 'invalid']) {
     } else assert.equal(saved.terminal, true);
   });
 }
+
+
+test('exhausted exact-head review budget skips preparation and its context fetches', async t => {
+  const f = await fixture(t);
+  await synchronizeIssueBranch(f, f.options);
+  const state = require('../src/autopilot-state');
+  for (let index = 0; index < 2; index++) {
+    const attempt = state.beginReviewAttempt(f.job, f.store.now, { reviewer: 'claude:sonnet', model: 'sonnet', policy: 'always', commit: f.job.delivery.commit });
+    state.recordReview(f.job, { reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', commit: f.job.delivery.commit, policy: 'always', findings: 'Correct the failure', attempt }, f.store.now);
+  }
+  f.store.save(f.job);
+  const before = f.store.load(105);
+  let fetches = 0, models = 0, preparations = 0;
+  const review = require('../src/autopilot-review').createClaudeReviewAdapter({
+    execFile() { fetches++; throw new Error('must not fetch review context'); },
+    spawn() { models++; throw new Error('must not start Claude'); },
+  });
+  const prepare = review.prepare;
+  review.prepare = context => { preparations++; return prepare(context); };
+  const tick = retryRunner(f, require('node:child_process').execFile, { time: Date.now(), green: true }, { independentReview: review });
+  await tick();
+  await tick();
+  const saved = f.store.load(105);
+  assert.deepEqual([preparations, fetches, models], [0, 0, 0]);
+  assert.equal(saved.reviewPreparationHistory?.length ?? 0, 0);
+  assert.equal(saved.reviewAttempts, before.reviewAttempts);
+  assert.deepEqual(saved.reviewHistory, before.reviewHistory);
+  assert.equal(saved.terminalState, 'ready_for_human');
+  assert.match(saved.failures.at(-1).message, /review attempt limit/);
+});
