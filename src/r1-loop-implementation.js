@@ -66,7 +66,7 @@ function createR1LoopImplementation({
   }
   let cancellationReason;
   return {
-    cancel(reason) { cancellationReason = reason; return { requested: true, reason: 'Attached child cancellation will be requested by its owning daemon lifecycle.' }; },
+    cancel(reason) { cancellationReason = reason; return { requested: false, reason: 'Child cancellation has not yet been requested; the parent poll will request it through the owning daemon lifecycle.' }; },
     async run(cwd, inputTask) {
       const task = normalizeTaskContract(inputTask);
       const files = syntheticPlan(task);

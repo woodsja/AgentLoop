@@ -179,3 +179,23 @@ test('durable authoritative time prevents expiration rollback across module rest
     assert.equal((await grantCommand('revoke', 'm1', { ...options, digest: revoke.digest })).state, 'revoked');
   } finally { Date.now = original; }
 });
+
+test('unchanged and rolled-back clock reads do not append durable records', t => {
+  const f = fixture(t), original = Date.now;
+  const file = path.join(f.state, 'milestone-clock.ndjson');
+  try {
+    Date.now = () => 10000;
+    let { currentTime } = require('../src/milestone-clock');
+    assert.equal(currentTime(f.state), 10000);
+    const first = fs.readFileSync(file, 'utf8');
+    for (let n = 0; n < 100; n++) assert.equal(currentTime(f.state), 10000);
+    Date.now = () => 9000;
+    delete require.cache[require.resolve('../src/milestone-clock')];
+    ({ currentTime } = require('../src/milestone-clock'));
+    assert.equal(currentTime(f.state), 10000);
+    assert.equal(fs.readFileSync(file, 'utf8'), first);
+    Date.now = () => 10001;
+    assert.equal(currentTime(f.state), 10001);
+    assert.equal(fs.readFileSync(file, 'utf8'), first + '10001\n');
+  } finally { Date.now = original; }
+});

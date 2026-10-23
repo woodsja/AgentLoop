@@ -827,13 +827,30 @@ function sessionModel(loop, engine) {
 
 function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   if (loop.r1Child) {
-    const parent = store.readTask(loop.r1Child.parentJobId, 'running');
     try {
-      require('./milestone-work').checkCurrent(parent.milestoneAuthorization, { stateDir: store.paths.state });
+      let parent;
+      try { parent = store.readTask(loop.r1Child.parentJobId, 'running'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (!parent && loop.authorizationBlocked) throw new Error('Milestone parent is not running; session remains on hold.');
+      if (parent?.milestoneAuthorization) {
+        require('./milestone-work').checkCurrent(parent.milestoneAuthorization, { stateDir: store.paths.state });
+      }
     } catch (error) {
-      store.appendExecution(loop.id, { event: 'authorization_blocked', role, cycle: cycle.n, message: error.message });
-      throw error;
+      if (!loop.authorizationBlocked) {
+        store.appendExecution(loop.id, { event: 'authorization_blocked', role, cycle: cycle.n, message: error.message });
+      }
+      // No process started and no verdict was produced. Keep the exact session
+      // pending instead of routing this denial through terminal failure handling.
+      store.writeTask({ ...loop, authorizationBlocked: {
+        role, cycle: cycle.n, prompt, message: error.message,
+      } }, 'running');
+      return;
     }
+  }
+  if (loop.authorizationBlocked) {
+    loop = { ...loop };
+    delete loop.authorizationBlocked;
+    store.writeTask(loop, 'running');
   }
   const id = loop[`${role}Engine`] ?? loop.engine ?? store.config.defaultEngine;
   const cwd = loop.projectPath;
@@ -1807,8 +1824,16 @@ function fillSlots() {
     r1Jobs.advance(r1);
     // R1 owns the coordination slot. While its child is executing, no other
     // project can use a worker slot. This avoids maxConcurrent=1 deadlock.
-    const childRunning = running.some(task => task.r1Child?.parentJobId === r1.id);
-    if (childRunning) return;
+    const childRunning = running.find(task => task.r1Child?.parentJobId === r1.id);
+    if (childRunning) {
+      const child = store.readTask(childRunning.id, 'running');
+      if (child.authorizationBlocked && !activeWorkers.has(child.id) && !child.cancelRequested) {
+        const { role, cycle, prompt } = child.authorizationBlocked;
+        spawnLoopSession(child, currentCycle(child, cycle), role, prompt,
+          details => role === 'critic' ? finishLoopCritic(child, cycle, details) : finishLoopWorker(child, cycle, details));
+      }
+      return;
+    }
     const pendingChildren = store.listTasks('pending', { dashboard: true }).filter(task => task.r1Child?.parentJobId === r1.id);
     if (pendingChildren.length === 0) return;
     const candidate = store.readTask(sortPending(pendingChildren)[0].id, 'pending');
@@ -2866,7 +2891,13 @@ function tick() {
 
 function recoverRunningTasks() {
   for (const task of store.listTasks('running')) {
-    if (task.workflow === 'r1') { r1Jobs.recover(task); continue; }
+    if (task.workflow === 'r1') {
+      // A held session never started a process. Keep its parent attached so
+      // canonical authorization can be rechecked without inventing a failure.
+      if (!store.listR1ChildLoops(task.id).some(child => child.stage === 'running' && child.task?.authorizationBlocked)) r1Jobs.recover(task);
+      continue;
+    }
+    if (task.r1Child && task.authorizationBlocked) continue;
     if (terminalTaskStatuses.has(task.status)) {
       try {
         store.moveTask(task.id, 'running', 'done');
@@ -3213,6 +3244,7 @@ module.exports = {
   recordCheckpoint,
   finishLoopCritic,
   finishLoopWorker,
+  spawnLoopSession,
   registerFailedCycle,
   loopEngines,
   sessionModel,
