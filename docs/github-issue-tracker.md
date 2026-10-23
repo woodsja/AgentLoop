@@ -10,7 +10,9 @@ Draft publication creates an ordinary GitHub issue with **zero labels**, a
 a native draft state: the notice communicates intent and the absence of labels
 keeps these issues out of label-based Ralph admission. The notice alone is not
 an admission control. Explicit executable release is a separate owner decision
-for the entire batch. This workflow implements no release operation.
+for the entire batch. The draft helper implements no release operation. The separate
+[exact-ticket authorization workflow](milestone-grants.md#exact-ticket-authorization)
+requires an active owner-approved grant and explicit exact-ticket scope confirmation.
 
 ## Planner procedure
 
