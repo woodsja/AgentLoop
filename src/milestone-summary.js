@@ -84,10 +84,12 @@ function milestoneSummary(id, options = {}) {
     const admission = admissions.filter(e => e.issue === number).at(-1);
     const job = jobs.find(j => j.issue?.number === number);
     const queued = queueTasks.find(q => q.stage !== 'done' && q.task.issue === number);
+    const nonGrantAdmission = !receipt && !event && ['DENY', 'NEEDS_APPROVAL'].includes(admission?.decision);
     const reasons = [];
     if (state !== 'active') reasons.push(`Grant is ${state}; inspect lifecycle evidence and obtain the appropriate owner action.`);
     if (!grantIntegrity(grant)) reasons.push('Grant integrity failed; reconcile approved terms and specification.');
-    if (!receipt) reasons.push('No receipt; publish and obtain exact owner scope approval before release.');
+    if (nonGrantAdmission) reasons.push('Non-grant issue; admission blocked (denied). No approved ticket or receipt authorizes this issue.');
+    else if (!receipt) reasons.push('No receipt; publish and obtain exact owner scope approval before release.');
     else if (receipt.revision !== grant.revision || receipt.grantDigest !== grant.digest) reasons.push('Stale receipt; obtain exact owner re-evaluation for the current revision.');
     let prerequisites = [];
     const issue = receipt?.issue || event?.issue;
@@ -105,7 +107,7 @@ function milestoneSummary(id, options = {}) {
     if (job?.terminal && job.terminalState !== 'merged') reasons.push(`Job stopped in ${job.terminalState || job.status}; inspect retained failures and resolve the delivery hold.`);
     if (event?.decision === 'DENY' || (!receipt && event?.decision && event.decision !== 'ALLOW')) reasons.push(...(event.reasons || []));
     const unapprovedDraft = !receipt && !job && !queued && event?.decision === 'NEEDS_APPROVAL';
-    const status = job?.terminalState === 'merged' ? 'merged' : unapprovedDraft && state === 'active' && !errors.length ? 'draft' : reasons.length ? (state !== 'active' || event?.decision === 'DENY' || (!receipt && admission?.decision === 'DENY') ? 'denied' : 'waiting') : (job && !job.terminal) || queued ? 'running' : receipt ? 'authorized' : 'draft';
+    const status = job?.terminalState === 'merged' ? 'merged' : unapprovedDraft && state === 'active' && !errors.length ? 'draft' : reasons.length ? (nonGrantAdmission || state !== 'active' || event?.decision === 'DENY' || (!receipt && admission?.decision === 'DENY') ? 'denied' : 'waiting') : (job && !job.terminal) || queued ? 'running' : receipt ? 'authorized' : 'draft';
     return { issue: number, status, ticketDigest: receipt?.request.ticketDigest || event?.request?.ticketDigest,
       receiptId: receipt?.id || null, prerequisites, jobStatus: job?.status || null, reasons, lastDecision: event || null, lastAdmission: admission || null };
   });

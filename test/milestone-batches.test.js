@@ -371,6 +371,10 @@ test('synthetic release completes dependent work across restart; out-of-scope re
   assert.equal(summary.tickets.find(x => x.issue === 200).status, 'merged');
   assert.deepEqual(summary.tickets.find(x => x.issue === 201).prerequisites, [200]);
   assert.ok(summary.admissions.some(x => x.issue === 202));
+  const denied = summary.tickets.find(x => x.issue === 202);
+  assert.equal(denied.status, 'denied');
+  assert.equal(denied.lastAdmission.decision, 'NEEDS_APPROVAL');
+  assert.ok(denied.reasons.some(reason => reason.includes('Non-grant issue; admission blocked (denied)')));
   assert.ok(summary.evidence.some(x => x.raw.includes('synthetic-adapter')));
   assert.equal(summary.grant.spec.contentBase64, Buffer.from('Approved test scope').toString('base64'));
   // Explicit rehearsal export retains full fake job/authorization evidence before fixture cleanup.

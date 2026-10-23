@@ -48,13 +48,17 @@ is **not yet verified**. Its disposable job stores are removed after assertions;
 the full exported evidence and test output are retained below. Production evidence is
 never used or removed by these tests.
 
-The workspace started at `e7caf791e59127639f3f946755b98b33a4cf9046`.
-The implementation remains a working-tree change for Ralph's delivery pipeline.
-Exact tested-head independent review and remote CI must be attached to the final
-committed SHA after these edits. An earlier base-SHA pass cannot satisfy that gate.
-`gh auth status` reports an invalid active GitHub token in this environment, so
-remote CI verification is blocked here. Do not infer CI, merge or deployment from
-this handoff or issue closure. See the validation record below for local results.
+The delivered implementation is commit
+`9661ba43033e761db512dc011326639372287951`, with green GitHub CI
+[run #39893058022](https://github.com/woodsja/AgentLoop/actions/runs/39893058022),
+as reported by the independent review task and rechecked with read-only `gh run
+view` outside the command sandbox; the complete response is retained in
+[delivered-ci.json](evidence/issue-111/delivered-ci.json).
+Independent code review is performed by Ralph's guarded pipeline
+(the delivered commit was reviewed by `claude:sonnet`), not by the failed local
+Claude attempts below. The current corrections require their own exact-commit
+review and CI through that same pipeline. Neither implementation CI nor synthetic
+adapters establish an external milestone demonstration or deployment.
 
 ## Separate production activation plan — not executed
 
@@ -103,12 +107,36 @@ empty captured output. The complete output is retained in
 The second full `npm test` invocation outside that sandbox completed with exit 0: 723 passing tests across 56 test files, zero failures. Its complete output is retained in [evidence/issue-111/npm-test.log](evidence/issue-111/npm-test.log). `git diff --check` also passes.
 
 An installed Claude CLI review was attempted with tools disabled; the first attempt failed with `EAI_AGAIN` reaching its API. A second attempt also disabled session persistence. The second attempt returned no review within a 55-second timeout (exit 124).
-This is not an independent PASS. The final committed implementation still requires
-independent review and GitHub exact-SHA CI through Ralph's guarded delivery flow.
+These local attempts are not an independent PASS; independent review and exact-SHA
+CI are supplied by Ralph's guarded delivery flow as described above.
 No external demonstration, live milestone, service restart or deployment occurred.
-The final implementation file hashes are retained in
+The delivered implementation file hashes are retained in
 [evidence/issue-111/implementation.sha256](evidence/issue-111/implementation.sha256).
-They identify local tested contents and are not a substitute for commit-bound CI.
+They were computed over the tested contents. Before this correction, all three
+entries were rechecked successfully against delivered head `9661ba4`:
+`src/milestone-summary.js`, `src/cli.js` and `test/milestone-batches.test.js`.
+The original manifest is preserved; the corrected summary and regression test
+are identified separately in
+[review-correction.sha256](evidence/issue-111/review-correction.sha256).
+Neither manifest substitutes for commit-bound CI.
+
+The three original test logs above were recovered from
+`/tmp/issue-111-npm-test.log`, `/tmp/issue-111-npm-test-unrestricted.log` and
+`/tmp/issue-111-batches-final.log`, respectively. They are now retained here
+complete and unmodified; byte comparisons against those captured originals pass.
+The repository's general `*.log` ignore rule previously omitted them.
+
+Correction validation: the focused suite passes all 15 tests, including the
+non-grant denial assertion; complete output is in
+[review-correction-batch-tests.log](evidence/issue-111/review-correction-batch-tests.log).
+The correction's sandboxed `npm test` again stopped at the two existing native
+preflight output/signal tests with empty captured output (exit 1); its complete
+output is in
+[review-correction-npm-test.log](evidence/issue-111/review-correction-npm-test.log).
+The retry outside that sandbox passes all 723 tests across 56 files (exit 0),
+including the native preflight tests; complete output is in
+[review-correction-npm-test-unrestricted.log](evidence/issue-111/review-correction-npm-test-unrestricted.log).
+The correction manifest check and `git diff --check` also pass.
 
 The completed synthetic run retains
 [product/job acceptance evidence](evidence/issue-111/rehearsal-acceptance.json),
@@ -129,3 +157,9 @@ receipts, approvals, prerequisite proof, batch events and the denied outsider's
 admission events. Product assertions execute the calculator/report code before
 recording success. The compact acceptance file is navigation; the compressed
 export preserves complete raw records.
+
+The original export is historical evidence: its #202 summary says `waiting`,
+while its retained `lastAdmission` is `NEEDS_APPROVAL` and no job ran. The corrected
+summary reports that non-grant issue as `denied`, with an explicit blocked reason;
+it was never approved pending work. A regression assertion checks that status,
+reason and original admission decision. Historical exports remain unmodified.

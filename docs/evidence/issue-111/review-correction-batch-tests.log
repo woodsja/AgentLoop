@@ -1,0 +1,23 @@
+✔ two-ticket conversation batch previews, publishes unlabeled, confirms scope and releases exact receipts (542.257038ms)
+✔ ambiguous creation, partial labeling and fresh command retries retain one issue and receipt per identity (485.016537ms)
+✔ native write ambiguity reconciles; blocked tickets WAIT without receipts or quota consumption (407.727349ms)
+✔ one preview explains all four decisions without changing labels or consuming quota (498.349893ms)
+✔ preview projects active quota; closing a ticket frees active capacity but never issued quota (543.133256ms)
+✔ edit, conflicting native dependencies, cross-repo and unknown tasks require review (473.983024ms)
+✔ durable failure and concurrent publishers cannot produce duplicate side effects (334.298035ms)
+✔ unresolved creation or blocker intent never repeats a remote POST when reconciliation finds nothing (330.564963ms)
+✔ stable identities handle object property names and reordered JSON without changing batch digest (406.613328ms)
+✔ racing releases cannot exceed active quota while the first publisher is between receipt and label (315.159266ms)
+✔ CLI batch commands are explicit and reject automatic owner authorization on release (1.376326ms)
+✔ abrupt process exits after creation, native linking, receipt commit and labeling resume from durable state (1647.375013ms)
+✔ pause during publication reads prevents the first new issue without deleting creation intent (122.201852ms)
+✔ synthetic release completes dependent work across restart; out-of-scope ready issue never starts (1210.939511ms)
+✔ owner summary is read-only, retains raw evidence and diagnoses damaged stores and expiry (357.492682ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7684.967637
