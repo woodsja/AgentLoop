@@ -73,6 +73,13 @@ async function checkMilestoneAdmission(projectName, project, number, options = {
       || issue.html_url !== `https://github.com/${project.repo}/issues/${number}`
       || typeof issue.title !== 'string' || typeof issue.body !== 'string' || ticketDigest(issue) !== q.ticketDigest
       || !Array.isArray(issue.labels) || !issue.labels.some(l => l?.name === project.readyLabel)) throw new Error('Issue identity, content, state or ready label changed.');
+    if (Object.hasOwn(r.issue, 'nativeBlockers')) {
+      if (!Array.isArray(r.issue.nativeBlockers)) throw new Error('Invalid receipted native blocker evidence.');
+      const actual = await require('./milestone-blockers').nativeBlockers(project.repo, number,
+        async args => JSON.parse(await runGh(args, options.execFile || execFile, 'Milestone native blockers')));
+      const expected = require('./r1-dependencies').dependencies(issue).sort((a, b) => a - b);
+      if (JSON.stringify(actual) !== JSON.stringify(expected) || JSON.stringify(actual) !== JSON.stringify(r.issue.nativeBlockers)) throw new Error('Authorized native blocker set changed.');
+    }
     let dependencyError;
     const eligible = project.dependencyFormat === 'household-blocked-by' ? householdEligible : eligibleIssues;
     if (!eligible([issue], typeof options.jobs === 'function' ? options.jobs() : options.jobs || [], projectName, project.repo, (_, message) => { dependencyError = message; }).length) throw Object.assign(new Error(dependencyError), { decision: 'WAIT' });

@@ -175,6 +175,124 @@ It is included in `npm test` for exact-head CI and the existing independent revi
 and guarded merge pipeline.
 
 
+## Conversation-initiated batch release
+
+`ralph batch preview|publish|approve|release GRANT --input batch.json` composes
+the existing planning drafts and exact-ticket receipts. These are explicit
+commands initiated from a ChatGPT planning conversation, with no scheduler,
+background generator, admission bypass, production settings change or deployment.
+The input has exactly `id`, `conversation` and `tickets`:
+
+```json
+{
+  "id": "tests-batch-1",
+  "conversation": "chatgpt:owner-planning-message-1",
+  "tickets": [
+    {
+      "draft": {
+        "id": "isolated-grant-tests",
+        "kind": "ticket",
+        "repo": "owner/demo",
+        "title": "Add isolated grant tests",
+        "sourceSpec": "#103",
+        "conversation": "chatgpt:owner-planning-message-1",
+        "summary": "Exercise approved grant behavior in temporary stores",
+        "acceptanceCriteria": ["The isolated tests pass"],
+        "blockers": []
+      },
+      "category": "tests",
+      "scope": "in-scope",
+      "reason": "Only approved test scope; no deployment or external permissions."
+    }
+  ]
+}
+```
+
+Each `draft` uses the existing planning schema, has kind `ticket`, a distinct
+stable ID, and the same explicit conversation reference as the batch. Its source
+specification must identify the grant's approved issue (the specification identity
+must contain `#N`, optionally followed by `@revision`). Unknown specifications,
+cross-repository references and conflicting native blockers require owner review.
+The category and scope claims never prove semantic permission. Every exact
+title/body, including any newly required external permission, still needs the
+existing explicit owner scope confirmation against the objective, specification
+and exclusions. Editing authorized bytes immediately invalidates admission.
+
+In the isolated operator environment, using the same `--config`, `--projects`
+and `AGENTLOOP_STATE_DIR` as the grant:
+
+```sh
+ralph batch preview milestone-1 --input batch.json
+ralph batch publish milestone-1 --input batch.json
+ralph batch preview milestone-1 --input batch.json
+ralph batch approve milestone-1 --input batch.json --digest <batch-preview-digest>
+ralph batch preview milestone-1 --input batch.json
+ralph batch release milestone-1 --input batch.json
+```
+
+`publish` is separately authorized draft publication: it creates unlabeled issues
+and reconciles native blocking links to the exact body `Depends on:` metadata.
+It never approves scope or applies readiness labels. `approve` is owner-only,
+requires the inspected complete batch digest (including the grant digest), and prompts separately for each
+exact ticket. `release` cannot invoke approval. Repeating these commands retains
+the immutable batch and issue identities. Unknown extra fields are rejected.
+
+Preview performs no GitHub writes and shows every draft, allocated issue identity,
+dependencies, grant evidence, receipt, decision and explanation. Before publication,
+an unresolved remote identity is `WAIT`. Published unapproved tickets are
+`NEEDS_APPROVAL`; invalid grants and exhausted issued quota are `DENY`. Approved
+tickets awaiting independently reviewed, exact-head green CI and merged durable
+Ralph prerequisite evidence are `WAIT`. Neither a closed GitHub issue nor a
+ticket elsewhere in the batch satisfies a prerequisite. The existing project job
+store is read using its registered `stateDir`, or the project directory beneath
+the owner state root. These checks do not create jobs or alter prerequisite proof.
+
+`usage` reports issued reservations and the grant's total and active limits;
+preview also reports current active usage and projects capacity in input order.
+An active reservation means an open receipted GitHub issue, including an
+unconfirmed label write. A closed issue frees active capacity, never issued
+capacity and never dependency proof. Unavailable identity/state evidence holds
+release. `WAIT` tickets without receipts consume no capacity. All receipt writers
+share grant/registration locks, so racing attempts fail closed rather than
+oversubscribing either quota. Retried receipts consume no additional capacity.
+
+The fsynced `milestone-batches.json` journal uses the batch ID plus immutable input
+digest, planning marker, GitHub number and blocker write intents as deduplication
+keys. All batch publishers using this owner state share one journal lock.
+Creation intent is durable before the issue POST. After any ambiguous attempt,
+retry only reconciles the stable marker across all issue pages/states; it never
+repeats creation. If no issue is visible, owner inspection is required. Likewise,
+an uncertain native-blocker POST is reconciled by a fresh read; absence holds for
+owner inspection instead of blindly repeating the write. Body dependencies are
+supplied in the original immutable creation payload. Native/body discrepancies
+cannot authorize a receipt. Each receipt and quota reservation is committed
+before its readiness label, and successful-but-unacknowledged labels reconcile
+without another mutation. A partial batch retains every prior receipt and event.
+
+Both runners recheck native blocker sets for batch receipts at existing admission
+and merge gates, so later native edits invalidate authorization even if the body
+did not change. Changed title/body or scope needs reassessment with a new batch
+identity; original receipts are retained and cannot be overwritten. A different
+grant cannot issue another receipt for an already receipted issue: reconcile with
+the owner. The batch command does not implement automatic receipt replacement or upgrade a
+legacy receipt that lacks native blocker evidence.
+
+GitHub has no distributed transaction spanning issue creation, native links,
+local fsynced state and labels. This protocol preserves uncertain intents rather
+than claiming a failed remote request did nothing. Full issues, requests, errors
+and decisions remain owner-visible in the existing execution diagnostics, ticket
+events and batch journal. A killed process may leave the existing `.project-lock`
+directories; inspect `owner.json`, verify the process stopped, then remove only
+the abandoned locks before retrying. Never reset either journal or grant receipts.
+Do not concurrently use the standalone draft publisher for the same identities;
+it does not participate in the batch lock.
+
+`node test/milestone-batches.test.js` demonstrates two-ticket release, partial
+writes, creation/native/label response loss, abrupt process exits after creation,
+native linking, receipt commit and labeling, edits, dependency holds, active/issued quota and
+concurrent publishers with fake GitHub and temporary durable stores. It runs in
+`npm test`. These implementation tests authorize no live release or deployment.
+
 ## R1 milestone admission (disabled on live projects)
 
 The optional boolean `milestoneAuthorization` in an existing registered R1

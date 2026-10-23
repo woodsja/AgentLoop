@@ -7,7 +7,7 @@ const { projectCommand } = require('./project-registration');
 
 function parseArguments(argv) {
   const [group, action, ...rest] = argv;
-  if (!['project', 'grant', 'ticket'].includes(group)) throw new Error('Usage: ralph project add|check|activate owner/repository [--yes] [--config path] [--projects path] [--checkout-root path] [--worktree-root path] [--base-branch name] [--ci-workflow name] [--worker codex|claude] [--ready-label label]; project recover; ralph grant draft|inspect|activate ID [--input JSON --spec file] [--digest SHA256 --yes] [--config path] [--projects path]; ralph ticket preview|approve|release GRANT --input request.json [--digest SHA256 --yes]');
+  if (!['project', 'grant', 'ticket', 'batch'].includes(group)) throw new Error('Usage: ralph project add|check|activate owner/repository [--yes] [--config path] [--projects path] [--checkout-root path] [--worktree-root path] [--base-branch name] [--ci-workflow name] [--worker codex|claude] [--ready-label label]; project recover; ralph grant draft|inspect|activate ID [--input JSON --spec file] [--digest SHA256 --yes] [--config path] [--projects path]; ralph ticket preview|approve|release GRANT --input request.json [--digest SHA256 --yes]; ralph batch preview|publish|approve|release GRANT --input batch.json [--digest SHA256 --yes]');
   const options = {}, positional = [];
   const flags = { '--input': 'inputPath', '--spec': 'specPath', '--digest': 'digest', '--config': 'configPath', '--projects': 'projectsPath', '--checkout-root': 'checkoutRoot', '--worktree-root': 'worktreeRoot', '--base-branch': 'baseBranch', '--ci-workflow': 'ciWorkflow', '--worker': 'worker', '--ready-label': 'readyLabel' };
   for (let i = 0; i < rest.length; i++) {
@@ -18,11 +18,11 @@ function parseArguments(argv) {
     } else if (rest[i].startsWith('--')) throw new Error(`Unknown option ${rest[i]}`);
     else positional.push(rest[i]);
   }
-  if (positional.length !== (group === 'project' && action === 'recover' ? 0 : 1)) throw new Error(['grant', 'ticket'].includes(group) ? 'Supply one grant ID.' : 'Supply one owner/repository identifier (none for recover).');
-  if (group === 'ticket') {
-    if (!['preview', 'approve', 'release'].includes(action) || !options.inputPath) throw new Error('Usage: ralph ticket preview|approve|release GRANT --input request.json [--digest SHA256 --yes]');
+  if (positional.length !== (group === 'project' && action === 'recover' ? 0 : 1)) throw new Error(['grant', 'ticket', 'batch'].includes(group) ? 'Supply one grant ID.' : 'Supply one owner/repository identifier (none for recover).');
+  if (group === 'ticket' || group === 'batch') {
+    if (!(group === 'batch' ? ['preview', 'publish', 'approve', 'release'] : ['preview', 'approve', 'release']).includes(action) || !options.inputPath) throw new Error(`Usage: ralph ${group} ${group === 'batch' ? 'preview|publish|approve|release' : 'preview|approve|release'} GRANT --input request.json [--digest SHA256 --yes]`);
     const allowed = ['configPath', 'projectsPath', 'inputPath', ...(action === 'approve' ? ['digest', 'yes'] : [])];
-    if (Object.keys(options).some(key => !allowed.includes(key))) throw new Error('Option is not valid for this ticket command.');
+    if (Object.keys(options).some(key => !allowed.includes(key))) throw new Error(`Option is not valid for this ${group} command.`);
   } else if (group === 'grant') {
     if (!['draft', 'inspect', 'activate'].includes(action)) throw new Error('Usage: ralph grant draft|inspect|activate ID');
     if (action === 'draft' && (!options.inputPath || !options.specPath)) throw new Error('Draft requires --input JSON and --spec file.');
@@ -66,7 +66,7 @@ async function main(argv = process.argv.slice(2)) {
   try {
     const parsed = parseArguments(argv);
     Object.assign(options, parsed.options);
-    const command = parsed.group === 'ticket' ? require('./milestone-tickets').ticketCommand : parsed.group === 'grant' ? require('./milestone-grants').grantCommand : projectCommand;
+    const command = parsed.group === 'batch' ? require('./milestone-batches').batchCommand : parsed.group === 'ticket' ? require('./milestone-tickets').ticketCommand : parsed.group === 'grant' ? require('./milestone-grants').grantCommand : projectCommand;
     const result = await command(parsed.action, parsed.repo, options);
     options.record('onboarding_result', { result });
     return result;
