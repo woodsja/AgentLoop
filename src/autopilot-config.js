@@ -25,6 +25,8 @@ function validateProject(projectName, project) {
     throw new TypeError(`Project configuration for ${projectName} must be an object`);
   }
 
+  if (Object.hasOwn(project, 'milestoneAuthorization') && typeof project.milestoneAuthorization !== 'boolean') throw new TypeError('milestoneAuthorization must be a boolean');
+
   for (const field of ['enabled', 'autoMerge']) {
     if (typeof project[field] !== 'boolean') {
       throw new TypeError(`${field} for project ${projectName} must be a boolean`);

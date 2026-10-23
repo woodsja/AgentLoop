@@ -1,4 +1,4 @@
-// Owner CLI only. No daemon, issue ingestion or model-output path calls this module.
+// Grant mutations are owner CLI only. Admission reuses the read-only registration identity helper.
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');

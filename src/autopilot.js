@@ -1,4 +1,5 @@
 'use strict';
+const { checkMilestoneAdmission } = require('./milestone-admission');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -163,7 +164,7 @@ function plannedWorktreePath(project, issue) {
 async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, captureFailedWork) {
   const cleaned = [];
   for (const listed of store.list()) {
-    if (listed.environmentProcess || !listed.terminal || listed.workspaceState !== 'prepared' || !listed.worktreePath) continue;
+    if (listed.authorizationBlocked || listed.environmentProcess || !listed.terminal || listed.workspaceState !== 'prepared' || !listed.worktreePath) continue;
     let lock;
     try {
       lock = store.acquire(listed.issue.number);
@@ -173,7 +174,7 @@ async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write
     }
     try {
       const job = store.load(listed.issue.number);
-      if (!job || job.environmentProcess || !job.terminal || job.workspaceState !== 'prepared' || !job.worktreePath) continue;
+      if (!job || job.authorizationBlocked || job.environmentProcess || !job.terminal || job.workspaceState !== 'prepared' || !job.worktreePath) continue;
       try {
         if (typeof captureFailedWork === 'function') {
           await captureFailedWork({ job, workspace: { worktreePath: job.worktreePath, branch: job.branch }, store });
@@ -204,6 +205,12 @@ async function run(argv, dependencies = {}) {
   const project = loadConfig(projectName);
   const store = dependencies.jobStore
     || createJobStore(resolveStateDir(projectName, project, dependencies.stateRoot));
+  const authorizeMilestone = () => project.milestoneAuthorization !== true ? Promise.resolve(null) : dependencies.checkMilestoneAuthorization
+    ? dependencies.checkMilestoneAuthorization()
+    : checkMilestoneAdmission(projectName, project, candidate.number, {
+      ...dependencies.milestoneOptions, execFile: dependencies.execFile, jobs: () => store.list(),
+      expectedAuthorization: job?.milestoneAuthorization,
+    });
   const cleanupWorkspace = dependencies.cleanupIssueWorkspace || cleanupIssueWorkspace;
   // A scheduled pass over a disabled project is a successful no-op: nothing is
   // discovered, locked, prepared, or cleaned.
@@ -239,6 +246,7 @@ async function run(argv, dependencies = {}) {
   const maxJobRuns = dependencies.maxJobRuns ?? DEFAULT_MAX_JOB_RUNS;
 
   const synchronize = async () => {
+    await authorizeMilestone();
     phase = 'integration';
     const sync = dependencies.synchronizeIssueBranch || synchronizeIssueBranch;
     const result = await sync({ project, issue: candidate, job, store }, {
@@ -365,6 +373,8 @@ async function run(argv, dependencies = {}) {
         return;
       }
       phase = 'merge';
+      try { await authorizeMilestone(); }
+      catch (error) { holdAuthorization(error); return; }
       const merge = dependencies.mergePullRequest || mergePullRequest;
       let result;
       try {
@@ -417,6 +427,10 @@ async function run(argv, dependencies = {}) {
   let workspace;
   let targetLock;
   let phase = 'reconcile';
+  const holdAuthorization = error => {
+    job.authorizationBlocked = { at: store.now(), message: error.message };
+    handToHuman(job, 'authorization', error.message, store.now);
+  };
   try {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
@@ -435,6 +449,16 @@ async function run(argv, dependencies = {}) {
       write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${job.terminalState}; autonomous execution stopped.`);
       return { issue: candidate, workspace: null, result: null, outcome: { status: job.terminalState, terminal: true, deliverable: false }, job };
     }
+    let authorization;
+    try {
+      authorization = await authorizeMilestone();
+      if (job && authorization) job.milestoneAuthorization ||= authorization;
+    }
+    catch (error) {
+      job ||= createJob({ projectName, repo: project.repo, issue: candidate, branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
+      holdAuthorization(error); store.save(job);
+      return { issue: candidate, job, outcome: { status: job.terminalState, terminal: true, deliverable: false } };
+    }
     // Before a new job allocates anything, leave an explicitly-closing PR
     // entirely to its existing owner. Recovered Ralph jobs deliberately skip
     // this guard so their established recovery path remains unchanged.
@@ -447,6 +471,7 @@ async function run(argv, dependencies = {}) {
         worktreePath: plannedWorktreePath(project, candidate),
         now: store.now,
       });
+      if (authorization) job.milestoneAuthorization = authorization;
       const findExistingPullRequests = dependencies.findOpenIssuePullRequests || findOpenIssuePullRequests;
       let existingPullRequests;
       try {
@@ -514,6 +539,7 @@ async function run(argv, dependencies = {}) {
           } else {
             // Keep the original injection names working for embedders while the
             // production default is the concrete, read-only Claude adapter.
+            await authorizeMilestone();
             const reviewPullRequest = dependencies.reviewPullRequest
               || dependencies.independentReview || dependencies.independentReviewer
               || realReviewAdapter;
@@ -711,6 +737,7 @@ async function run(argv, dependencies = {}) {
         if (contractRequired) throw require('./project-preflight').blocked('cancelled', 'Project preparation cancelled before worker admission.');
         throw require('./project-preflight').blocked('cancelled', 'Python preparation cancelled before worker admission.');
       }
+      await authorizeMilestone();
       const preparedProject = environment?.verification ? { ...project, verification: environment.verification } : project;
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(preparedProject, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
@@ -766,9 +793,11 @@ async function run(argv, dependencies = {}) {
         }
       }
       store.save(job);
+      await authorizeMilestone();
     }
 
     if (outcome.deliverable) {
+      await authorizeMilestone();
       phase = 'delivery';
       job.status = 'delivering';
       store.save(job);
@@ -846,7 +875,10 @@ async function run(argv, dependencies = {}) {
     }
     if (job) {
       try {
-        if (['PYTHON_PREFLIGHT_BLOCKED', 'PROJECT_PREFLIGHT_BLOCKED'].includes(error.code)) {
+        if (error.code === 'MILESTONE_AUTHORIZATION_BLOCKED') {
+          holdAuthorization(error);
+          store.save(job);
+        } else if (['PYTHON_PREFLIGHT_BLOCKED', 'PROJECT_PREFLIGHT_BLOCKED'].includes(error.code)) {
           job.environmentPreflight = error.outcome;
           job.status = 'blocked_infrastructure';
           recordFailure(job, 'environment_preflight', error, store.now);
@@ -898,7 +930,7 @@ async function run(argv, dependencies = {}) {
     throw error;
   } finally {
     try {
-      if (workspace && !job?.environmentProcess) {
+      if (workspace && !job?.authorizationBlocked && !job?.environmentProcess) {
         try {
           if (typeof dependencies.captureFailedWork === 'function') {
             await dependencies.captureFailedWork({ job, workspace, store });

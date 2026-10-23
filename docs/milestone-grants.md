@@ -2,7 +2,7 @@
 
 Grant commands store authorization evidence only. They do not publish issues,
 apply labels, enqueue jobs, enable enforcement, change project settings, or start a
-daemon. The separate exact-ticket release workflow below can apply a ready label. Existing ticket admission remains unchanged. Run these commands in the
+daemon. The separate exact-ticket release workflow below can apply a ready label. Admission remains unchanged for projects that have not opted in. Run these commands in the
 existing owner operator environment, using the same owner configuration paths and
 `AGENTLOOP_STATE_DIR` across restarts. Do not derive activation commands from issue
 text or model responses: activation is an explicit owner decision.
@@ -78,8 +78,10 @@ merge remain delivery requirements; none establishes a verified deployment.
 ## Exact-ticket authorization
 
 This staged implementation adds explicit `ticket preview`, `ticket approve` and
-`ticket release` commands. It does **not** enable milestone enforcement in R1 or
-Household, modify live configuration, enqueue a job, or authorize deployment.
+`ticket release` commands. These commands do **not** enable milestone enforcement, modify live
+configuration, enqueue a job, or authorize deployment. R1 enforcement is available
+only through the separately owner-configured opt-in described below; Household
+enforcement remains separate.
 Do not run release against live projects until those admission protections are
 implemented and rollout is separately authorized. All implementation tests use
 fake GitHub operations and isolated registrations.
@@ -164,10 +166,53 @@ GitHub does not provide an atomic compare-title/body-and-add-label operation.
 This helper reads the issue again immediately before receipt creation and label
 mutation, but a concurrent edit can still race the label write. Receipts never
 confer authority on changed bytes: receipt validation in **both** R1 and Household
-admission is required before live rollout. This ticket does not add those later
-protections or claim a live deployment.
+admission is required before live rollout. The R1 opt-in below provides its admission protection; Household admission
+protection and live rollout remain separate work.
 
 `node test/milestone-tickets.test.js` exercises the isolated grant/draft/approval/
 receipt/mock-label flow, failures, retries, quota, exact identity and scope holds.
 It is included in `npm test` for exact-head CI and the existing independent review
 and guarded merge pipeline.
+
+
+## R1 milestone admission (disabled on live projects)
+
+The optional boolean `milestoneAuthorization` in an existing registered R1
+project's autopilot policy enables receipt enforcement when it is exactly `true`.
+Omission or `false` preserves existing R1 admission, review, labels and automatic
+merge behavior. No shipped project enables it. Enabling a live project requires a
+separate owner rollout decision; this implementation does not authorize that edit.
+
+The existing R1 queue calls one read-only validator during periodic discovery,
+direct/manual submission, queue advancement and resumed execution. Reserved mixed
+implementation children are checked again before starting. The same validator
+checks continuation before integration, worker admission, delivery and independent
+review, and immediately before the guarded merge request. It reads the current
+GitHub issue and the durable grant store again; cached labels and a prior receipt
+check cannot authorize a later merge. Existing tests, independent Claude review,
+exact-head CI, PR identity and target integration gates remain required.
+
+Admission requires one exact receipt, active unexpired owner-approved grant,
+unchanged grant/specification bytes and registered identity, exact scope approval,
+and unchanged issue title/body at the exact repository/number with its configured
+ready label. Queued tasks retain the exact grant/receipt binding, so an in-flight
+job cannot silently switch to a replacement receipt. Dependency proof still requires independently reviewed, exact-head
+CI-green merged job evidence; a closed issue is insufficient. GitHub reads or
+store/configuration reads that fail or change during the check deny execution.
+GitHub and the local store cannot participate in a single transaction: a change
+after the final read cannot be atomically coupled to GitHub's merge operation.
+
+The validator uses the same owner configuration, projects file and global
+`AGENTLOOP_STATE_DIR/milestone-grants.json` as the grant/ticket commands, rather
+than a worker-provided path or the per-project job store. Embedders can supply
+`projectsPath` to `createR1Jobs` when using an isolated owner projects file.
+Denied checks append and fsync specific diagnostics to
+`$AGENTLOOP_STATE_DIR/milestone-admission.ndjson`. Existing task execution records
+also retain execution/merge authorization failures. Authorization holds preserve
+worktrees, branches, labels, attempts, reviews and captured output for owner
+reconciliation; automatic cleanup does not remove held work.
+
+`node test/r1-milestone-admission.test.js` uses isolated owner policies, the actual
+R1 submit/discover/recover/advance/merge paths, fake GitHub and the real grant and
+receipt commands. It covers missing/corrupt/unreadable authorization, dependency
+proof and revocation, expiry or issue edits after green CI and independent PASS.
