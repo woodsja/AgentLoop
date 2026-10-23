@@ -1,0 +1,489 @@
+{
+  "synthetic": true,
+  "externalReviewAndCiVerified": false,
+  "productAcceptance": [
+    "calculator total equals 10",
+    "dependent report equals Total: 10"
+  ],
+  "summary": {
+    "inspectedAt": "2026-10-23T02:55:59.390Z",
+    "authority": "Recorded local evidence only; current GitHub bytes, labels and native blockers must be rechecked at admission and merge.",
+    "effectiveState": "active",
+    "scope": {
+      "objective": "Test scope",
+      "allowedCategories": [
+        "tests"
+      ],
+      "exclusions": [
+        "deployment",
+        "external permissions"
+      ],
+      "expiresAt": "2026-10-24T02:55:58.119Z"
+    },
+    "quotas": {
+      "activeJobs": 0,
+      "ticketLimit": 3,
+      "concurrencyLimit": 2,
+      "issued": 2,
+      "remaining": 1
+    },
+    "authorizedTickets": [
+      {
+        "issue": 200,
+        "ticketDigest": "ef99232896c3961d719edf726238948e4c61bcbd1eeacbdf171bef294a3bce33",
+        "receiptId": "1e7232e8-0811-4014-8741-2e92cb8d564f",
+        "revision": 1
+      },
+      {
+        "issue": 201,
+        "ticketDigest": "eda244823d7e0e4b95f0379ac4dea21b0165026341aa46c2f4c602b226920cc9",
+        "receiptId": "a8f72978-7824-4eb3-9081-1604b2ff650e",
+        "revision": 1
+      }
+    ],
+    "tickets": [
+      {
+        "issue": 200,
+        "status": "merged",
+        "ticketDigest": "ef99232896c3961d719edf726238948e4c61bcbd1eeacbdf171bef294a3bce33",
+        "receiptId": "1e7232e8-0811-4014-8741-2e92cb8d564f",
+        "prerequisites": [],
+        "jobStatus": "merged",
+        "reasons": [],
+        "lastDecision": {
+          "type": "decision",
+          "at": "2026-10-23T02:55:58.441Z",
+          "actor": "woodsja",
+          "decision": "ALLOW",
+          "reasons": [
+            "Receipt persisted and configured readiness label confirmed."
+          ],
+          "digest": "43054788f01422dcb2f5c5f73ec9c3e5953da535449956df17923b5fe15f7569",
+          "request": {
+            "repo": "owner/demo",
+            "issue": 200,
+            "grantDigest": "8fdad6a74d893d6573d02e2c647baf53ccfc73e5271a617b1cef3e5de595b3d6",
+            "revision": 1,
+            "spec": {
+              "identity": "owner/demo#103@1",
+              "digest": "256c3a3e9169585ace0fe56afc5729f8cb5e6abb1277b9d78bbd14a07ed8027e"
+            },
+            "ticketDigest": "ef99232896c3961d719edf726238948e4c61bcbd1eeacbdf171bef294a3bce33",
+            "category": "tests",
+            "scope": "in-scope",
+            "reason": "Only approved test scope; no deployment or permissions."
+          },
+          "issue": {
+            "id": 1200,
+            "number": 200,
+            "title": "[DRAFT] Implement synthetic total calculator",
+            "body": "**DRAFT \u2014 UNAUTHORIZED. Planning artifact only. Owner review and separate explicit executable release required.**\n\n<!-- agentloop-planning-draft:one -->\n\nKind: ticket\nSource spec: #103\nPlanning source: chatgpt:owner-planning-message-1\n\n## Proposal\n\nAdd isolated tests\n\n## Acceptance criteria\n\n- [ ] The calculator totals an explicit list of numbers\n\n## Blockers\n\nNone.\n\n## Release boundary\n\nPublication grants no execution authorization. Do not apply execution-ready labels, enqueue Ralph jobs, or change production project registration. The owner must separately authorize release of the complete batch.",
+            "labels": [],
+            "state": "open",
+            "html_url": "https://github.com/owner/demo/issues/200"
+          },
+          "blockers": [],
+          "readyLabel": "custom-ready",
+          "grantId": "g1",
+          "grantDigest": "8fdad6a74d893d6573d02e2c647baf53ccfc73e5271a617b1cef3e5de595b3d6",
+          "revision": 1,
+          "receiptId": "1e7232e8-0811-4014-8741-2e92cb8d564f",
+          "released": true
+        },
+        "lastAdmission": null
+      },
+      {
+        "issue": 201,
+        "status": "merged",
+        "ticketDigest": "eda244823d7e0e4b95f0379ac4dea21b0165026341aa46c2f4c602b226920cc9",
+        "receiptId": "a8f72978-7824-4eb3-9081-1604b2ff650e",
+        "prerequisites": [
+          200
+        ],
+        "jobStatus": "merged",
+        "reasons": [],
+        "lastDecision": {
+          "type": "decision",
+          "at": "2026-10-23T02:55:58.976Z",
+          "actor": "woodsja",
+          "decision": "ALLOW",
+          "reasons": [
+            "Receipt persisted and configured readiness label confirmed."
+          ],
+          "digest": "e0d5c8b92c00f90e22801ba3c5d857f49a1bed06e373196b3f21902934021a7d",
+          "request": {
+            "repo": "owner/demo",
+            "issue": 201,
+            "grantDigest": "8fdad6a74d893d6573d02e2c647baf53ccfc73e5271a617b1cef3e5de595b3d6",
+            "revision": 1,
+            "spec": {
+              "identity": "owner/demo#103@1",
+              "digest": "256c3a3e9169585ace0fe56afc5729f8cb5e6abb1277b9d78bbd14a07ed8027e"
+            },
+            "ticketDigest": "eda244823d7e0e4b95f0379ac4dea21b0165026341aa46c2f4c602b226920cc9",
+            "category": "tests",
+            "scope": "in-scope",
+            "reason": "Only approved test scope; no deployment or permissions."
+          },
+          "issue": {
+            "id": 1201,
+            "number": 201,
+            "title": "[DRAFT] Build synthetic report using the calculator",
+            "body": "**DRAFT \u2014 UNAUTHORIZED. Planning artifact only. Owner review and separate explicit executable release required.**\n\n<!-- agentloop-planning-draft:two -->\n\nKind: ticket\nSource spec: #103\nPlanning source: chatgpt:owner-planning-message-1\n\n## Proposal\n\nAdd isolated tests\n\n## Acceptance criteria\n\n- [ ] The report formats the calculator total\n\n## Blockers\n\nDepends on: #200\n\n## Release boundary\n\nPublication grants no execution authorization. Do not apply execution-ready labels, enqueue Ralph jobs, or change production project registration. The owner must separately authorize release of the complete batch.",
+            "labels": [],
+            "state": "open",
+            "html_url": "https://github.com/owner/demo/issues/201"
+          },
+          "blockers": [
+            200
+          ],
+          "readyLabel": "custom-ready",
+          "grantId": "g1",
+          "grantDigest": "8fdad6a74d893d6573d02e2c647baf53ccfc73e5271a617b1cef3e5de595b3d6",
+          "revision": 1,
+          "receiptId": "a8f72978-7824-4eb3-9081-1604b2ff650e",
+          "released": true
+        },
+        "lastAdmission": null
+      },
+      {
+        "issue": 202,
+        "status": "waiting",
+        "receiptId": null,
+        "prerequisites": [],
+        "jobStatus": null,
+        "reasons": [
+          "No receipt; publish and obtain exact owner scope approval before release."
+        ],
+        "lastDecision": null,
+        "lastAdmission": {
+          "at": "2026-10-23T02:55:59.378Z",
+          "project": "demo",
+          "issue": 202,
+          "code": "MILESTONE_AUTHORIZATION_BLOCKED",
+          "decision": "NEEDS_APPROVAL",
+          "message": "Milestone authorization blocked demo#202: Require one exact ticket receipt."
+        }
+      }
+    ],
+    "jobs": [
+      {
+        "schemaVersion": 1,
+        "project": "demo",
+        "repo": "owner/demo",
+        "issue": {
+          "number": 200,
+          "title": "[DRAFT] Implement synthetic total calculator"
+        },
+        "branch": "ralph/issue-200",
+        "worktreePath": "/tmp/batches-S2NCYX",
+        "baseRef": "origin/main",
+        "workspaceState": "removed",
+        "status": "merged",
+        "ralph": {
+          "status": "passed",
+          "attempts": 1,
+          "taskId": "autopilot:owner/demo#200"
+        },
+        "delivery": {
+          "branch": "ralph/issue-200",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "pushed": true
+        },
+        "pr": {
+          "number": 300,
+          "url": "https://github.com/owner/demo/pull/300"
+        },
+        "merge": {
+          "prNumber": 300,
+          "approvedHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "commit": "cccccccccccccccccccccccccccccccccccccccc",
+          "repo": "owner/demo",
+          "mergedAt": "2026-10-23T02:55:58.912Z",
+          "issueClosed": true
+        },
+        "ci": {
+          "state": "green",
+          "details": null,
+          "prNumber": 300,
+          "headCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "verification": {
+          "command": "node synthetic.test.js",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "passed": true,
+          "exitCode": 0,
+          "timedOut": false,
+          "signal": null,
+          "exception": null,
+          "stdout": "",
+          "stderr": ""
+        },
+        "review": {
+          "reviewer": "claude:synthetic-adapter",
+          "verdict": "PASS",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy": "always",
+          "findings": [],
+          "attempt": {
+            "number": 1,
+            "startedAt": "2026-10-23T02:55:58.851Z",
+            "completedAt": "2026-10-23T02:55:58.864Z"
+          }
+        },
+        "reviewSkip": null,
+        "reviewAttempts": 1,
+        "reviewHistory": [
+          {
+            "number": 1,
+            "startedAt": "2026-10-23T02:55:58.851Z",
+            "reviewer": "claude:synthetic-adapter",
+            "model": "sonnet",
+            "policy": "always",
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "completedAt": "2026-10-23T02:55:58.864Z",
+            "status": "completed",
+            "verdict": "PASS",
+            "findings": [],
+            "diagnostics": null,
+            "rawResult": {
+              "reviewer": "claude:synthetic-adapter",
+              "verdict": "PASS",
+              "findings": [],
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "correction": null,
+        "reviewCorrection": null,
+        "runs": 1,
+        "correctiveCycles": 0,
+        "reviewCorrectiveCycles": 0,
+        "terminal": true,
+        "terminalState": "merged",
+        "failures": [],
+        "createdAt": "2026-10-23T02:55:58.540Z",
+        "updatedAt": "2026-10-23T02:55:58.923Z",
+        "milestoneAuthorization": {
+          "grantId": "g1",
+          "receiptId": "1e7232e8-0811-4014-8741-2e92cb8d564f",
+          "grantDigest": "8fdad6a74d893d6573d02e2c647baf53ccfc73e5271a617b1cef3e5de595b3d6",
+          "ticketDigest": "ef99232896c3961d719edf726238948e4c61bcbd1eeacbdf171bef294a3bce33"
+        },
+        "executionJournal": {
+          "file": "/tmp/batches-S2NCYX/demo/issue-200.execution.ndjson"
+        },
+        "integration": {
+          "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "integrationPolling": {
+          "channels": {
+            "ci": {
+              "current": {
+                "state": "green",
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pr": 300
+              },
+              "lastCheckedAt": "2026-10-23T02:55:58.827Z",
+              "lastTransitionAt": "2026-10-23T02:55:58.827Z",
+              "pollCount": 1
+            },
+            "gate": {
+              "current": {
+                "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "integratedTargetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "approvedHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "lastCheckedAt": "2026-10-23T02:55:58.888Z",
+              "lastTransitionAt": "2026-10-23T02:55:58.888Z",
+              "pollCount": 1
+            }
+          },
+          "transitions": [
+            {
+              "channel": "ci",
+              "at": "2026-10-23T02:55:58.827Z",
+              "current": {
+                "state": "green",
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pr": 300
+              }
+            },
+            {
+              "channel": "gate",
+              "at": "2026-10-23T02:55:58.888Z",
+              "current": {
+                "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "integratedTargetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "approvedHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            }
+          ],
+          "transitionCount": 2
+        }
+      },
+      {
+        "schemaVersion": 1,
+        "project": "demo",
+        "repo": "owner/demo",
+        "issue": {
+          "number": 201,
+          "title": "[DRAFT] Build synthetic report using the calculator"
+        },
+        "branch": "ralph/issue-201",
+        "worktreePath": "/tmp/batches-S2NCYX",
+        "baseRef": "origin/main",
+        "workspaceState": "removed",
+        "status": "merged",
+        "ralph": {
+          "status": "passed",
+          "attempts": 1,
+          "taskId": "autopilot:owner/demo#201"
+        },
+        "delivery": {
+          "branch": "ralph/issue-201",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "pushed": true
+        },
+        "pr": {
+          "number": 301,
+          "url": "https://github.com/owner/demo/pull/301"
+        },
+        "merge": {
+          "prNumber": 301,
+          "approvedHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "commit": "cccccccccccccccccccccccccccccccccccccccc",
+          "repo": "owner/demo",
+          "mergedAt": "2026-10-23T02:55:59.356Z",
+          "issueClosed": true
+        },
+        "ci": {
+          "state": "green",
+          "details": null,
+          "prNumber": 301,
+          "headCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "verification": {
+          "command": "node synthetic.test.js",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "passed": true,
+          "exitCode": 0,
+          "timedOut": false,
+          "signal": null,
+          "exception": null,
+          "stdout": "",
+          "stderr": ""
+        },
+        "review": {
+          "reviewer": "claude:synthetic-adapter",
+          "verdict": "PASS",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "policy": "always",
+          "findings": [],
+          "attempt": {
+            "number": 1,
+            "startedAt": "2026-10-23T02:55:59.298Z",
+            "completedAt": "2026-10-23T02:55:59.308Z"
+          }
+        },
+        "reviewSkip": null,
+        "reviewAttempts": 1,
+        "reviewHistory": [
+          {
+            "number": 1,
+            "startedAt": "2026-10-23T02:55:59.298Z",
+            "reviewer": "claude:synthetic-adapter",
+            "model": "sonnet",
+            "policy": "always",
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "completedAt": "2026-10-23T02:55:59.308Z",
+            "status": "completed",
+            "verdict": "PASS",
+            "findings": [],
+            "diagnostics": null,
+            "rawResult": {
+              "reviewer": "claude:synthetic-adapter",
+              "verdict": "PASS",
+              "findings": [],
+              "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "correction": null,
+        "reviewCorrection": null,
+        "runs": 1,
+        "correctiveCycles": 0,
+        "reviewCorrectiveCycles": 0,
+        "terminal": true,
+        "terminalState": "merged",
+        "failures": [],
+        "createdAt": "2026-10-23T02:55:59.028Z",
+        "updatedAt": "2026-10-23T02:55:59.366Z",
+        "milestoneAuthorization": {
+          "grantId": "g1",
+          "receiptId": "a8f72978-7824-4eb3-9081-1604b2ff650e",
+          "grantDigest": "8fdad6a74d893d6573d02e2c647baf53ccfc73e5271a617b1cef3e5de595b3d6",
+          "ticketDigest": "eda244823d7e0e4b95f0379ac4dea21b0165026341aa46c2f4c602b226920cc9"
+        },
+        "executionJournal": {
+          "file": "/tmp/batches-S2NCYX/demo/issue-201.execution.ndjson"
+        },
+        "integration": {
+          "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "integrationPolling": {
+          "channels": {
+            "ci": {
+              "current": {
+                "state": "green",
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pr": 301
+              },
+              "lastCheckedAt": "2026-10-23T02:55:59.276Z",
+              "lastTransitionAt": "2026-10-23T02:55:59.276Z",
+              "pollCount": 1
+            },
+            "gate": {
+              "current": {
+                "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "integratedTargetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "approvedHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "lastCheckedAt": "2026-10-23T02:55:59.330Z",
+              "lastTransitionAt": "2026-10-23T02:55:59.330Z",
+              "pollCount": 1
+            }
+          },
+          "transitions": [
+            {
+              "channel": "ci",
+              "at": "2026-10-23T02:55:59.276Z",
+              "current": {
+                "state": "green",
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pr": 301
+              }
+            },
+            {
+              "channel": "gate",
+              "at": "2026-10-23T02:55:59.330Z",
+              "current": {
+                "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "integratedTargetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "approvedHead": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            }
+          ],
+          "transitionCount": 2
+        }
+      }
+    ],
+    "errors": []
+  }
+}

@@ -442,3 +442,39 @@ These commands change only grant evidence. They do not edit owner registries,
 credentials, issue specifications, service configuration or deployment state.
 Implementation verification uses temporary stores and fake GitHub; no live
 activation, service restart or deployment is implied.
+
+## Read-only owner milestone summary
+
+```sh
+AGENTLOOP_STATE_DIR=/owner/state node src/cli.js grant summary milestone-1 --projects /owner/projects.json
+```
+
+Use the same state directory and registry as the operator. `summary` reads files
+without initializing the writable CLI store, taking locks, advancing the durable
+clock, persisting expiry, calling GitHub, or starting work. Standard output is a
+single JSON report suitable for saving and inspecting in a fresh conversation.
+Unlike `inspect`, it never persists lifecycle transitions. It accepts no approval
+flags. Missing/corrupt evidence is reported in `errors`; the raw bytes remain in
+`evidence`. An unknown grant or unreadable grant store fails inspection.
+
+The report includes current grant identity, revision, digest, objective, retained
+specification bytes (`spec.contentBase64`), scope, expiry, quotas, exact authorized
+ticket IDs/digests, planned drafts, batch journals, dependencies, jobs, recorded
+decisions/reasons, admission diagnostics and full captured execution journals.
+`lastDecision` and `lastAdmission` are historical evidence, not fresh GitHub
+observations. A merged status describes retained job evidence; it is not product
+acceptance or deployment verification. Receipts and approval history remain
+available in full even when the grant is paused, amended, revoked or expired.
+
+This is a local, non-atomic snapshot while writers may run. Repeat inspection
+when evidence changes. It cannot detect a remote edit made since the last job or
+release observation; existing admission and guarded merge must reread GitHub.
+`authorized` describes a stored receipt, never permission to skip those gates.
+Issued quota includes every retained reservation; active job count describes local
+jobs and differs from release's open-issue capacity calculation. The report embeds
+complete raw records without truncation, including operator diagnostics across
+grants in this owner state root. Large histories produce large reports. Keep the
+report in the existing owner access boundary and preserve source stores/logs.
+
+For reproducible rehearsal coverage, evidence limits, and the separately gated
+activation procedure, see [issue 111 handoff](issue-111-handoff.md).
