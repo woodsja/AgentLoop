@@ -20,9 +20,14 @@ function fixture(t) {
   const store = createJobStore(path.join(root, 'state'));
   const issues = [1, 2].map(number => ({ number, title: `Work ${number}`, body: 'Implement the independently authorized feature with tests.' }));
   const project = { enabled: true, autoMerge: true, architectureDecisions: true, decisionOwner: 'owner', repo: 'example/repo', checkout: root, worktreeRoot: root, baseBranch: 'main', readyLabel: 'ready-for-agent', humanLabel: 'human', worker: 'codex', reviewPolicy: 'always', verification: 'node -e "process.stdout.write(\'verified\')"' };
+  const configPath = path.join(root, 'config.json'), projectsPath = path.join(root, 'projects.json');
+  fs.writeFileSync(configPath, JSON.stringify({ allowedProjects: { demo: root } }));
+  fs.writeFileSync(projectsPath, JSON.stringify({ demo: project }));
   const remote = [], calls = []; let loseCreate = false, failAssignment = false;
   const execFile = (file, args, options, cb) => {
     calls.push(args);
+    const original = issues.find(i => args[1] === `repos/example/repo/issues/${i.number}`);
+    if (original) return cb(null, JSON.stringify({ ...original, state: 'open', html_url: `https://github.com/example/repo/issues/${original.number}`, labels: [{ name: 'ready-for-agent' }] }));
     if (args.includes('--slurp')) return cb(null, JSON.stringify([remote]));
     if (args.includes('POST')) {
       const issue = { number: 50, html_url: 'https://github.com/example/repo/issues/50', body: args.find(a => a.startsWith('body=')).slice(5), assignees: [] };
@@ -32,7 +37,7 @@ function fixture(t) {
     if (args.includes('--add-assignee') && failAssignment) return cb(new Error('forbidden'), '', 'assignment forbidden');
     cb(null, '');
   };
-  const dependencies = { loadProjectConfig: () => project, jobStore: store, discoverReadyIssues: async () => issues,
+  const dependencies = { milestoneOptions: { configPath, projectsPath, stateDir: root }, loadProjectConfig: () => project, jobStore: store, discoverReadyIssues: async () => issues,
     findOpenIssuePullRequests: async () => [], prepareIssueWorkspace: async (p, i) => ({ branch: `ralph/issue-${i.number}`, worktreePath: root, baseRef: 'main' }),
     prepareRepositoryEnvironment: async () => ({}), readRepositoryInstructions: async () => [], execFile, write: () => {},
     cleanupIssueWorkspace: async () => { if (fs.existsSync(path.join(root, 'worker-state.json'))) throw new Error('Paused evidence must survive'); },

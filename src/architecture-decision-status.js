@@ -25,7 +25,7 @@ function decisionStatus(job) {
       acceptedAdr: accepted ? { path: d.adr.path, commit: accepted.commit,
         url: `https://github.com/${job.repo}/blob/${accepted.commit}/${d.adr.path}`, merge: accepted } : null,
       scopeCheck: d.scopeCheck || { status: 'not_checked', authorization: d.authorization,
-        reason: 'Fresh grant, scope, dependency and ADR validation required before resume.' },
+        reason: 'Fresh original admission (ready label or exact grant), dependency and ADR validation required before authenticated owner resume.' },
       resolution: d.resolution || null, resumedAt: d.resumedAt || null,
       logs: { raw: job.r1ParentJobId ? `/api/log/${encodeURIComponent(job.r1ParentJobId)}?raw=1` : null,
         executionJournal: job.executionJournal || d.pausedExecution?.executionJournal || null },

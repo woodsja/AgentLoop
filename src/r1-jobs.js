@@ -353,7 +353,7 @@ function createR1Jobs(store, options = {}) {
       await run(['--project', task.project], {
         ...dependencies,
         jobStore, loadProjectConfig: () => project,
-        milestoneOptions: { stateDir: store.paths.state },
+        milestoneOptions: { stateDir: store.paths.state, configPath: store.paths.config, projectsPath: options.projectsPath },
         checkMilestoneAuthorization: () => authorize(task.project, load(task.project), task.issue, task.milestoneAuthorization),
         environmentIsCancelled: () => closing || store.readTask(task.id, 'running').cancelRequested === true,
         // A completed implementation child cannot resolve a later integration.

@@ -60,6 +60,7 @@ async function runTask(projectPath, inputTask, options) {
       });
     } catch (error) {
       options.recordExecution?.('exception', { role: 'worker', attempt: number, name: error.name, message: error.message, stack: error.stack, code: error.code });
+      if (error.code === 'ARCHITECTURE_RESUME_BLOCKED') throw error;
       attempts.push({
         number,
         status: 'worker_error',
