@@ -329,6 +329,7 @@ function createR1Jobs(store, options = {}) {
       : job.status === 'running' ? 'implementation' : job.status === 'awaiting_ci' ? 'ci' : job.status;
     const snapshot = snapshotter();
     const jobStore = { ...original,
+      dependencyJobs: () => original.list(),
       appendIntegrationEvent(job, record) {
         original.appendIntegrationEvent(job, record);
         store.appendExecution(task.id, { stage: phaseOf(job), implementationAttempt: job.runs, ...record });

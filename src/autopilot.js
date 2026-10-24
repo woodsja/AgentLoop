@@ -464,6 +464,31 @@ async function run(argv, dependencies = {}) {
   try {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
+    if (job?.architectureDecision?.resumeRequested) {
+      const d = job.architectureDecision;
+      try {
+        d.resumeEvidence = await require('./architecture-decision-actions').validateResume(project, job, store, {
+          ...dependencies.milestoneOptions, execFile: dependencies.execFile,
+        });
+        const proposalPath = require('node:path').join(job.worktreePath, decisions.FILE);
+        if (fs.existsSync(proposalPath)) {
+          const raw = JSON.parse(fs.readFileSync(proposalPath, 'utf8'));
+          if (JSON.stringify(raw) !== JSON.stringify(d.proposal)) throw new Error('Retained decision proposal changed.');
+          fs.rmSync(proposalPath);
+        }
+      } catch (error) {
+        d.blockedReason = error.message; d.resumeRequested = false;
+        job.status = 'paused_owner_decision'; job.terminal = true; job.terminalState = 'paused_owner_decision';
+        store.save(job);
+      }
+      if (d.resumeRequested) {
+        d.resumedAt = store.now();
+        job.architectureDecisionHistory ||= []; job.architectureDecisionHistory.push(d);
+        delete job.architectureDecision;
+        job.decisionResumeWorkspace = true;
+        store.save(job);
+      }
+    }
     if (job?.architectureDecision) {
       await decisions.publish(project, job, store, { execFile: dependencies.execFile });
       return { issue: candidate, job, outcome: { status: 'paused_owner_decision', terminal: true, deliverable: false } };
@@ -770,7 +795,7 @@ async function run(argv, dependencies = {}) {
         : `CI was red but no diagnostics were persisted for a corrective cycle.${job.ci && job.ci.details ? `\n${job.ci.details}` : ''}`,
       store.now);
     }
-    if (job && job.workspaceState !== 'removed' && job.worktreePath) {
+    if (job && !job.decisionResumeWorkspace && job.workspaceState !== 'removed' && job.worktreePath) {
       // Clear whatever an interrupted or failed run left behind so this
       // issue's workspace can be prepared afresh instead of duplicated.
       await cleanupWorkspace(project, { worktreePath: job.worktreePath, branch: job.branch }, {
@@ -806,7 +831,7 @@ async function run(argv, dependencies = {}) {
     // and make a safe delivery retry impossible.
     const correctionHead = correction && correction.status === 'passed' && job.delivery
       && job.delivery.commit ? job.delivery.commit : correction && (reviewCorrection ? correction.reviewCommit : correction.redCommit);
-    workspace = await prepareWorkspace(project, candidate, {
+    workspace = job.decisionResumeWorkspace ? { branch: job.branch, worktreePath: job.worktreePath, baseRef: job.baseRef } : await prepareWorkspace(project, candidate, {
       branch: job.branch,
       ...(correction ? { headCommit: correctionHead } : {}),
     });
@@ -814,6 +839,7 @@ async function run(argv, dependencies = {}) {
     job.worktreePath = workspace.worktreePath;
     job.baseRef = workspace.baseRef ?? null;
     job.workspaceState = 'prepared';
+    delete job.decisionResumeWorkspace;
     store.save(job);
 
     let result = null;
@@ -851,6 +877,7 @@ async function run(argv, dependencies = {}) {
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)({ ...preparedProject, maxReviewRounds }, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(preparedProject, candidate, instructions);
+      if (job.architectureDecisionHistory?.length) task.goal += `\n\nOwner accepted decisions (merged ADR authority; no additional permissions):\n${JSON.stringify(job.architectureDecisionHistory.map(d => ({ ownerDecision: d.ownerDecision, adr: d.adr, merge: d.resumeEvidence })))}`;
       if (project.architectureDecisions === true) task.goal += `\n\n${decisions.instructions(decisionReferences)}`;
       const service = createService({ config: storeConfig, ...attemptOptions(),
         recordBaseline: sha => {
