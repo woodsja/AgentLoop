@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "original": "docs/evidence/issue-111/batch-tests.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-111-batch-tests.log.gz",
+      "bytes": 1807,
+      "sha256": "a5a2fb98a89e9f81174e133a85435d9e7cfb5661410eb51c86a0f56aa63d571e",
+      "gzip_sha256": "4ac001ea41a805e5f50a2a0257bbc2ed2a59a00bc5c802c9406e4391d757cadd",
+      "testedCommit": "9661ba43033e761db512dc011326639372287951",
+      "invocation": "node test/milestone-batches.test.js"
+    },
+    {
+      "original": "docs/evidence/issue-111/npm-test-sandbox.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-111-npm-test-sandbox.log.gz",
+      "bytes": 20804,
+      "sha256": "31f1ac0d8644e9bd432af3a1a5437d99314439890067548125ff06779282d9f3",
+      "gzip_sha256": "97d46c3fe03627cb7627b12a6b4cc561713529c3982e87dff52e4b94664dad37",
+      "testedCommit": "9661ba43033e761db512dc011326639372287951",
+      "invocation": "npm test"
+    },
+    {
+      "original": "docs/evidence/issue-111/npm-test.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-111-npm-test.log.gz",
+      "bytes": 74514,
+      "sha256": "4b22eacb9233e9243678482365a77211d4219a1690d20e7b12a7528b278d3fc8",
+      "gzip_sha256": "89aa9f3acda50e9e03d41ca8cdc6d852bf49119e73357348a47d4f1367edc30d",
+      "testedCommit": "9661ba43033e761db512dc011326639372287951",
+      "invocation": "npm test"
+    },
+    {
+      "original": "docs/evidence/issue-111/rehearsal-export.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-111-rehearsal-export.log.gz",
+      "bytes": 937715,
+      "sha256": "95f44c7cca6b047e57b4fc44890cf22ae79674333448d54a7b4c6a757b83a17c",
+      "gzip_sha256": "537fb00647fd97d005de9986c5945461238b3b8c843b3e9f93cc39a816078331",
+      "testedCommit": "9661ba43033e761db512dc011326639372287951",
+      "invocation": "node test/milestone-batches.test.js"
+    },
+    {
+      "original": "docs/evidence/issue-111/review-correction-batch-tests.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-111-review-correction-batch-tests.log.gz",
+      "bytes": 1809,
+      "sha256": "7ec39cc4f4abe186eb431c71a614ee3283c6122e9fe8d68c195ab5ca48119cca",
+      "gzip_sha256": "6a05d14afa772dcac36c3c278ccf0b74bd5cf104735a30cd304953661811f330",
+      "testedCommit": "78f2ab235d9f25e9a765bfa1905ef1519e5b17e2",
+      "invocation": "node test/milestone-batches.test.js"
+    },
+    {
+      "original": "docs/evidence/issue-111/review-correction-npm-test-unrestricted.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-111-review-correction-npm-test-unrestricted.log.gz",
+      "bytes": 74509,
+      "sha256": "5f2d40ceadbbf28902668eb4cbc95fee69e2c2e682e11f4cf87d85099658ac70",
+      "gzip_sha256": "abc94181f3bb2294a26d5a9adf5e625f5dfa59eb97e3e59b91525f883971fb96",
+      "testedCommit": "78f2ab235d9f25e9a765bfa1905ef1519e5b17e2",
+      "invocation": "npm test"
+    },
+    {
+      "original": "docs/evidence/issue-111/review-correction-npm-test.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-111-review-correction-npm-test.log.gz",
+      "bytes": 20789,
+      "sha256": "6801dda5670264734b3a5c8402b2f568614af5fa3be96e812f335be61ea1c399",
+      "gzip_sha256": "b5438e8c0c90f9e3072d3a5fcb56a1bbb6cad8ca44842e46006679103102f6cf",
+      "testedCommit": "78f2ab235d9f25e9a765bfa1905ef1519e5b17e2",
+      "invocation": "npm test"
+    },
+    {
+      "original": "docs/evidence/issue-142/attempt1-pr135-diff.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-attempt1-pr135-diff.log.gz",
+      "bytes": 92019,
+      "sha256": "b494731637e005e63bbbd5ba029e1ad60a98dcf1180b785f1e6b41f9d2546abf",
+      "gzip_sha256": "42023790e9aa39fbe3473a3949b31d752d5035f834a9fa0f07f1b3b0afe3e3a0"
+    },
+    {
+      "original": "docs/evidence/issue-142/corrected-pr135-diff.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-corrected-pr135-diff.log.gz",
+      "bytes": 294622,
+      "sha256": "69ea1bb9088e34fe9178a2689924246a09956f2c1a2aa67c093bbd0aaa133789",
+      "gzip_sha256": "1e149fc925b752ee4fe453084d7cfe58561330027ea1c59de99234f044a4e802"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-parent.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-original-parent.log.gz",
+      "bytes": 327467,
+      "sha256": "1f41a0126b2b32a54eb922b93e0d13e9e9056e40ecb7848e8a479dc6c799d73f",
+      "gzip_sha256": "22636695630c1426b593d366aa22ef120f8e173e880ccae9dde090c73e7f1e39"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-r1.execution.ndjson",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-original-r1.execution.ndjson.gz",
+      "bytes": 5336793,
+      "sha256": "7f7330130fcb1dfa36d769bb01078fdd7130c4ad3ff915b87370a10ea465edd2",
+      "gzip_sha256": "254088e3c7e17c1f6422df2a2c3ba93efd62962f8931be50fdd84246d9734452"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-r1.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-original-r1.log.gz",
+      "bytes": 323368,
+      "sha256": "7a5724e3767dade07a2c256e9780bcd0403e1308c285afee444dc5de0ba7cf7f",
+      "gzip_sha256": "86d2a6fa342c8abb8f7cac349aa07bd104166a70a924db2d297a1da3945164d9"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-result.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-original-result.log.gz",
+      "bytes": 159164,
+      "sha256": "bb4f68e199aa722db56e1eeb157dfd38e70a4a7d2facc573040af9e7a3d4a6e4",
+      "gzip_sha256": "16239d7dd054117b5b08e585b07afbd2d2649e7bf137e3da19dc488e5176a72e"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-run.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-original-run.log.gz",
+      "bytes": 2888,
+      "sha256": "ae357c5aa6bc836e2fd497bca9c7c2e99e3a38a419911016cf5aa79f713f3987",
+      "gzip_sha256": "455e43baebc5783d473982e186a277fddc1d978e308337d4b26a27dfe3db0882"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-worker.execution.ndjson",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-original-worker.execution.ndjson.gz",
+      "bytes": 10186094,
+      "sha256": "e56829b53003ec641a22548a8335d6545c94a61108441a59f557e0d619ef52dd",
+      "gzip_sha256": "9a43ae7a3064140bb021243062c35dceaa4c3575fb807839620f32df9eb0591b"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-worker.ndjson",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-original-worker.ndjson.gz",
+      "bytes": 497,
+      "sha256": "f78c74c705e70ce7ab4d891a137942827fed349127b6b1ffdfc9ef92fa4186ea",
+      "gzip_sha256": "b1d72ade9328dea4f062cb3531e051a3a4ff3bdc2ddacc85c45bd498d65c8abd"
+    },
+    {
+      "original": "docs/evidence/issue-142/pr135.log",
+      "sourceCommit": "fffe78d3fc969903abf8781b96aa733bdc2bd635",
+      "archive": "docs/evidence/review/issue-142-pr135.log.gz",
+      "bytes": 248,
+      "sha256": "54a4031c7b6647042c3a009b302ef0e3617fb649dc56650c4eb53d1366d0f7d9",
+      "gzip_sha256": "2991eb7c3e059c33cdb45d6673b5ef0a2c656adc2b2d3defad77e3999a425c4c"
+    }
+  ]
+}
