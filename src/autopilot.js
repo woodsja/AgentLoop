@@ -82,10 +82,8 @@ function errorMessage(error) {
 
 // Terminal hand-off for a CI failure the single corrective cycle could not fix.
 const READY_FOR_HUMAN = 'ready_for_human';
-// At most two reviews per exact SHA, including interrupted invocations;
-// reintegration shares a total budget of eight retained review attempts.
-const MAX_REVIEW_ATTEMPTS = 2;
-const MAX_TOTAL_REVIEW_ATTEMPTS = 8;
+// Each job retains its authorized total review budget across SHA changes and restarts.
+const MAX_REVIEWS_PER_HEAD = 2;
 const realReviewAdapter = createClaudeReviewAdapter();
 
 // A verified-but-undelivered change and an already pushed branch are both work
@@ -272,7 +270,8 @@ async function run(argv, dependencies = {}) {
   const prepareEnvironment = dependencies.prepareRepositoryEnvironment || prepareRepositoryEnvironment;
   const buildTask = dependencies.buildAutopilotTask || buildAutopilotTask;
   const createService = dependencies.createRalphTaskService || createRalphTaskService;
-  const maxJobRuns = dependencies.maxJobRuns ?? DEFAULT_MAX_JOB_RUNS;
+  const maxReviewRounds = selection.job ? (selection.job.maxReviewRounds ?? 2) : (project.maxReviewRounds ?? 2);
+  const maxJobRuns = dependencies.maxJobRuns ?? Math.max(DEFAULT_MAX_JOB_RUNS, maxReviewRounds + 1);
 
   const synchronize = async () => {
     await authorizeMilestone();
@@ -500,6 +499,7 @@ async function run(argv, dependencies = {}) {
     if (!job) {
       job = createJob({
         projectName,
+        maxReviewRounds,
         repo: project.repo,
         issue: candidate,
         branch: deriveBranchName(candidate),
@@ -567,10 +567,10 @@ async function run(argv, dependencies = {}) {
             handToHuman(job, 'review', 'Independent review requires passing deterministic verification evidence for the exact delivered commit.', store.now);
           } else if (matchingPass(job.review, job.delivery.commit)) {
             await finishApprovedMerge();
-          } else if ((job.reviewAttempts ?? 0) >= MAX_TOTAL_REVIEW_ATTEMPTS
-            || ((job.reviewHistory || []).filter(entry => entry.commit === job.delivery.commit).length
-              + Math.max(0, (job.reviewAttempts || 0) - (job.reviewHistory || []).length)) >= MAX_REVIEW_ATTEMPTS) {
-            handToHuman(job, 'review', `Independent review attempt limit (${MAX_REVIEW_ATTEMPTS}) reached; no further automatic review will run.`, store.now);
+          } else if ((job.reviewAttempts ?? 0) >= maxReviewRounds
+            || (job.reviewHistory ?? []).filter(entry => entry.commit === job.delivery.commit).length
+              + Math.max(0, (job.reviewAttempts ?? 0) - (job.reviewHistory ?? []).length) >= MAX_REVIEWS_PER_HEAD) {
+            handToHuman(job, 'review', `Independent review attempt limit (${maxReviewRounds}) reached; no further automatic review will run.`, store.now);
           } else {
             // Keep the original injection names working for embedders while the
             // production default is the concrete, read-only Claude adapter.
@@ -584,6 +584,7 @@ async function run(argv, dependencies = {}) {
             const reviewContext = {
               project, issue: candidate, pullRequest: { ...job.pr, headCommit: job.delivery.commit },
               headCommit: job.delivery.commit, verification: job.verification, ci: job.ci,
+              reviewHistory: job.reviewHistory ?? [], originalIssue: job.originalIssue ?? candidate,
             };
             let prepared;
             if (typeof reviewPullRequest.prepare === 'function') {
@@ -666,7 +667,8 @@ async function run(argv, dependencies = {}) {
               // side-effect free and restart-safe.
               recordReview(job, { ...needsChanges, policy: project.reviewPolicy, attempt }, store.now);
               const findings = findingsText(job.review.findings);
-              if ((job.reviewCorrectiveCycles ?? 0) === 0) {
+              if ((job.reviewAttempts ?? 0) < maxReviewRounds
+                && (job.reviewCorrectiveCycles ?? 0) < maxReviewRounds - 1) {
                 recordReviewCorrectiveCycle(job, {
                   reviewCommit: needsChanges.commit, reviewer: needsChanges.reviewer, findings,
                 });
@@ -771,7 +773,12 @@ async function run(argv, dependencies = {}) {
     const reviewCorrection = Boolean(savedReviewCorrection && correction === savedReviewCorrection);
     phase = 'preparing';
     job.issue.title = candidate.title;
-    job.runs += 1;
+    if (job.runs >= maxJobRuns && job.ralph?.status !== 'passed') {
+      handToHuman(job, 'correction', `Total feature run limit (${maxJobRuns}) reached.`, store.now);
+      store.save(job);
+      return { issue: candidate, job, outcome: { status: READY_FOR_HUMAN } };
+    }
+    if (job.ralph?.status !== 'passed') job.runs += 1;
     job.status = 'preparing';
     store.save(job);
     // A verified correction whose delivery was interrupted resumes from its
@@ -824,7 +831,7 @@ async function run(argv, dependencies = {}) {
       await authorizeMilestone();
       const preparedProject = environment?.verification ? { ...project, verification: environment.verification } : project;
       const task = correction
-        ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)(preparedProject, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
+        ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)({ ...preparedProject, maxReviewRounds }, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(preparedProject, candidate, instructions);
       const service = createService({ config: storeConfig, ...attemptOptions(),
         recordBaseline: sha => {
@@ -972,6 +979,11 @@ async function run(argv, dependencies = {}) {
           store.save(job);
         } else {
           recordFailure(job, phase, error, store.now);
+          // Verified delivery resumes do not spend implementation runs, but
+          // infrastructure failures in that path still have a durable bound.
+          const runLimitReached = job.ralph?.status === 'passed'
+            ? job.failures.filter(failure => ['preparing', 'delivery'].includes(failure.phase)).length >= 3
+            : job.runs >= maxJobRuns;
           if (job.ralph && job.ralph.status === 'running') job.ralph.status = 'error';
           if (error.code === 'AUTOPILOT_INTEGRATION_BLOCKED') {
             handToHuman(job, 'integration', errorMessage(error), store.now);
@@ -993,7 +1005,7 @@ async function run(argv, dependencies = {}) {
             job.status = 'awaiting_ci';
           } else if (((job.correction && job.correction.status !== 'delivered')
             || (job.reviewCorrection && job.reviewCorrection.status !== 'delivered'))
-            && (error.code === 'AUTOPILOT_NO_CHANGES' || job.runs >= maxJobRuns)) {
+            && (error.code === 'AUTOPILOT_NO_CHANGES' || runLimitReached)) {
             // A correction that changes nothing (or keeps failing outside
             // Ralph) is handed to a human instead of being pushed or retried.
             const activeCorrection = job.reviewCorrection && job.reviewCorrection.status !== 'delivered'
@@ -1005,7 +1017,7 @@ async function run(argv, dependencies = {}) {
           } else {
             job.status = 'failed';
             // Bound automatic retries of a job that keeps failing outside Ralph.
-            if (job.runs >= maxJobRuns) markTerminal(job, 'failed');
+            if (runLimitReached) markTerminal(job, 'failed');
           }
           store.save(job);
         }

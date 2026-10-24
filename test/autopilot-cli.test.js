@@ -581,7 +581,7 @@ test('restart reuses a persisted exact-head PASS even when review attempts are e
 });
 
 test('restart refuses further reviews once the persisted review-attempt limit is reached', async () => {
-  for (const attempts of [2, 100]) {
+  for (const attempts of [2, 8]) {
     const store = temporaryStore();
     const issue = { number: 240, title: 'Interrupted review attempts', body: '' };
     const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-240', worktreePath: null, now: store.now });
@@ -2351,4 +2351,189 @@ test('terminal child restart retries unsafe capture without deleting, then compl
   await runAutopilot(['--project', 'demo'], dependencies);
   assert.deepEqual(stage, ['capture', 'capture', 'cleanup']);
   assert.equal(store.load(943).workspaceState, 'removed');
+});
+
+for (const scenario of ['PASS', 'NEEDS_CHANGES', 'PASS_WITH_CI', 'INVALID', 'PROVIDER', 'STALE']) {
+  const finalVerdict = scenario === 'PASS_WITH_CI' ? 'PASS' : scenario;
+  const extraCi = scenario === 'PASS_WITH_CI' ? 1 : 0;
+  test(`five independent rounds with four distinct corrections end in ${scenario}`, async () => {
+    const store = temporaryStore();
+    const issue = { number: 147, title: 'Five review rounds', body: 'Preserve original requirements' };
+    const policy = { ...project, enabled: true, verification: 'check', maxAttempts: 2, reviewPolicy: 'always', maxReviewRounds: 5, autoMerge: true, baseBranch: 'ralph-dev' };
+    const workers = [], reviews = [], pushes = [];
+    let merges = 0;
+    let head = 'abc123';
+    const tick = overrides => runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+      loadProjectConfig: () => policy, discoverReadyIssues: async () => [issue],
+      createRalphTaskService: () => ({ run: async (cwd, task) => {
+        workers.push(task.id);
+        assert.equal(task.maxAttempts, 2);
+        assert.match(task.goal, /Preserve original requirements/);
+        return { status: 'passed', attempts: [{ number: 1, status: 'passed', verification: verifierResult }] };
+      } }),
+      deliverPassedWork: async ({ workspace, previousCommit }) => {
+        if (previousCommit) { assert.equal(previousCommit, head); head = `corrected-${pushes.length}`; }
+        pushes.push(head);
+        return { branch: workspace.branch, commit: head, pr: { number: 99, url: 'https://github.com/example/repo/pull/99' } };
+      },
+      observePullRequest: async () => ({ ...openExpectedPr('ralph/issue-147-five-review-rounds'), headRefOid: head, baseRefName: 'ralph-dev' }),
+      mergePullRequest: async (p, identity) => {
+        assert.equal(reviews.length, 5);
+        assert.equal(identity.headCommit, head);
+        merges++;
+        return { mergeCommit: 'merged-final' };
+      },
+      reconcileIssueClosure: async () => ({ number: 147, state: 'closed' }),
+      observePullRequestCi: async (p, identity) => {
+        assert.equal(identity.commit, head);
+        return { state: 'green', prNumber: 99, headCommit: head };
+      },
+      reviewPullRequest: async context => {
+        assert.equal(context.headCommit, head);
+        assert.equal(context.verification.commit, head);
+        assert.equal(context.verification.passed, true);
+        reviews.push(head);
+        if (reviews.length === 5 && scenario === 'PROVIDER') throw new Error('review model transport failed');
+        if (reviews.length === 5 && scenario === 'STALE') return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: pushes[0] };
+        const verdict = reviews.length === 5 ? finalVerdict : 'NEEDS_CHANGES';
+        return { reviewer: 'claude:sonnet', verdict, commit: head, findings: verdict === 'PASS' ? '' : `finding ${reviews.length}` };
+      }, ...overrides,
+    }));
+    await tick();
+    if (extraCi) {
+      await tick({ observePullRequestCi: async () => ({ state: 'red', prNumber: 99, headCommit: head, details: 'CI failure' }) });
+      await tick();
+    }
+    for (let round = 1; round <= 5; round++) {
+      await tick();
+      let saved = createJobStore(store.directory).load(147);
+      assert.equal(saved.reviewAttempts, round);
+      if (round < 5) {
+        assert.equal(saved.status, 'review_correction_eligible');
+        assert.equal(workers.length, round + extraCi);
+        await tick();
+        saved = createJobStore(store.directory).load(147);
+        assert.equal(saved.status, 'awaiting_ci');
+        assert.equal(saved.reviewCorrection.cycle, round);
+        assert.equal(saved.reviewCorrection.status, 'delivered');
+      }
+    }
+    const saved = createJobStore(store.directory).load(147);
+    assert.equal(saved.terminalState, finalVerdict === 'PASS' ? 'merged' : 'ready_for_human');
+    assert.equal(merges, finalVerdict === 'PASS' ? 1 : 0);
+    assert.equal(saved.reviewHistory.length, 5);
+    assert.equal(new Set(reviews).size, 5);
+    assert.equal(new Set(workers).size, 5 + extraCi);
+    assert.equal(pushes.length, 5 + extraCi);
+    assert.equal(saved.runs, 5 + extraCi);
+    assert.equal(saved.correctiveCycles, extraCi);
+    assert.equal(saved.reviewCorrectiveCycles, 4);
+    await tick();
+    assert.equal(reviews.length, 5);
+    assert.equal(workers.length, 5 + extraCi);
+  });
+}
+
+
+for (const checkpoint of ['verified', 'committed', 'pushed']) {
+  test(`fourth review correction resumes after ${checkpoint} without repeating the worker`, async () => {
+    const store = temporaryStore();
+    const issue = { number: 148, title: 'Resume fourth correction', body: 'original goal' };
+    const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-148', worktreePath: null, now: store.now, maxReviewRounds: 5 });
+    job.runs = 5;
+    job.reviewCorrectiveCycles = 4;
+    job.reviewCorrectionHistory = [1, 2, 3].map(cycle => ({ cycle, status: 'delivered', reviewCommit: `sha-${cycle}`, reviewer: 'claude:sonnet', findings: `finding ${cycle}`, commit: `sha-${cycle + 1}` }));
+    job.reviewCorrection = { cycle: 4, status: 'eligible', reviewCommit: 'sha-4', reviewer: 'claude:sonnet', findings: 'fourth finding', commit: null };
+    job.delivery = { branch: job.branch, commit: 'sha-4', pushed: true };
+    job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+    job.status = 'review_correction_eligible';
+    store.save(job);
+    let workers = 0;
+    const dependencies = {
+      // A changed configuration cannot reset the persisted five-round budget.
+      loadProjectConfig: () => ({ ...project, enabled: true, verification: 'check', reviewPolicy: 'always', maxReviewRounds: 2 }),
+      discoverReadyIssues: async () => [issue],
+      createRalphTaskService: () => ({ run: async (cwd, task) => {
+        workers++;
+        assert.equal(task.id, 'autopilot:example/repo#148:review-correction-4');
+        return { status: 'passed', attempts: [{ number: 1, status: 'passed', verification: verifierResult }] };
+      } }),
+    };
+    await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+      ...dependencies,
+      deliverPassedWork: async ({ workspace }, { onProgress }) => {
+        if (checkpoint !== 'verified') await onProgress({ branch: workspace.branch, commit: 'sha-5', pushed: checkpoint === 'pushed' });
+        throw new Error('interrupted delivery');
+      },
+    })), /interrupted delivery/);
+    assert.equal(createJobStore(store.directory).load(148).reviewCorrection.status, 'passed');
+    await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+      ...dependencies,
+      prepareIssueWorkspace: async (p, i, options) => {
+        assert.equal(options.headCommit, checkpoint === 'verified' ? 'sha-4' : 'sha-5');
+        return { branch: options.branch, worktreePath: '/tmp/worktrees/issue-148' };
+      },
+      deliverPassedWork: async ({ workspace, previousCommit }) => {
+        assert.equal(previousCommit, 'sha-4');
+        return { branch: workspace.branch, commit: 'sha-5', pr: job.pr };
+      },
+    }));
+    assert.equal(workers, 1);
+    const saved = createJobStore(store.directory).load(148);
+    assert.equal(saved.runs, 6);
+    assert.equal(saved.reviewCorrection.status, 'delivered');
+    assert.equal(saved.verification.commit, 'sha-5');
+    assert.equal(saved.reviewCorrectionHistory.length, 3);
+  });
+}
+
+
+test('verified delivery retries stay bounded without spending more implementation runs', async () => {
+  const store = temporaryStore();
+  const issue = { number: 149, title: 'Bound delivery', body: 'original goal' };
+  let workers = 0;
+  const dependencies = {
+    loadProjectConfig: () => ({ ...project, enabled: true, maxReviewRounds: 5, verification: 'check' }),
+    discoverReadyIssues: async () => [issue],
+    createRalphTaskService: () => ({ run: async () => {
+      workers++;
+      return { status: 'passed', attempts: [{ number: 1, status: 'passed', verification: verifierResult }] };
+    } }),
+    deliverPassedWork: async () => { throw new Error('persistent push outage'); },
+  };
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), dependencies)), /persistent push outage/);
+  }
+  const saved = createJobStore(store.directory).load(149);
+  assert.equal(saved.runs, 1);
+  assert.equal(workers, 1);
+  assert.equal(saved.terminal, true);
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), dependencies));
+  assert.equal(workers, 1);
+});
+
+test('a checkpointed fifth-round PASS is recovered without a sixth review', async () => {
+  const store = temporaryStore();
+  const issue = { number: 150, title: 'Recover final PASS', body: 'original goal' };
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue, branch: 'ralph/issue-150', worktreePath: null, now: store.now, maxReviewRounds: 5 });
+  for (let round = 1; round <= 5; round++) {
+    const commit = `sha-${round}`;
+    const attempt = beginReviewAttempt(job, store.now, { reviewer: 'claude:sonnet', model: 'sonnet', policy: 'always', commit });
+    recordReview(job, { reviewer: 'claude:sonnet', verdict: round === 5 ? 'PASS' : 'NEEDS_CHANGES', commit, policy: 'always', findings: round === 5 ? [] : 'finding', attempt }, store.now);
+  }
+  job.delivery = { branch: job.branch, commit: 'sha-5', pushed: true };
+  job.verification = verifiedEvidence('sha-5');
+  job.pr = { number: 99, url: 'https://github.com/example/repo/pull/99' };
+  job.status = 'awaiting_ci';
+  store.save(job);
+  await runAutopilot(['--project', 'demo'], enabledDependencies(createJobStore(store.directory), {
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'always', maxReviewRounds: 5 }),
+    discoverReadyIssues: async () => [issue],
+    observePullRequestCi: async () => ({ state: 'green', prNumber: 99, headCommit: 'sha-5' }),
+    reviewPullRequest: async () => assert.fail('a completed exact-head PASS must not be repeated'),
+  }));
+  const saved = createJobStore(store.directory).load(150);
+  assert.equal(saved.reviewAttempts, 5);
+  assert.equal(saved.review.verdict, 'PASS');
+  assert.equal(saved.terminalState, 'ready_for_human_merge');
 });

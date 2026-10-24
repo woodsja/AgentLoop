@@ -16,6 +16,7 @@ const expectedFinanceDashboard = {
   humanLabel: 'ready-for-human',
   worker: 'codex',
   maxAttempts: 2,
+  maxReviewRounds: 2,
   prepareVenv: true,
   verification: '.venv/bin/finance-dashboard check && .venv/bin/python -m pytest && .venv/bin/ruff check && git diff --check',
   ciWorkflow: 'Checks',
@@ -177,4 +178,18 @@ test('milestone admission is an explicit boolean opt-in and is disabled in shipp
   }
   const shipped = JSON.parse(fs.readFileSync(path.join(__dirname, '../autopilot-projects.json'), 'utf8'));
   assert.ok(Object.values(shipped).every(project => project.milestoneAuthorization !== true));
+});
+
+test('review round configuration defaults to two and accepts only integers one through five', () => {
+  const absent = validProject();
+  delete absent.maxReviewRounds;
+  assert.equal(loadProjectConfig('demo', { configPath: writeConfig({ demo: absent }) }).maxReviewRounds, 2);
+  for (const value of [1, 2, 5]) {
+    assert.equal(loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...validProject(), maxReviewRounds: value } }) }).maxReviewRounds, value);
+  }
+  for (const value of [0, 6, 1.5, '5', null, true, {}, []]) {
+    assert.throws(() => loadProjectConfig('demo', { configPath: writeConfig({ demo: { ...validProject(), maxReviewRounds: value } }) }), /maxReviewRounds/);
+  }
+  assert.equal(loadProjectConfig('ralph').maxReviewRounds, 5);
+  assert.equal(loadProjectConfig('finance-dashboard').maxReviewRounds, 2);
 });

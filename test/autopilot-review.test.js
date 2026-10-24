@@ -462,3 +462,18 @@ for (const scenario of [
     assert.equal(claude.calls.length, 0);
   });
 }
+
+test('later independent reviews receive unchanged original requirements and all earlier findings as bounded data', () => {
+  const prompt = buildReviewPrompt({
+    repo: 'example/repo', pullRequest: { number: 147 }, headCommit: sha,
+    issue: { number: 147, title: 'Edited issue', body: 'current text' },
+    originalIssue: { number: 147, title: 'Original issue', body: 'unchanged requirements' },
+    reviewHistory: [1, 2, 3, 4].map(number => ({ number, commit: `sha-${number}`, verdict: 'NEEDS_CHANGES', findings: [{ summary: `finding ${number}` }], rawResult: 'not prompt input' })),
+    standards: [], verification: verificationEvidence, ci: { state: 'green' }, diff: 'patch',
+  });
+  const data = JSON.parse(prompt.split('<untrusted_review_data_json>\n')[1].split('\n</untrusted_review_data_json>')[0]);
+  assert.equal(JSON.parse(data.original_issue_requirements).body, 'unchanged requirements');
+  assert.deepEqual(JSON.parse(data.earlier_reviews).map(entry => entry.findings[0].summary), ['finding 1', 'finding 2', 'finding 3', 'finding 4']);
+  assert.doesNotMatch(prompt, /not prompt input/);
+  assert.match(prompt, /do not invent new scope/);
+});

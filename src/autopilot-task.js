@@ -47,10 +47,10 @@ function buildAutopilotTask(project, issue, instructions) {
 // same deterministic project command as the original run.
 function buildCorrectiveTask(project, issue, instructions, correction) {
   if (correction && correction.kind === 'review') {
-    if (correction.cycle !== 1 || typeof correction.reviewCommit !== 'string' || !correction.reviewCommit
+    if (!Number.isSafeInteger(correction.cycle) || correction.cycle < 1 || correction.cycle >= (project.maxReviewRounds ?? 2) || typeof correction.reviewCommit !== 'string' || !correction.reviewCommit
       || typeof correction.reviewer !== 'string' || !correction.reviewer.trim()
       || typeof correction.findings !== 'string' || !correction.findings.trim()) {
-      throw new TypeError('Reviewer corrective task construction requires the one allowed cycle, reviewer identity, findings, and reviewed commit');
+      throw new TypeError('Reviewer corrective task construction requires an allowed cycle, reviewer identity, findings, and reviewed commit');
     }
     const original = buildAutopilotTask(project, issue, instructions);
     return {
