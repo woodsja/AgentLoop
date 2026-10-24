@@ -79,6 +79,7 @@ async function checkMilestoneAdmission(projectName, project, number, options = {
     if (!issue || issue.number !== number || issue.state !== 'open' || issue.pull_request
       || issue.html_url !== `https://github.com/${project.repo}/issues/${number}`
       || typeof issue.title !== 'string' || typeof issue.body !== 'string' || ticketDigest(issue) !== q.ticketDigest
+      || require('./autopilot-github').isDecisionIssue(issue)
       || !Array.isArray(issue.labels) || !issue.labels.some(l => l?.name === project.readyLabel)) throw new Error('Issue identity, content, state or ready label changed.');
     if (Object.hasOwn(r.issue, 'nativeBlockers')) {
       if (!Array.isArray(r.issue.nativeBlockers)) throw new Error('Invalid receipted native blocker evidence.');

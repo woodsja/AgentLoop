@@ -55,7 +55,7 @@ function pause(job, proposal, references, store) {
       project: job.project, repo: job.repo, sourceIssue: structuredClone(job.originalIssue || job.issue),
       authorization: structuredClone(job.milestoneAuthorization || null),
       originatingIssue: job.issue.number, originatingJob: job.r1ParentJobId || job.createdAt,
-      notification: { status: 'pending' }, publication: 'pending' };
+      notification: { status: 'pending', owner: null, attempts: [] }, publication: 'pending' };
   }
   job.status = 'paused_owner_decision';
   job.terminal = true;
@@ -104,18 +104,26 @@ async function publish(project, job, store, options = {}) {
     d.issue = { number: remote.number, url: remote.html_url }; save();
     await gh(['issue', 'edit', String(remote.number), '--repo', project.repo, '--add-label', 'needs-owner-decision', '--remove-label', project.readyLabel]);
     if (d.notification.status === 'pending') {
-      d.notification = { status: project.decisionOwner ? 'attempting' : 'unavailable', at: store.now() }; save();
+      d.notification = { status: project.decisionOwner ? 'attempting' : 'unavailable', owner: project.decisionOwner || null, at: store.now(),
+        attempts: project.decisionOwner ? [{ owner: project.decisionOwner, at: store.now(), status: 'attempting' }] : [] }; save();
       if (project.decisionOwner) {
         try {
           await gh(['issue', 'edit', String(remote.number), '--repo', project.repo, '--add-assignee', project.decisionOwner]);
           d.notification.status = 'assigned';
         } catch (error) { d.notification.status = 'failed'; d.notification.error = error.message; }
+        d.notification.attempts[0].status = d.notification.status;
+        if (d.notification.error) d.notification.attempts[0].error = d.notification.error;
         save();
       }
     } else if (d.notification.status === 'attempting') {
-      d.notification.status = remote.assignees?.some(a => a.login === project.decisionOwner) ? 'assigned' : 'uncertain'; save();
+      d.notification.status = remote.assignees?.some(a => a.login === (d.notification.owner || project.decisionOwner)) ? 'assigned' : 'uncertain';
+      if (d.notification.attempts?.[0]) {
+        d.notification.attempts[0].observedStatus = d.notification.status;
+        d.notification.attempts[0].observedAt = store.now();
+      }
+      save();
     }
-    d.publication = 'complete'; save();
+    d.publication = 'complete'; delete d.publicationError; save();
   } catch (error) {
     d.publicationError = error.message; save();
   }

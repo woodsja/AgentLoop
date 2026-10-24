@@ -2169,10 +2169,23 @@ function executionRecordHtml(line){
   const child = /^[A-Za-z0-9_-]+$/.test(record.childId || '') ? '<a href="/api/log/' + encodeURIComponent(record.childId) + '?download=1">Child ' + esc(record.childId) + '</a>' : '';
   return '<details><summary>' + esc(metadata) + '</summary>' + child + '<pre style="white-space:pre-wrap;overflow-wrap:anywhere;unicode-bidi:plaintext">' + esc(text) + '</pre></details>';
 }
+async function mountDecisionStatus(body, requestedId){
+  try {
+    const response = await fetch('/api/r1/jobs/' + encodeURIComponent(requestedId), {cache:'no-store'});
+    if (!response.ok) return;
+    const job = await response.json();
+    if (drawerTaskId !== requestedId || !job.evidence?.decisions?.length) return;
+    const section = document.createElement('section');
+    section.innerHTML = '<h3>Architecture decisions</h3><p>Current action: ' + esc(job.nextAction?.reason || '') + '</p>' + job.evidence.decisions.map(d =>
+      '<details open><summary>Decision #' + esc(d.decisionIssue?.number || 'pending') + ' · implementation #' + esc(d.originatingIssue.number) + ' · ' + esc(d.state) + ' · ' + esc(d.action) + '</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">' + esc(JSON.stringify(d, null, 2)) + '</pre></details>').join('');
+    body.prepend(section);
+  } catch { /* The complete journal remains available when status is unavailable. */ }
+}
 function mountExecutionLog(body, requestedId){
   const section = document.createElement('section');
   section.innerHTML = '<p>Complete captured execution · <a href="/api/log/' + encodeURIComponent(requestedId) + '?download=1">Download raw records</a> · <a href="/api/log/' + encodeURIComponent(requestedId) + '?download=1&amp;legacy=1">Download original timeline</a></p><p>Only CLI-exported events are available. Non-exported model thoughts are unavailable. Raw bytes are preserved as base64 in downloads.</p><div class="execution-records"></div><button type="button">Load captured records</button>';
   body.prepend(section);
+  mountDecisionStatus(body, requestedId);
   const records = section.querySelector('.execution-records');
   const button = section.querySelector('button');
   const decoder = new TextDecoder();

@@ -124,3 +124,52 @@ The #145 CLI extension updates only the `src/cli.js` entry in
 `docs/evidence/issue-142/current-source.sha256` to match the current source.
 Historical source digests, archived execution records and provenance remain
 unchanged; the recovery verifier still checks their original Git blobs.
+
+Decision status and synthetic lifecycle (ADE successor stage 3/3)
+
+`ralph decision inspect PROJECT#ISSUE` and `GET /api/r1/jobs/ID` now expose
+`status` / `evidence.decisions` navigation records, including decision and code
+issue URLs, original job ID, notification owner/attempt/status, proposed ADR
+content SHA-256, accepted ADR merge revision, resolution publication, execution
+state and remaining action. The dashboard transcript drawer renders these
+records above the full captured journal. Status reads are local and read-only;
+they never contact GitHub to approve, publish or resume work. R1 reads refresh
+from the matching canonical project job so CLI decisions survive an older queue
+checkpoint. Full proposals, accepted ADR content, original diagnostics and paused
+execution remain in canonical records and the complete journal.
+
+`scopeCheck` explicitly reports `not_checked`, or the last resume validation's
+result and timestamp. It is an observation, not a reusable permission. Resume
+and subsequent execution still validate live scope, grant expiry/revocation,
+dependencies and exact ADR contents. A previously passed observation does not
+promise a grant is still active now.
+
+After verifying owner acceptance and guarded ADR delivery, `resume` appends one
+deterministic resolution to the original GitHub decision issue and closes it.
+The resolution links the accepted ADR at its merge commit, ADR PR, originating
+implementation and original job. No new comment or mention is sent. A failed or
+lost response remains visible and blocks the resume request; inspect and repeat
+the owner command to reconcile the same issue. A changed resolution requires
+owner reconciliation. Manual closure and comments remain irrelevant to approval.
+Decision labels and original decision markers exclude issues from admission even
+if somebody adds a ready label; the separate ADR proposal marker remains eligible
+only through its own normal authorization/release path.
+
+Synthetic validation uses temporary durable stores, fake GitHub transport and
+the existing one-shot runner/owner CLI seams. `architecture-decisions.test.js`
+executes a structured worker proposal, publication, restart recovery and independent
+issue selection. `architecture-decision-actions.test.js` exercises authenticated
+local owner acceptance, fixture ADR merge evidence, resolution/lost-response
+reconciliation and real resumed deterministic verification/delivery. Its complete
+synthetic pipeline also takes the ADR and original implementation through the
+normal one-shot exact-head CI, independent review and guarded merge gates; the
+independent task verifies while the original remains paused. ADR remote CI and
+Claude results in these tests are synthetic adapters, not claims of a real
+GitHub deployment. Existing integration tests separately exercise independent
+Claude gates, target integration, exact-head CI and guarded merge. Negative cases
+cover ordinary choices, opt-out, spoofed/closed decisions, grant expiry and
+revocation, new permission/amendment, duplicate events, restarts and attempted
+execution/merge without approval.
+
+See [the separate rollout procedure](architecture-decisions-rollout.md). No live
+policy, owner registry, ADE release labels or deployment is changed by this slice.

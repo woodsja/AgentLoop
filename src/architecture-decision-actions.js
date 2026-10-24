@@ -14,7 +14,7 @@ function preview(job) {
   if (!d) throw new Error('No pending architecture decision.');
   return { identity: d.identity, proposal: d.proposal, references: d.references, issue: d.issue,
     job: job.r1ParentJobId || job.createdAt, source: d.sourceIssue, authorization: d.authorization,
-    ownerDecision: d.ownerDecision, adr: d.adr };
+    ownerDecision: d.ownerDecision, adr: d.adr, status: require('./architecture-decision-status').decisionStatus(job) };
 }
 function adrFor(job, input) {
   const d = job.architectureDecision, p = d.proposal;
@@ -44,7 +44,7 @@ async function publishAdr(job, store, options) {
     d.adr.publication = 'complete'; delete d.adr.publicationError; store.save(job);
   } catch (error) { d.adr.publicationError = error.message; store.save(job); throw error; }
 }
-async function validateResume(project, job, store, options = {}) {
+async function validateResumeChecks(project, job, store, options = {}) {
   const d = job.architectureDecision;
   if (!d?.ownerDecision || d.ownerDecision.action !== 'accept') throw new Error('Missing owner acceptance; rejection or revision remains paused.');
   if (!d.ownerDecision.actor || !d.ownerDecision.at || !d.ownerDecision.digest) throw new Error('Missing authenticated owner decision evidence.');
@@ -84,6 +84,48 @@ async function validateResume(project, job, store, options = {}) {
   if (!same(fresh, d.authorization)) throw new Error('Milestone grant changed during ADR validation.');
   return { at: store.now(), adrIssue: d.adr.issue, merge: adrJob.merge, authorization };
 }
+// Read-only remote validation, with its observation time preserved for status.
+// A status read never refreshes authority or implicitly requests execution.
+async function validateResume(project, job, store, options = {}) {
+  const d = job.architectureDecision;
+  try {
+    const evidence = await validateResumeChecks(project, job, store, options);
+    d.scopeCheck = { at: store.now(), status: 'passed', authorization: evidence.authorization };
+    store.save(job);
+    return evidence;
+  } catch (error) {
+    if (d) { d.scopeCheck = { at: store.now(), status: 'blocked', reason: error.message }; store.save(job); }
+    throw error;
+  }
+}
+// Update the one existing issue; no comments, duplicate issues or owner mentions.
+// Lost PATCH responses are reconciled by reading the same deterministic suffix.
+async function publishResolution(project, job, store, options = {}) {
+  const d = job.architectureDecision;
+  if (d.resolution?.status === 'complete') return;
+  if (d.ownerDecision?.action !== 'accept' || !d.resumeEvidence) throw new Error('Verified owner acceptance and ADR delivery required.');
+  const gh = args => runGh(args, options.execFile, 'Architecture decision resolution');
+  const marker = `${d.marker} resolution`;
+  const merge = d.resumeEvidence.merge;
+  const adrUrl = `https://github.com/${job.repo}/blob/${merge.commit}/${d.adr.path}`;
+  const suffix = `${marker}\n## Verified owner decision\nAccepted option: ${d.ownerDecision.option}\nAccepted ADR: ${adrUrl}\nADR delivery: https://github.com/${job.repo}/pull/${merge.prNumber}\nOriginating implementation: https://github.com/${job.repo}/issues/${d.originatingIssue}\nOriginal job: ${d.originatingJob}\nOwner decision recorded: ${d.ownerDecision.at}\nResume remains subject to fresh milestone and exact ADR checks. Merge does not imply deployment.`;
+  d.resolution = { status: 'pending', adrUrl }; store.save(job);
+  try {
+    const issue = JSON.parse(await gh(['api', `repos/${job.repo}/issues/${d.issue.number}`]));
+    if (issue.number !== d.issue.number || issue.html_url !== `https://github.com/${job.repo}/issues/${d.issue.number}`
+      || issue.pull_request || !['open', 'closed'].includes(issue.state) || typeof issue.body !== 'string' || !issue.body.includes(d.marker)) throw new Error('Decision issue identity changed; owner reconciliation required.');
+    if (issue.body.includes(marker) && !issue.body.endsWith(suffix)) throw new Error('Decision resolution changed; owner reconciliation required.');
+    await gh(['issue', 'edit', String(d.issue.number), '--repo', job.repo, '--add-label', 'needs-owner-decision', '--remove-label', project.readyLabel]);
+    if (!issue.body.endsWith(suffix) || issue.state !== 'closed') {
+      const updated = JSON.parse(await gh(['api', '--method', 'PATCH', `repos/${job.repo}/issues/${d.issue.number}`, '-f', `body=${issue.body.endsWith(suffix) ? issue.body : issue.body + '\n\n' + suffix}`, '-f', 'state=closed']));
+      if (updated.number !== issue.number || updated.html_url !== issue.html_url || updated.state !== 'closed'
+        || updated.pull_request || !updated.body?.endsWith(suffix)) throw new Error('GitHub did not confirm the exact decision resolution.');
+    }
+    d.resolution = { status: 'complete', at: store.now(), adrUrl }; store.save(job);
+  } catch (error) {
+    d.resolution.error = error.message; store.save(job); throw error;
+  }
+}
 async function decisionCommand(action, id, options = {}) {
   if (!['inspect', 'accept', 'reject', 'revise', 'resume'].includes(action)) throw new Error('Unknown decision action.');
   const match = /^([A-Za-z0-9._-]+)#([1-9][0-9]*)$/.exec(id || '');
@@ -96,7 +138,7 @@ async function decisionCommand(action, id, options = {}) {
   try {
     const job = store.load(Number(match[2]));
     if (!job) throw new Error('Original job missing.');
-    if (!job.architectureDecision && action === 'inspect' && job.architectureDecisionHistory?.length) return { history: job.architectureDecisionHistory };
+    if (!job.architectureDecision && action === 'inspect' && job.architectureDecisionHistory?.length) return { history: job.architectureDecisionHistory, status: require('./architecture-decision-status').decisionStatus(job) };
     if (!job.architectureDecision && action === 'resume' && job.architectureDecisionHistory?.at(-1)?.resumedAt) return job;
     const view = preview(job), d = job.architectureDecision;
     if (action === 'inspect') return { ...view, digest: hash(view), blockedReason: d.blockedReason };
@@ -125,7 +167,10 @@ async function decisionCommand(action, id, options = {}) {
           || task.workflow !== 'r1' || task.project !== job.project || task.issue !== job.issue.number
           || task.r1?.createdAt !== job.createdAt) throw new Error('Original owner queue job identity changed or is missing.');
       }
-      try { d.resumeEvidence = await validateResume(project, job, store, options); }
+      try {
+        d.resumeEvidence = await validateResume(project, job, store, options);
+        await publishResolution(project, job, store, options);
+      }
       catch (error) { d.blockedReason = error.message; store.save(job); throw error; }
       d.resumeRequested = true; delete d.blockedReason;
       job.terminal = false; job.terminalState = null; job.status = 'decision_resume_pending';
