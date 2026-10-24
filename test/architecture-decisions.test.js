@@ -53,6 +53,9 @@ test('real worker escalation pauses durably, publishes once, retains logs and le
   assert.match(f.remote[0].body, /issues\/1/); assert.match(f.remote[0].body, /Grant implications/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'worker-state.json'))).attempts[0].worker.stdout, 'complete worker evidence');
   assert.equal(selectIssueForJobs(f.issues, f.store.list(), selectReadyIssue).issue.number, 2);
+  const dependent = { number: 3, title: 'Dependent implementation', body: 'Depends on: #1' };
+  const eligible = require('../src/r1-dependencies').eligibleIssues([f.issues[1], dependent], f.store.list(), 'demo', f.project.repo);
+  assert.deepEqual(eligible.map(i => i.number), [2]);
   await decisions.publish(f.project, saved, f.store, { execFile: f.dependencies.execFile });
   assert.equal(f.remote.length, 1); assert.equal(f.calls.filter(a => a.includes('--add-assignee')).length, 1);
   assert.ok(!f.calls.some(a => a[a.indexOf('--add-label') + 1] === 'ready-for-agent' && a.includes('--add-label')));

@@ -84,3 +84,28 @@ test('raw execution records render complete inert text with paths and token valu
   assert.ok(!html.includes('<script>'));
   assert.ok(html.includes('t-child'));
 });
+
+test('decision status drawer renders owner records as inert text without changing authority', async () => {
+  const source = scripts(publicHtml).join('\n');
+  const start = source.indexOf('async function mountDecisionStatus('), end = source.indexOf('function mountExecutionLog(', start);
+  let section, route;
+  const context = {
+    drawerTaskId: 't-1234abcd',
+    document: { createElement() { section = {}; return section; } },
+    fetch: async value => { route = value; return { ok: true, json: async () => ({
+      nextAction: { reason: 'Await ADR guarded merge' }, evidence: { decisions: [{
+        decisionIssue: { number: 15 }, originatingIssue: { number: 10 }, state: 'paused', action: 'deliver_adr_then_request_resume',
+        blockedReason: '<script>spoofed approval</script>', scopeCheck: { status: 'not_checked' },
+      }] },
+    }) }; },
+    esc: value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),
+  };
+  vm.createContext(context); vm.runInContext(source.slice(start, end), context);
+  let mounted;
+  await context.mountDecisionStatus({ prepend: value => { mounted = value; } }, context.drawerTaskId);
+  assert.equal(route, '/api/r1/jobs/t-1234abcd');
+  assert.equal(mounted, section);
+  assert.match(section.innerHTML, /Decision #15/); assert.match(section.innerHTML, /implementation #10/);
+  assert.match(section.innerHTML, /not_checked/); assert.match(section.innerHTML, /&lt;script&gt;/);
+  assert.doesNotMatch(section.innerHTML, /<script>/);
+});

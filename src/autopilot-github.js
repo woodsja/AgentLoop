@@ -38,6 +38,11 @@ function runGh(args, executeFile = execFile, operation = 'GitHub issue discovery
   });
 }
 
+function isDecisionIssue(issue) {
+  return (Array.isArray(issue?.labels) && issue.labels.some(label => (typeof label === 'string' ? label : label?.name) === 'needs-owner-decision'))
+    || /<!-- ralph-decision:[a-f0-9]{64} -->(?:\r?\n|$)/.test(issue?.body || '');
+}
+
 function normalizeIssue(issue) {
   if (!isPlainObject(issue)
     || !Number.isSafeInteger(issue.number)
@@ -73,7 +78,7 @@ async function discoverReadyIssues(project, { execFile: executeFile = execFile }
     '--repo', project.repo,
     '--state', 'open',
     '--label', project.readyLabel,
-    '--json', 'number,title,body,state',
+    '--json', 'number,title,body,state,labels',
     '--limit', '1000',
   ];
   const output = await runGh(args, executeFile);
@@ -88,14 +93,14 @@ async function discoverReadyIssues(project, { execFile: executeFile = execFile }
     throw new Error('GitHub issue discovery failed: gh returned an unexpected response shape');
   }
 
-  return response.map(normalizeIssue).sort((left, right) => left.number - right.number);
+  return response.filter(issue => !isDecisionIssue(issue)).map(normalizeIssue).sort((left, right) => left.number - right.number);
 }
 
 function selectReadyIssue(issues) {
   if (!Array.isArray(issues)) {
     throw new TypeError('Ready issues must be an array');
   }
-  return issues.length === 0 ? null : [...issues].sort((left, right) => left.number - right.number)[0];
+  return issues.filter(issue => !isDecisionIssue(issue)).sort((left, right) => left.number - right.number)[0] || null;
 }
 
 function normalizeWorkflowRun(run) {
@@ -446,6 +451,7 @@ async function collectCiFailureDiagnostics(project, observation, { execFile: exe
 module.exports = {
   runGh,
   runGh,
+  isDecisionIssue,
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,

@@ -547,11 +547,21 @@ function createR1Jobs(store, options = {}) {
       try {
         const task = store.readTask(id, stage);
         if (task.workflow !== 'r1') return null;
-        const projected = evidence(task.r1, task.requiredCiWorkflow);
-        return { id, status: task.status || stage, project: task.project,
+        // Owner CLI actions update the canonical project job under its issue lock.
+        // Recover those records even when the queue checkpoint predates the action.
+        let durable = task.r1;
+        if (task.r1?.architectureDecision || task.r1?.architectureDecisionHistory?.length) {
+          const project = load(task.project);
+          const current = createJobStore(resolveStateDir(task.project, project)).load(task.issue);
+          if (current && current.createdAt === task.r1.createdAt && current.repo === task.r1.repo
+            && current.project === task.project && current.r1ParentJobId === task.id) durable = current;
+        }
+        const projected = evidence(durable, task.requiredCiWorkflow);
+        const status = durable !== task.r1 ? durable.terminalState || durable.status : task.status || stage;
+        return { id, status, project: task.project,
           ...(task.failure ? { failure: task.failure } : {}),
           phase: task.phase, phases: task.phases || [], evidence: projected,
-          nextAction: nextAction(task, projected),
+          nextAction: nextAction({ ...task, status }, projected),
           executionJournal: { id, raw: `/api/log/${id}?raw=1` },
         };
       } catch (error) {

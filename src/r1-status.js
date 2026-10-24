@@ -70,6 +70,7 @@ function evidence(job, configuredWorkflow) {
     ci: ciProjection(job, configuredWorkflow),
     review: job.review?.commit === job.delivery?.commit ? review(job.review) : null,
     correction: correction(job.correction), reviewCorrection: correction(job.reviewCorrection),
+    decisions: require('./architecture-decision-status').decisionStatus(job),
     architectureDecision: job.architectureDecision,
     architectureDecisionHistory: job.architectureDecisionHistory || [],
     environmentPreflight: job.environmentPreflight,

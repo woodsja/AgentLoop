@@ -15,7 +15,7 @@ const {
 function ghResponse(stdout, error = null, stderr = '') {
   return (file, args, options, callback) => {
     assert.equal(file, 'gh');
-    assert.deepEqual(args, ['issue', 'list', '--repo', 'example/repo', '--state', 'open', '--label', 'ready', '--json', 'number,title,body,state', '--limit', '1000']);
+    assert.deepEqual(args, ['issue', 'list', '--repo', 'example/repo', '--state', 'open', '--label', 'ready', '--json', 'number,title,body,state,labels', '--limit', '1000']);
     assert.equal(options.shell, false);
     assert.equal(options.timeout, 60 * 1000);
     assert.equal(options.killSignal, 'SIGTERM');
@@ -399,4 +399,18 @@ test('failed PATCH and failed follow-up GET keep both original errors, stacks, a
     && error.observationError?.message.includes('malformed JSON')
     && error.observationError?.cause instanceof SyntaxError
     && typeof error.observationError.cause.stack === 'string');
+});
+
+test('decision issues never enter admission even with a ready label or duplicate events', async () => {
+  const normal = { number: 3, title: 'Implementation', body: '', state: 'OPEN', labels: [{ name: 'ready' }] };
+  const decision = { ...normal, number: 1, labels: [{ name: 'ready' }, { name: 'needs-owner-decision' }] };
+  const marked = { ...normal, number: 2, body: '<!-- ralph-decision:' + 'a'.repeat(64) + ' -->' };
+  const issues = await discoverReadyIssues({ repo: 'example/repo', readyLabel: 'ready' }, {
+    execFile: ghResponse(JSON.stringify([decision, marked, decision, normal])),
+  });
+  assert.deepEqual(issues.map(i => i.number), [3]);
+  assert.equal(selectReadyIssue([decision, marked]), null);
+  assert.equal(selectReadyIssue([decision, normal]).number, 3);
+  const adr = { ...normal, body: marked.body + ' ADR proposal\nSeparately released ADR delivery' };
+  assert.equal(selectReadyIssue([adr]).number, 3);
 });
