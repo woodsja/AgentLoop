@@ -1,6 +1,7 @@
 'use strict';
 const { checkMilestoneAdmission, admissionBlock } = require('./milestone-admission');
 
+const decisions = require('./architecture-decisions');
 const fs = require('node:fs');
 const path = require('node:path');
 const { loadProjectConfig } = require('./autopilot-config');
@@ -232,6 +233,7 @@ async function run(argv, dependencies = {}) {
     return null;
   }
   if (!dryRun) await cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, dependencies.captureFailedWork);
+  if (!dryRun) await decisions.reconcile(project, store, { execFile: dependencies.execFile });
   const discovered = await discover(project);
   const recorded = store.list();
   const dependencyAdmitted = project.dependencyFormat === 'household-blocked-by'
@@ -462,6 +464,10 @@ async function run(argv, dependencies = {}) {
   try {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
+    if (job?.architectureDecision) {
+      await decisions.publish(project, job, store, { execFile: dependencies.execFile });
+      return { issue: candidate, job, outcome: { status: 'paused_owner_decision', terminal: true, deliverable: false } };
+    }
     if (job && !isResumable(job)) {
       const existing = job;
       job = undefined;
@@ -492,6 +498,15 @@ async function run(argv, dependencies = {}) {
       job ||= createJob({ projectName, repo: project.repo, issue: candidate, branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
       holdAuthorization(error); store.save(job);
       return { issue: candidate, job, outcome: { status: 'authorization_blocked', terminal: false, deliverable: false } };
+    }
+    // Recover a worker's durable proposal before interrupted-work cleanup can erase it.
+    if (project.architectureDecisions === true && job?.workspaceState === 'prepared' && job.ralph?.status) {
+      const proposal = decisions.readProposal(job.worktreePath, true);
+      if (proposal) {
+        decisions.pause(job, proposal, decisions.context(job.worktreePath), store);
+        await decisions.publish(project, job, store, { execFile: dependencies.execFile });
+        return { issue: candidate, job, outcome: { status: 'paused_owner_decision', terminal: true, deliverable: false } };
+      }
     }
     // Before a new job allocates anything, leave an explicitly-closing PR
     // entirely to its existing owner. Recovered Ralph jobs deliberately skip
@@ -807,6 +822,7 @@ async function run(argv, dependencies = {}) {
       outcome = { status: 'passed', terminal: false, deliverable: true };
     } else {
       const instructions = await discoverInstructions(workspace.worktreePath);
+      const decisionReferences = project.architectureDecisions === true ? decisions.context(workspace.worktreePath) : [];
       const contractRequired = project.runtime || fs.existsSync(path.join(workspace.worktreePath, '.ralph/project.json'));
       const pythonRequired = project.pythonEnvironment || project.prepareVenv || instructionsRequireVenv(instructions);
       if (pythonRequired || contractRequired) {
@@ -835,6 +851,7 @@ async function run(argv, dependencies = {}) {
       const task = correction
         ? (dependencies.buildCorrectiveTask || buildCorrectiveTask)({ ...preparedProject, maxReviewRounds }, candidate, instructions, reviewCorrection ? { ...correction, kind: 'review' } : correction)
         : buildTask(preparedProject, candidate, instructions);
+      if (project.architectureDecisions === true) task.goal += `\n\n${decisions.instructions(decisionReferences)}`;
       const service = createService({ config: storeConfig, ...attemptOptions(),
         recordBaseline: sha => {
           if (!job.ralph.baselineSha) { job.ralph.baselineSha = sha; store.save(job); }
@@ -848,7 +865,22 @@ async function run(argv, dependencies = {}) {
       job.verification = null;
       if (correction) correction.status = 'running';
       store.save(job);
-      result = await require('./milestone-work').runAuthorizedWork(service, workspace.worktreePath, task, workOptions());
+      try {
+        result = await require('./milestone-work').runAuthorizedWork(service, workspace.worktreePath, task, workOptions());
+      } catch (error) {
+        // A mixed child may stop without critic PASS because implementation is waiting for the owner.
+        if (error.code === 'MILESTONE_AUTHORIZATION_BLOCKED') throw error;
+        if (!decisions.readProposal(workspace.worktreePath, project.architectureDecisions)) throw error;
+        recordFailure(job, 'decision-worker', error, store.now);
+        result = { status: 'paused_owner_decision', attempts: [] };
+      }
+      const proposal = decisions.readProposal(workspace.worktreePath, project.architectureDecisions);
+      if (project.architectureDecisions === true && proposal) {
+        job.ralph = { ...job.ralph, status: 'paused_owner_decision', attempts: result.attempts?.length || 0, ...(result.childLoopId ? { childLoopId: result.childLoopId } : {}) };
+        decisions.pause(job, proposal, decisionReferences, store);
+        await decisions.publish(project, job, store, { execFile: dependencies.execFile });
+        return { issue: candidate, workspace, result, job, outcome: { status: 'paused_owner_decision', terminal: true, deliverable: false } };
+      }
       const attempts = result && Array.isArray(result.attempts) ? result.attempts : [];
       job.ralph = { ...job.ralph, status: result ? result.status ?? null : null, attempts: attempts.length,
         ...(result?.childLoopId ? { childLoopId: result.childLoopId } : {}) };
@@ -1035,7 +1067,7 @@ async function run(argv, dependencies = {}) {
     throw error;
   } finally {
     try {
-      if (workspace && !job?.authorizationBlocked && !job?.environmentProcess) {
+      if (workspace && !job?.architectureDecision && !job?.authorizationBlocked && !job?.environmentProcess) {
         try {
           if (typeof dependencies.captureFailedWork === 'function') {
             await dependencies.captureFailedWork({ job, workspace, store });

@@ -7,7 +7,7 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function runGh(args, executeFile, operation = 'GitHub issue discovery', maxBuffer = 1024 * 1024) {
+function runGh(args, executeFile = execFile, operation = 'GitHub issue discovery', maxBuffer = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     try {
       executeFile('gh', args, unattendedOptions({ encoding: 'utf8', maxBuffer, shell: false }), (error, stdout, stderr) => {
@@ -444,6 +444,7 @@ async function collectCiFailureDiagnostics(project, observation, { execFile: exe
 }
 
 module.exports = {
+  runGh,
   runGh,
   discoverReadyIssues,
   selectReadyIssue,
