@@ -49,7 +49,12 @@ function pause(job, proposal, references, store) {
   if (!job.architectureDecision) {
     const identity = `${job.project}:${job.repo}:${job.r1ParentJobId || job.createdAt}:${job.issue.number}:${proposal.key}`;
     job.architectureDecision = { identity, marker: `<!-- ralph-decision:${crypto.createHash('sha256').update(identity).digest('hex')} -->`,
-      proposal, references, originatingIssue: job.issue.number, originatingJob: job.r1ParentJobId || job.createdAt,
+      proposal, references,
+      pausedExecution: { ralph: structuredClone(job.ralph), runs: job.runs,
+        failures: structuredClone(job.failures), executionJournal: job.executionJournal },
+      project: job.project, repo: job.repo, sourceIssue: structuredClone(job.originalIssue || job.issue),
+      authorization: structuredClone(job.milestoneAuthorization || null),
+      originatingIssue: job.issue.number, originatingJob: job.r1ParentJobId || job.createdAt,
       notification: { status: 'pending' }, publication: 'pending' };
   }
   job.status = 'paused_owner_decision';

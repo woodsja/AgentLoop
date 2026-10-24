@@ -782,7 +782,7 @@ function isResumable(job) {
   // A terminal outcome always wins over delivery metadata.  In particular, a
   // delivered PR must not accidentally make ready-for-merge or exhausted-CI
   // jobs eligible for another Ralph run.
-  if (!job || job.terminal || job.architectureDecision) return !job;
+  if (!job || job.terminal || (job.architectureDecision && !job.architectureDecision.resumeRequested)) return !job;
   // CI polling is intentionally resumable after a PR is delivered, but it
   // never re-enters Ralph's worker path (handled before workspace setup).
   const hasDeliveredPullRequest = job && job.pr && Number.isSafeInteger(job.pr.number)

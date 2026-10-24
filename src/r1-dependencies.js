@@ -48,4 +48,4 @@ function eligibleIssues(issues, jobs, projectName, repo, diagnostic = () => {}, 
   });
 }
 
-module.exports = { dependencies, eligibleIssues };
+module.exports = { dependencies, eligibleIssues, approved };

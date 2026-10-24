@@ -1,4 +1,4 @@
-98610db024be7e86440ff8d29e1966ac6bc7153866ba567f09e3eb4f31d2b1b0  src/cli.js
+e1f96d0e172adcd5ee2ccb58f32dbca4e37e92a24a800b42475190a35faacd60  src/cli.js
 8ada04d1d00636f994b2bde9db18e77f7f8e09e41995bc07394e9c35a5481c53  src/milestone-summary.js
 4f614985001aaa6362a064bca269b2e7e39ae22613641cdb408abbb4cf0d2548  test/milestone-batches.test.js
 998f83044c69d64b8ed9ea1e067c0e57f092402f8ad591d3e38cb3512ac507a6  test/issue-142-evidence.test.js
