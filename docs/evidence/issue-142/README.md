@@ -28,11 +28,11 @@ ancestry, failed-history and dependency-gate regressions.
 | `docs/evidence/issue-142/attempt1-pr135-diff.log` | [issue-142-attempt1-pr135-diff.log.gz](../review/issue-142-attempt1-pr135-diff.log.gz) | 92019 |
 | `docs/evidence/issue-142/corrected-pr135-diff.log` | [issue-142-corrected-pr135-diff.log.gz](../review/issue-142-corrected-pr135-diff.log.gz) | 294622 |
 | `docs/evidence/issue-142/original-parent.log` | [issue-142-original-parent.log.gz](../review/issue-142-original-parent.log.gz) | 327467 |
-| `docs/evidence/issue-142/original-r1.execution.ndjson` | [issue-142-original-r1.execution.ndjson.gz](../review/issue-142-original-r1.execution.ndjson.gz) | 5336793 |
+| `docs/evidence/issue-142/original-r1.execution.ndjson` | [issue-142-original-r1-execution.ndjson.gz](../review/issue-142-original-r1-execution.ndjson.gz) | 5336793 |
 | `docs/evidence/issue-142/original-r1.log` | [issue-142-original-r1.log.gz](../review/issue-142-original-r1.log.gz) | 323368 |
 | `docs/evidence/issue-142/original-result.log` | [issue-142-original-result.log.gz](../review/issue-142-original-result.log.gz) | 159164 |
 | `docs/evidence/issue-142/original-run.log` | [issue-142-original-run.log.gz](../review/issue-142-original-run.log.gz) | 2888 |
-| `docs/evidence/issue-142/original-worker.execution.ndjson` | [issue-142-original-worker.execution.ndjson.gz](../review/issue-142-original-worker.execution.ndjson.gz) | 10186094 |
+| `docs/evidence/issue-142/original-worker.execution.ndjson` | [issue-142-original-worker-execution.ndjson.gz](../review/issue-142-original-worker-execution.ndjson.gz) | 10186094 |
 | `docs/evidence/issue-142/original-worker.ndjson` | [issue-142-original-worker.ndjson.gz](../review/issue-142-original-worker.ndjson.gz) | 497 |
 | `docs/evidence/issue-142/pr135.log` | [issue-142-pr135.log.gz](../review/issue-142-pr135.log.gz) | 248 |
 

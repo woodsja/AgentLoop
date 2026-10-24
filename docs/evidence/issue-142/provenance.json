@@ -48,7 +48,7 @@
     },
     {
       "original": "docs/evidence/issue-142/pr135.log",
-      "source": "/tmp/issue142-pr135.json",
+      "source": "gh pr view 135 --repo woodsja/AgentLoop --json number,state,headRefOid,baseRefOid,closedAt,mergedAt,url (preflight capture)",
       "bytes": 248,
       "sha256": "54a4031c7b6647042c3a009b302ef0e3617fb649dc56650c4eb53d1366d0f7d9"
     },
