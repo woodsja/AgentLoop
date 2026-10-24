@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "correctedCommit": "78f2ab235d9f25e9a765bfa1905ef1519e5b17e2",
+  "intendedBase": "e7caf791e59127639f3f946755b98b33a4cf9046",
+  "deployedBase": "0055c5d9ad8fd7f1f136de90f9eb91ed45131143",
+  "entries": [
+    {
+      "original": "docs/evidence/issue-142/original-r1.log",
+      "source": "/home/woodsja/.local/state/ralph-autopilot/ralph/issue-111.json",
+      "bytes": 323368,
+      "sha256": "7a5724e3767dade07a2c256e9780bcd0403e1308c285afee444dc5de0ba7cf7f"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-r1.execution.ndjson",
+      "source": "/home/woodsja/.local/state/ralph-autopilot/ralph/issue-111.execution.ndjson",
+      "bytes": 5336793,
+      "sha256": "7f7330130fcb1dfa36d769bb01078fdd7130c4ad3ff915b87370a10ea465edd2"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-parent.log",
+      "source": "/home/woodsja/tools/ralph/state/tasks/done/t-127b307a.json",
+      "bytes": 327467,
+      "sha256": "1f41a0126b2b32a54eb922b93e0d13e9e9056e40ecb7848e8a479dc6c799d73f"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-result.log",
+      "source": "/home/woodsja/tools/ralph/state/results/t-127b307a.json",
+      "bytes": 159164,
+      "sha256": "bb4f68e199aa722db56e1eeb157dfd38e70a4a7d2facc573040af9e7a3d4a6e4"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-worker.execution.ndjson",
+      "source": "/home/woodsja/tools/ralph/state/logs/t-127b307a.execution.ndjson",
+      "bytes": 10186094,
+      "sha256": "e56829b53003ec641a22548a8335d6545c94a61108441a59f557e0d619ef52dd"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-worker.ndjson",
+      "source": "/home/woodsja/tools/ralph/state/logs/t-127b307a.ndjson",
+      "bytes": 497,
+      "sha256": "f78c74c705e70ce7ab4d891a137942827fed349127b6b1ffdfc9ef92fa4186ea"
+    },
+    {
+      "original": "docs/evidence/issue-142/original-run.log",
+      "source": "/home/woodsja/tools/ralph/state/task-runs/6ea81387d5f53a7e8d3950b68c07ef41070806cdf08b129d8f812d8078b72b61.json",
+      "bytes": 2888,
+      "sha256": "ae357c5aa6bc836e2fd497bca9c7c2e99e3a38a419911016cf5aa79f713f3987"
+    },
+    {
+      "original": "docs/evidence/issue-142/pr135.log",
+      "source": "/tmp/issue142-pr135.json",
+      "bytes": 248,
+      "sha256": "54a4031c7b6647042c3a009b302ef0e3617fb649dc56650c4eb53d1366d0f7d9"
+    },
+    {
+      "original": "docs/evidence/issue-142/attempt1-pr135-diff.log",
+      "source": "git diff --binary e7caf791e59127639f3f946755b98b33a4cf9046 9661ba43033e761db512dc011326639372287951",
+      "bytes": 92019,
+      "sha256": "b494731637e005e63bbbd5ba029e1ad60a98dcf1180b785f1e6b41f9d2546abf"
+    },
+    {
+      "original": "docs/evidence/issue-142/corrected-pr135-diff.log",
+      "source": "git diff --binary e7caf791e59127639f3f946755b98b33a4cf9046 78f2ab235d9f25e9a765bfa1905ef1519e5b17e2",
+      "bytes": 294622,
+      "sha256": "69ea1bb9088e34fe9178a2689924246a09956f2c1a2aa67c093bbd0aaa133789"
+    },
+    {
+      "original": "docs/evidence/issue-111/rehearsal-export.log",
+      "source": "78f2ab235d9f25e9a765bfa1905ef1519e5b17e2:docs/evidence/issue-111/rehearsal.json.gz (gunzip)",
+      "bytes": 937715,
+      "sha256": "95f44c7cca6b047e57b4fc44890cf22ae79674333448d54a7b4c6a757b83a17c"
+    }
+  ],
+  "protected": [
+    {
+      "source": "/home/woodsja/.local/state/ralph-autopilot/ralph/issue-137.json",
+      "bytes": 336911,
+      "sha256": "1c375e99a9957cd20daeb853db142bb86531eece3196c726d7eb46dfcbd5cccf"
+    },
+    {
+      "source": "/home/woodsja/.local/state/ralph-autopilot/ralph/issue-137.execution.ndjson",
+      "bytes": 5424038,
+      "sha256": "a827672c7790e7f2016b0f9e2f01ed34ce8ef340a1e3f5928fc64b4e8227ef46"
+    },
+    {
+      "source": "/home/woodsja/tools/ralph/autopilot-projects.json",
+      "bytes": 69926,
+      "sha256": "50cfeaaf74197f6b4e8c258dcf7d9219881903ffda5bb13ea69e2f835cfac879"
+    }
+  ]
+}
