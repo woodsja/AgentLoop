@@ -137,9 +137,8 @@ for (const mode of ['red-tests', 'missing-lock', 'restart-dead', 'restart-ambigu
     if (mode !== 'missing-lock') {
       assert.equal(ready.baseline.passed, false);
       assert.equal(result.evidence.verification.passed, false);
-      assert.equal(result.evidence.verification.stdout, undefined);
-      assert.match(stages.done.get(task.id).r1.verification.stdout, /x{25000}/);
-      assert.match(stages.done.get(task.id).r1.verification.stderr, /exact Python check stderr/);
+      assert.match(result.evidence.verification.stdout, /x{25000}/);
+      assert.match(result.evidence.verification.stderr, /exact Python check stderr/);
       assert.ok(records.some(r => r.event === 'output' && Buffer.from(r.base64, 'base64').toString().includes('baseline stdout')));
     } else {
       assert.equal(ready.reason, 'lockfile_missing');

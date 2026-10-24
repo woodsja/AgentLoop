@@ -525,7 +525,7 @@ function createR1Jobs(store, options = {}) {
         if (task.workflow !== 'r1') return null;
         const projected = evidence(task.r1, task.requiredCiWorkflow);
         return { id, status: task.status || stage, project: task.project,
-          ...(task.failure ? { failure: 'Recorded failure; see the complete owner execution journal.' } : {}),
+          ...(task.failure ? { failure: task.failure } : {}),
           phase: task.phase, phases: task.phases || [], evidence: projected,
           nextAction: nextAction(task, projected),
           executionJournal: { id, raw: `/api/log/${id}?raw=1` },

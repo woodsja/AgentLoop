@@ -159,7 +159,11 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     }, '#11 provider error visible through HTTP');
     assert.equal(unavailable.evidence.ci.state, 'pending');
     assert.match(unavailable.nextAction.reason, /GitHub Actions observation failed/);
-    assert.ok(!/credential-do-not-log|hidden chain|private\/prompt/.test(JSON.stringify(unavailable)));
+    assert.ok(!/credential-do-not-log|hidden chain|private\/prompt/.test(JSON.stringify({
+      ci: unavailable.evidence.ci, nextAction: unavailable.nextAction,
+    })));
+    assert.ok(unavailable.evidence.diagnostics.some(failure => failure.message.includes(adversarial)),
+      'captured provider failures remain available as owner evidence');
     // Resume the same persisted CI transition more than once before it is
     // allowed to finish; neither daemon restart may replay transcript lines.
     for (let restart = 0; restart < 2; restart += 1) {

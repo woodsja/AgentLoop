@@ -1,10 +1,10 @@
 'use strict';
 
-// Navigation over durable evidence only. Complete captured evidence remains in
-// the owner execution journal; never copy provider text or model output here.
+// Preserve owner-visible evidence; sanitize only the new CI display fields.
+// Owner text is verbatim, with escaping left to the rendering layer.
+function ownerText(value) { return String(value ?? ''); }
 const oneOf = (value, values) => values.includes(value) ? value : null;
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value) ? value : null;
-const count = value => Number.isSafeInteger(value) && value >= 0 ? Math.min(value, 1000) : 0;
 const date = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value) ? value : null;
 function workflowLabel(value) {
   if (typeof value !== 'string') return null;
@@ -53,48 +53,31 @@ const reasons = {
   red: 'Required CI is red; inspect the recorded CI evidence and correction state.',
   green: 'Exact-head CI is green; await independent review and guarded delivery.',
 };
-function reviewProjection(value) {
-  return value ? { reviewer: /^claude(?::[a-z0-9.-]{1,40})?$/.test(value.reviewer) ? value.reviewer : 'independent-reviewer',
-    verdict: oneOf(value.verdict, ['PASS', 'NEEDS_CHANGES']), commit: sha(value.commit),
-    policy: oneOf(value.policy, ['always', 'risk']), findingCount: Array.isArray(value.findings) ? Math.min(value.findings.length, 50) : 0,
-    ...(value.attempt ? { attempt: { number: count(value.attempt.number),
-      startedAt: date(value.attempt.startedAt), completedAt: date(value.attempt.completedAt) } } : {}) } : null;
-}
 function correction(value) {
   return value ? { status: oneOf(value.status, ['eligible', 'running', 'passed', 'delivered', 'failed']), commit: sha(value.commit) } : null;
 }
 function evidence(job, configuredWorkflow) {
-  if (!job) return null;
-  const ci = ciProjection(job, configuredWorkflow);
-  const verification = job.verification;
-  return {
-    outcome: oneOf(job.terminalState || job.status, ['queued', 'preparing', 'running', 'passed', 'failed', 'awaiting_ci', 'correction_eligible', 'review_correction_eligible', 'ready_for_human', 'ready_for_human_merge', 'merged', 'blocked_infrastructure']),
-    commit: sha(job.delivery?.commit),
-    verification: verification ? { passed: verification.passed === true, exitCode: Number.isInteger(verification.exitCode) && verification.exitCode >= 0 && verification.exitCode <= 255 ? verification.exitCode : null,
-      timedOut: verification.timedOut === true, commit: sha(verification.commit) } : null,
-    ci, review: job.review?.commit === job.delivery?.commit ? reviewProjection(job.review) : null,
-    reviewAttempts: count(job.reviewAttempts),
-    reviewHistory: (job.reviewHistory || []).slice(-8).map(entry => ({ ...reviewProjection(entry),
-      number: count(entry.number), startedAt: date(entry.startedAt), completedAt: date(entry.completedAt),
-      status: oneOf(entry.status, ['running', 'completed', 'failed', 'timed_out', 'invalid_verdict', 'interrupted']) })),
-    reviewPreparationHistory: (job.reviewPreparationHistory || []).slice(-24).map(entry => ({
-      number: count(entry.number), commit: sha(entry.commit),
-      status: oneOf(entry.status, ['running', 'prepared', 'retry_wait', 'blocked']),
-      startedAt: date(entry.startedAt), completedAt: date(entry.completedAt),
-    })),
+  const review = value => value && ({
+    reviewer: ownerText(value.reviewer), verdict: value.verdict, commit: value.commit, policy: value.policy,
+    findingCount: Math.min((value.findings || []).length, 50),
+    findings: (value.findings || []).map(finding => ({ ...finding, summary: ownerText(finding.summary), file: ownerText(finding.file) || null })),
+    ...(value.attempt ? { attempt: value.attempt } : {}),
+  });
+  return job && {
+    outcome: job.terminalState || job.status,
+    commit: job.delivery && job.delivery.commit,
+    verification: job.verification && { ...job.verification },
+    ci: ciProjection(job, configuredWorkflow),
+    review: job.review?.commit === job.delivery?.commit ? review(job.review) : null,
     correction: correction(job.correction), reviewCorrection: correction(job.reviewCorrection),
-    environmentPreflight: job.environmentPreflight ? {
-      status: oneOf(job.environmentPreflight.status, ['ready', 'blocked']),
-      reason: oneOf(job.environmentPreflight.reason, ['contract_missing', 'contract_invalid', 'runtime_invalid', 'runtime_missing',
-        'package_invalid', 'lockfile_missing', 'lockfile_invalid', 'lockfile_uncommitted', 'lockfile_changed',
-        'verification_missing', 'verification_unavailable', 'install_failed', 'prior_process_unresolved',
-        'timeout', 'cancelled', 'policy', 'unsafe_path', 'interpreter_missing', 'dependency_incompatible',
-        'offline_bundle_invalid', 'package_index_transport', 'output_limit']),
-      baseline: job.environmentPreflight.baseline ? { passed: job.environmentPreflight.baseline.passed === true } : null,
-    } : null,
-    diagnostics: (job.failures || []).slice(-20).map(() => ({ message: 'Recorded failure; see the complete owner execution journal.' })),
+    environmentPreflight: job.environmentPreflight,
+    reviewAttempts: job.reviewAttempts,
+    reviewPreparationHistory: job.reviewPreparationHistory || [],
+    reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: ownerText(entry.reviewer), findings: review(entry).findings, findingCount: review(entry).findingCount, diagnostics: entry.diagnostics && ownerText(entry.diagnostics) })),
+    diagnostics: (job.failures || []).map(failure => ({ ...failure, message: ownerText(failure.message) })),
   };
 }
+
 function nextAction(task, projected) {
   if (['passed', 'blocked', 'failed', 'merged', 'needs_specification', 'completed'].includes(task.status)) {
     return { action: 'none', reason: 'Job finished; inspect the terminal outcome and recorded owner evidence. Merge does not imply deployment.' };

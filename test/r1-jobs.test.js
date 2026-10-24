@@ -71,7 +71,8 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.ok(pending.evidence.ci.requiredWorkflow.length <= 160);
     assert.ok(!JSON.stringify(pending).includes('token=private'));
     assert.ok(!JSON.stringify(pending).includes('private thinking'));
-    assert.ok(!JSON.stringify(pending).includes('/tmp/context'));
+    assert.ok(!JSON.stringify(pending.evidence.ci).includes('/tmp/context'));
+    assert.match(pending.evidence.verification.stdout, /EXACT DIAGNOSTIC TAIL token=owner \/tmp\/context/);
     assert.match(pending.evidence.ci.observedAt, /^\d{4}-/);
     const calls = fs.readFileSync(path.join(root, 'ci-calls'), 'utf8');
     for (let i = 0; i < 5; i++) assert.deepEqual(await get(id), pending);
@@ -86,7 +87,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     fs.writeFileSync(path.join(root, 'ci-input.json'), JSON.stringify({ runs: [{ ...ciRun, status: 'completed', conclusion: 'success' }] }));
     const reviewing = await until(async () => { const job = await get(id); return job.phase === 'review' && job; });
     assert.equal(reviewing.evidence.verification.exitCode, 0);
-    assert.equal(reviewing.evidence.verification.stdout, undefined);
+    assert.match(reviewing.evidence.verification.stdout, /deterministic test passed/);
     assert.equal(reviewing.evidence.reviewHistory[0].status, 'running');
     const context = JSON.parse(fs.readFileSync(path.join(root, 'reviews'), 'utf8').trim());
     assert.equal(context.verification.command, project.verification);
@@ -109,6 +110,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const seeded = structuredClone(original);
     seeded.id = 't-ffff0149';
     seeded.status = 'running'; seeded.phase = 'ci';
+    seeded.failure = 'Owner failure: token=owner /tmp/context';
     const seed = async () => {
       fs.writeFileSync(path.join(root, 'queue/tasks/done', seeded.id + '.json'), JSON.stringify(seeded));
       return get(seeded.id);
@@ -127,12 +129,14 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     seeded.r1.ci = observation([{ ...ciRun, status: 'completed', conclusion: 'failure' }], 'red');
     assert.equal((await seed()).evidence.ci.category, 'red');
     seeded.r1.ci = { ...observation([], 'pending'), providerError: true };
-    seeded.r1.failures.push({ phase: 'ci', message: 'token=private /home/private ' + 'private thinking'.repeat(2000) });
+    seeded.r1.failures.push({ phase: 'ci', reviewer: 'owner-reviewer', message: 'token=private /home/private ' + 'private thinking'.repeat(2000) });
     const unavailable = await seed();
     assert.equal(unavailable.evidence.ci.category, 'provider_error');
+    assert.equal(unavailable.failure, seeded.failure);
     assert.match(unavailable.nextAction.reason, /GitHub.*observation/);
     assert.ok(unavailable.nextAction.reason.length <= 400);
-    assert.ok(!/token=private|private thinking|\/home\/private/.test(JSON.stringify(unavailable)));
+    assert.ok(!/token=private|private thinking|\/home\/private/.test(JSON.stringify(unavailable.evidence.ci)));
+    assert.deepEqual(unavailable.evidence.diagnostics.at(-1), seeded.r1.failures.at(-1));
     recordCiState(seeded.r1, observation([{ ...ciRun, status: 'completed', conclusion: 'success' }], 'green'));
     const cleared = await seed();
     assert.equal(cleared.evidence.ci.category, 'green', 'successful poll clears historical provider error');
@@ -153,6 +157,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.equal(stale.evidence.ci.requiredRun, null);
     assert.equal(stale.evidence.review, null);
     assert.equal(stale.evidence.reviewHistory.at(-1).findingCount, 1);
+    assert.deepEqual(stale.evidence.reviewHistory.at(-1).findings, seeded.r1.reviewHistory.at(-1).findings);
     fs.unlinkSync(path.join(root, 'queue/tasks/done', seeded.id + '.json'));
     // The generic job contract is unchanged: it reports R1 IDs compactly and
     // never accepts an R1-shaped submission.
@@ -166,8 +171,8 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const third = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 3 })).value.id;
     const failed = await until(async () => { const job = await get(third); return job.status === 'blocked' && job; });
     assert.equal(failed.evidence.reviewHistory[0].status, 'failed');
-    assert.equal(failed.evidence.reviewHistory[0].diagnostics, undefined);
-    assert.ok(!JSON.stringify(failed).includes('token=private'));
+    assert.equal(failed.evidence.reviewHistory[0].diagnostics, 'Fake reviewer failed: token=private');
+    assert.ok(JSON.stringify(failed).includes('token=private'));
     const blockedLog = (await request(port, `/api/log/${third}`)).value.lines;
     assert.equal(blockedLog.filter(line => /terminal outcome: blocked/.test(line)).length, 1, 'the transcript preserves the actual non-autonomous terminal status');
     await halt(); port = await launch();

@@ -75,7 +75,7 @@ async function runCase(testCase) {
   if (testCase === 'transcript') {
     assert.equal(finished.status, 'blocked');
     const fullOutput = marker + 'large-log\n'.repeat(200000);
-    assert.equal(finished.evidence.verification.stdout, undefined);
+    assert.equal(finished.evidence.verification.stdout, fullOutput);
     assert.equal(JSON.parse(fs.readFileSync(path.join(queue,'tasks/done',`${created.id}.json`))).r1.verification.stdout, fullOutput);
     assert.equal(JSON.parse(fs.readFileSync(path.join(project.stateDir,'issue-5.json'))).verification.stdout, fullOutput);
     for (let poll = 0; poll < 3; poll++) {
@@ -122,8 +122,7 @@ async function runCase(testCase) {
     port = await launch();
     assert.deepEqual(await retrieve(created.id), before);
     assert.deepEqual(await retrieve(childRecord.childId), childBefore);
-    assert.equal((await request(port, `/api/r1/jobs/${created.id}`)).evidence.verification.stderr, undefined);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(queue, 'tasks/done', `${created.id}.json`))).r1.verification.stderr, 'test: owner failure\nstack line\n');
+    assert.equal((await request(port, `/api/r1/jobs/${created.id}`)).evidence.verification.stderr, 'test: owner failure\nstack line\n');
     return;
   }
   if(testCase==='critic-reject') {
