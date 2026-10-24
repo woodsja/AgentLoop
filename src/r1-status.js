@@ -70,6 +70,7 @@ function evidence(job, configuredWorkflow) {
     ci: ciProjection(job, configuredWorkflow),
     review: job.review?.commit === job.delivery?.commit ? review(job.review) : null,
     correction: correction(job.correction), reviewCorrection: correction(job.reviewCorrection),
+    architectureDecision: job.architectureDecision,
     environmentPreflight: job.environmentPreflight,
     reviewAttempts: job.reviewAttempts,
     reviewPreparationHistory: job.reviewPreparationHistory || [],
@@ -79,6 +80,7 @@ function evidence(job, configuredWorkflow) {
 }
 
 function nextAction(task, projected) {
+  if (task.status === 'paused_owner_decision' || projected?.architectureDecision) return { action: 'owner_decision', reason: 'Implementation and guarded merge are paused. Inspect the decision issue, notification status and original logs; prose is not approval.' };
   if (['passed', 'blocked', 'failed', 'merged', 'needs_specification', 'completed'].includes(task.status)) {
     return { action: 'none', reason: 'Job finished; inspect the terminal outcome and recorded owner evidence. Merge does not imply deployment.' };
   }

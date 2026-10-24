@@ -27,6 +27,10 @@ function validateProject(projectName, project) {
 
   if (Object.hasOwn(project, 'milestoneAuthorization') && typeof project.milestoneAuthorization !== 'boolean') throw new TypeError('milestoneAuthorization must be a boolean');
 
+  if (Object.hasOwn(project, 'architectureDecisions') && typeof project.architectureDecisions !== 'boolean') throw new TypeError('architectureDecisions must be a boolean');
+  if (Object.hasOwn(project, 'decisionOwner') && (typeof project.decisionOwner !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(project.decisionOwner))) throw new TypeError('decisionOwner must be a GitHub login');
+  if (project.architectureDecisions === true && ['needs-owner-decision', ''].includes(project.readyLabel)) throw new TypeError('Decision issues require a separate ready label');
+
   for (const field of ['enabled', 'autoMerge']) {
     if (typeof project[field] !== 'boolean') {
       throw new TypeError(`${field} for project ${projectName} must be a boolean`);

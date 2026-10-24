@@ -47,6 +47,11 @@ async function runTask(projectPath, inputTask, options) {
         verificationTimeoutMs: options.verificationTimeoutMs,
         recordExecution: options.recordExecution,
       });
+      if (result.status === 'paused_owner_decision') {
+        attempts.push({ number, status: result.status, worker: result.worker, proposal: result.proposal });
+        await emitState('paused_owner_decision', null);
+        return { task, status: 'paused_owner_decision', proposal: result.proposal, attempts };
+      }
       attempts.push({
         number,
         status: result.status,

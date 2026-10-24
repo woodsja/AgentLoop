@@ -9,6 +9,8 @@ async function executeTask(projectPath, inputTask, options) {
 
   const task = normalizeTaskContract(inputTask);
   const worker = await options.runWorker(projectPath, task);
+  const proposal = require('./architecture-decisions').readProposal(projectPath, task.architectureDecisions, options.recordExecution);
+  if (proposal) return { task, worker, status: 'paused_owner_decision', proposal };
   const result = await verifyTask(projectPath, task, options.verificationTimeoutMs, options.recordExecution);
 
   return {

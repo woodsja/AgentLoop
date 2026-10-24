@@ -1,4 +1,5 @@
 const FIELDS = new Set([
+  'architectureDecisions',
   'id',
   'goal',
   'acceptance',
@@ -23,6 +24,8 @@ function validateTaskContract(input) {
       throw new TypeError(`Unknown task contract field: ${String(field)}`);
     }
   }
+
+  if (Object.hasOwn(input, 'architectureDecisions') && typeof input.architectureDecisions !== 'boolean') throw new TypeError('architectureDecisions must be a boolean');
 
   for (const field of ['id', 'goal', 'verification']) {
     if (!isNonEmptyString(input[field])) {
@@ -60,6 +63,7 @@ function normalizeTaskContract(input) {
   validateTaskContract(input);
 
   const normalized = {
+    ...(input.architectureDecisions === true ? { architectureDecisions: true } : {}),
     id: input.id,
     goal: input.goal,
     acceptance: [...input.acceptance],

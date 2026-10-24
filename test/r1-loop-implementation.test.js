@@ -169,3 +169,22 @@ test('mixed child cancellation reports deferred request and preserves work until
   assert.equal(fs.readFileSync(path.join(f.cwd, 'partial-work'), 'utf8'), 'retained');
   assert.equal(fs.existsSync(path.join(f.cwd, 'PLAN.md')), false);
 });
+
+test('opt-in child architecture proposal pauses before critic PASS or verification', async t => {
+  const f = fixture(t);
+  f.task.architectureDecisions = true;
+  f.child.task.status = 'partial';
+  fs.mkdirSync(path.join(f.cwd, '.ralph'));
+  fs.writeFileSync(path.join(f.cwd, '.ralph/architecture-decision.json'), JSON.stringify({
+    key: 'storage', problem: 'Choose persistent storage', options: [{ name: 'SQL', tradeoffs: 'Migrations' }, { name: 'Journal', tradeoffs: 'Compaction' }],
+    recommendation: 'SQL', consequences: 'Migration required', conflicts: 'None', grantImplications: 'No new grants', newEvidence: '',
+    settledDecision: false, expensiveToReverse: true, surprisingWithoutContext: true, genuineTradeoff: true,
+  }));
+  const impl = createR1LoopImplementation({ ensureChild: () => ({ id: 't-123' }), childState: () => f.child,
+    verify: async () => { throw new Error('Must not verify a paused choice'); } });
+  const result = await impl.run(f.cwd, f.task);
+  assert.equal(result.status, 'paused_owner_decision');
+  assert.equal(result.childLoopId, 't-123');
+  assert.equal(fs.existsSync(path.join(f.cwd, 'PLAN.md')), false);
+  assert.ok(fs.existsSync(path.join(f.cwd, '.ralph/architecture-decision.json')));
+});

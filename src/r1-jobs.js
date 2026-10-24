@@ -186,7 +186,9 @@ function createR1Jobs(store, options = {}) {
 
   function finish(task, job) {
     task.r1 = job && structuredClone(job);
-    if (task.autonomous) {
+    if (job?.architectureDecision) {
+      task.status = 'paused_owner_decision';
+    } else if (task.autonomous) {
       task.status = approvedMerge(job) ? 'merged' : task.specification === 'missing' && !job ? 'needs_specification' : 'failed';
     } else {
       const approved = job && job.terminalState === 'ready_for_human_merge'
@@ -267,6 +269,7 @@ function createR1Jobs(store, options = {}) {
   }
 
   async function conclude(task, job, project) {
+    if (job?.architectureDecision) return finish(task, job);
     if (job?.failures?.some(failure => failure.phase === 'authorization')) {
       task.failure = job.failures.filter(failure => failure.phase === 'authorization').at(-1).message;
       return finish(task, job);
@@ -474,7 +477,27 @@ function createR1Jobs(store, options = {}) {
         // Keep Household issue admission exclusive to its scheduled autopilot;
         // racing this scanner would prematurely fail and unlabel blocked issues.
         if (!autonomous(project) || ownedByHouseholdAutopilot(project)) continue;
-        const jobs = createJobStore(resolveStateDir(name, project)).list();
+        const projectStore = createJobStore(resolveStateDir(name, project));
+        await require('./architecture-decisions').reconcile(project, projectStore, {
+          execFile: dependencies.execFile || runFile,
+          withJobExecution: async (job, work) => {
+            const id = job.r1ParentJobId;
+            if (!id) return work();
+            const record = recorder(store, id, { parentId: id, stage: 'paused_owner_decision' });
+            await withExecution(record, work);
+            record('architecture_decision_reconciliation', { decision: job.architectureDecision });
+            // Keep the owner-facing queue checkpoint in step with remote recovery.
+            try {
+              const task = store.readTask(id, 'done');
+              if (task.status === 'paused_owner_decision') {
+                task.r1 = structuredClone(job);
+                store.writeTask(task, 'done');
+                store.writeResult({ id, status: task.status, project: task.project, finishedAt: task.finishedAt, evidence: evidence(job) });
+              }
+            } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          },
+        });
+        const jobs = projectStore.list();
         // An issue waiting for a specification is admitted again only after
         // its description changes.
         const waiting = new Map(store.listTasks('done')

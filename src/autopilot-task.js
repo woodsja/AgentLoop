@@ -28,6 +28,7 @@ function buildAutopilotTask(project, issue, instructions) {
   const body = typeof issue.body === 'string' && issue.body.trim() ? issue.body.trim() : '(No issue body was provided.)';
   const repositoryInstructions = formatRepositoryInstructions(instructions);
   return {
+    ...(project.architectureDecisions === true ? { architectureDecisions: true } : {}),
     id: `autopilot:${project.repo}#${issue.number}`,
     goal: `Implement GitHub issue #${issue.number}: ${issue.title}\n\nIssue body:\n${body}\n\nRepository instructions:\n${repositoryInstructions}`,
     acceptance: [

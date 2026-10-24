@@ -116,6 +116,8 @@ function createR1LoopImplementation({
           await sleep(pollMs);
         }
         if (!childTerminal) throw new Error('R1 child loop timed out; implementation cannot be delivered.');
+        const proposal = require('./architecture-decisions').readProposal(cwd, task.architectureDecisions);
+        if (proposal) return { task, status: 'paused_owner_decision', proposal, attempts: [], childLoopId: childId };
         if (!approvedCriticPass(lastLoop)) {
           throw new Error(`R1 child loop lacks a final Claude critic PASS: ${String(lastLoop?.status)}`);
         }
