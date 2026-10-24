@@ -421,6 +421,7 @@ function recordDelivery(job, { branch = job.branch, commit, pushed = true }) {
   if (job.delivery && job.delivery.commit && job.delivery.commit !== commit) {
     job.review = null;
     job.reviewSkip = null;
+    job.ci = null;
   }
   job.delivery = { branch, commit, pushed };
   // Bind the freshly checkpointed verifier result once. A later delivery
@@ -465,6 +466,9 @@ function recordCiState(job, observation, details = null) {
   }
   job.ci = {
     state: source.state,
+    ...(source.requiredWorkflow === undefined ? {} : { requiredWorkflow: source.requiredWorkflow }),
+    ...(source.observedAt === undefined ? {} : { observedAt: source.observedAt }),
+    ...(source.providerError === undefined ? {} : { providerError: source.providerError === true }),
     details: source.details == null ? null : diagnosticText(source.details),
     ...(source.prNumber === undefined ? {} : { prNumber: source.prNumber }),
     ...(source.headCommit === undefined ? {} : { headCommit: source.headCommit }),

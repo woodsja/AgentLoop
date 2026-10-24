@@ -62,25 +62,7 @@ function approvedMerge(job) {
     && hasPassingVerification(job.verification, job.delivery.commit));
 }
 
-function evidence(job) {
-  const review = value => value && ({
-    reviewer: ownerText(value.reviewer), verdict: value.verdict, commit: value.commit, policy: value.policy,
-    findings: (value.findings || []).map(finding => ({ ...finding, summary: ownerText(finding.summary), file: ownerText(finding.file) || null })),
-    ...(value.attempt ? { attempt: value.attempt } : {}),
-  });
-  return job && {
-    outcome: job.terminalState || job.status,
-    commit: job.delivery && job.delivery.commit,
-    verification: job.verification && { ...job.verification },
-    ci: job.ci && { state: job.ci.state, headCommit: job.ci.headCommit },
-    review: review(job.review),
-    environmentPreflight: job.environmentPreflight,
-    reviewAttempts: job.reviewAttempts,
-    reviewPreparationHistory: job.reviewPreparationHistory || [],
-    reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: ownerText(entry.reviewer), findings: review(entry).findings, diagnostics: entry.diagnostics && ownerText(entry.diagnostics) })),
-    diagnostics: (job.failures || []).map(failure => ({ ...failure, message: ownerText(failure.message) })),
-  };
-}
+const { evidence, nextAction } = require('./r1-status');
 
 function createR1Jobs(store, options = {}) {
   const dependencies = options.autopilotDependencies || {};
@@ -173,6 +155,7 @@ function createR1Jobs(store, options = {}) {
     const enqueue = authorization => {
       const task = store.enqueueTask({
         workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
+        requiredCiWorkflow: project.ciWorkflow || null,
         ...(authorization ? { milestoneAuthorization: authorization } : {}),
         ...(named ? { worktree: named[0] } : {}), title: body.title || `R1 issue #${body.issue}`,
         phase: 'queued', status: 'queued', phases: [{ phase: 'queued', at: now() }], source: body.source || 'api',
@@ -540,9 +523,12 @@ function createR1Jobs(store, options = {}) {
       try {
         const task = store.readTask(id, stage);
         if (task.workflow !== 'r1') return null;
+        const projected = evidence(task.r1, task.requiredCiWorkflow);
         return { id, status: task.status || stage, project: task.project,
           ...(task.failure ? { failure: task.failure } : {}),
-          phase: task.phase, phases: task.phases || [], evidence: evidence(task.r1),
+          phase: task.phase, phases: task.phases || [], evidence: projected,
+          nextAction: nextAction(task, projected),
+          executionJournal: { id, raw: `/api/log/${id}?raw=1` },
         };
       } catch (error) {
         if (error.code !== 'ENOENT') throw error;

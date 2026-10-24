@@ -147,8 +147,23 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.equal(lines(path.join(root, 'merges')).length, 1);
 
     // Crash while waiting for CI: the restarted daemon resumes the same job once.
+    const recoveryFixture = JSON.parse(fs.readFileSync(fixture));
+    recoveryFixture.ciTimeoutMs = 20000;
+    fs.writeFileSync(fixture, JSON.stringify(recoveryFixture));
     ready([11]);
     const [waiting] = await until(() => { const tasks = tasksFor(11); return tasks[0] && tasks[0].phase === 'ci' && tasks; }, '#11 waiting for CI');
+    fs.writeFileSync(path.join(root, 'ci-error'), '');
+    const unavailable = await until(async () => {
+      const job = await get(port, `/api/r1/jobs/${waiting.id}`);
+      return job.evidence?.ci?.category === 'provider_error' && job;
+    }, '#11 provider error visible through HTTP');
+    assert.equal(unavailable.evidence.ci.state, 'pending');
+    assert.match(unavailable.nextAction.reason, /GitHub Actions observation failed/);
+    assert.ok(!/credential-do-not-log|hidden chain|private\/prompt/.test(JSON.stringify({
+      ci: unavailable.evidence.ci, nextAction: unavailable.nextAction,
+    })));
+    assert.ok(unavailable.evidence.diagnostics.some(failure => failure.message.includes(adversarial)),
+      'captured provider failures remain available as owner evidence');
     // Resume the same persisted CI transition more than once before it is
     // allowed to finish; neither daemon restart may replay transcript lines.
     for (let restart = 0; restart < 2; restart += 1) {
@@ -156,6 +171,12 @@ test('the continuous runner admits ready issues itself and drives each to exactl
       await launch();
       if (restart === 0) await until(() => { const tasks = tasksFor(11); return tasks[0] && tasks[0].phase === 'ci'; }, '#11 resumed CI');
     }
+    assert.equal((await get(port, `/api/r1/jobs/${waiting.id}`)).evidence.ci.category, 'provider_error');
+    fs.unlinkSync(path.join(root, 'ci-error'));
+    await until(async () => {
+      const job = await get(port, `/api/r1/jobs/${waiting.id}`);
+      return job.evidence.ci.category === 'required_run_pending' && !job.evidence.ci.providerError;
+    }, '#11 provider error clears after a successful scheduled poll');
     fs.writeFileSync(path.join(root, 'ci-release'), '');
     const recovered = await outcome(11);
     assert.deepEqual([recovered.task.id, recovered.job.status], [waiting.id, 'merged']);

@@ -558,7 +558,9 @@ async function run(argv, dependencies = {}) {
         return { issue: candidate, workspace: null, result: null, outcome: { status: READY_FOR_HUMAN }, job };
       }
       observeIntegration(job, store, 'ci', { state: observation.state, headSha: observation.headCommit || job.delivery.commit, pr: job.pr.number }, observation);
-      recordCiState(job, observation);
+      const currentCi = { ...observation, requiredWorkflow: project.ciWorkflow || null,
+        observedAt: store.now(), providerError: false };
+      recordCiState(job, currentCi);
       if (observation.state === 'green') {
         if (project.reviewPolicy === 'always' || project.reviewPolicy === 'risk') {
           // Recover the durable PASS checkpoint before spending any budget.
@@ -707,7 +709,7 @@ async function run(argv, dependencies = {}) {
         const collectDiagnostics = dependencies.collectCiFailureDiagnostics || collectCiFailureDiagnostics;
         const diagnostics = String(await collectDiagnostics(project, observation, { execFile: dependencies.execFile }) || '').trim()
           || `CI red for ${job.delivery.commit}: ${observation.details || 'no details'}`;
-        recordCiState(job, { ...observation, diagnostics });
+        recordCiState(job, { ...currentCi, diagnostics });
         // This is deliberately an equality check rather than a configurable
         // retry budget: a CI failure gets one, and only one, corrective task.
         if (job.correctiveCycles === 0) {
@@ -1003,6 +1005,11 @@ async function run(argv, dependencies = {}) {
             // An observation failure (gh outage, mismatched head) says nothing
             // about the delivered work; keep polling and never restart Ralph.
             job.status = 'awaiting_ci';
+            if (phase === 'ci') recordCiState(job, {
+              state: 'pending', headCommit: job.delivery?.commit, prNumber: job.pr?.number,
+              requiredWorkflow: project.ciWorkflow || null, observedAt: store.now(), providerError: true,
+              runs: job.ci?.headCommit === job.delivery?.commit ? job.ci.runs : [],
+            });
           } else if (((job.correction && job.correction.status !== 'delivered')
             || (job.reviewCorrection && job.reviewCorrection.status !== 'delivered'))
             && (error.code === 'AUTOPILOT_NO_CHANGES' || runLimitReached)) {

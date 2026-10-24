@@ -131,3 +131,25 @@ review, then the normal guarded merge. Re-observe dependency admission for #106
 only after #105 validly merges. Never assume an older `guarded-reconcile.js`
 remains valid after a PR head changes. Live owner config, its `.bak`, owner
 registry and historical jobs are outside this implementation's mutation scope.
+
+## Read-only R1 status
+
+`GET /api/r1/jobs/<id>` and MCP `get_r1_job_status` project the existing
+checkpoint without observing GitHub, retrying work, or granting merge authority.
+`evidence.ci` keeps the `state` field (`pending`, `green`, `red`) and adds
+`category`, `requiredWorkflow`, `prNumber`, `headCommit`, `observedAt`,
+`providerError`, and `requiredRun` (Actions ID, URL, status, conclusion and workflow).
+The categories distinguish `not_configured`, `not_observed`,
+`required_run_missing` (including advisory-only success), `required_run_pending`,
+`provider_error`, `red`, and `green`. Only evidence for the delivered PR and
+exact current head can describe current CI. Raw workflow identities are matched
+before displayed names are redacted or bounded to 160 characters. Run URLs are
+restricted to GitHub Actions run links; provider error text is never a reason.
+
+`nextAction` supplies a bounded action/reason. Verification and independent
+review/correction summaries omit command output, raw findings, prompts, paths,
+and provider diagnostics. This navigation response links `executionJournal.raw`
+to the existing complete owner journal; it does not replace, redact or truncate
+the captured evidence there. Changing delivery heads invalidates current CI and
+review approval while preserving historical review findings in durable evidence.
+A terminal outcome describes job delivery, never service deployment.
