@@ -1,6 +1,7 @@
 node_modules/
 state/
 *.log
+!/docs/evidence/issue-111/*.log
 config.local.json
 .DS_Store
 Thumbs.db

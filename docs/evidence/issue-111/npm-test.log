@@ -1,0 +1,1182 @@
+
+> agentloop@1.2.0 test
+> node test/autopilot-config.test.js && node test/autopilot-systemd.test.js && node test/daemon-systemd.test.js && node test/autopilot-github.test.js && node test/planning-drafts.test.js && node test/autopilot-review.test.js && node test/autopilot-delivery.test.js && node test/autopilot-workspace.test.js && node test/autopilot-integration.test.js && node test/autopilot-instructions.test.js && node test/autopilot-task.test.js && node test/autopilot-environment.test.js && node test/project-preflight-runner.test.js && node test/node-preflight.test.js && node test/python-preflight.test.js && node test/autopilot-state.test.js && node test/autopilot-cli.test.js && node test/daemon.test.js && node test/r1-failed-work.test.js && node test/r1-loop-implementation.test.js && node test/r1-child-recover.test.js && node test/r1-process-claim.test.js && node test/r1-child-scheduler.test.js && node test/r1-child-admission.test.js && node test/r1-child-store.test.js && node test/r1-child-handoff.test.js && node test/r1-jobs.test.js && node test/r1-runner.test.js && node test/engines.test.js && node test/prompts.test.js && node test/sandbox.test.js && node test/milestone-grants.test.js && node test/milestone-tickets.test.js && node test/milestone-batches.test.js && node test/r1-milestone-admission.test.js && node test/household-dependencies.test.js && node test/household-autopilot-admission.test.js && node test/household-milestone-admission.test.js && node test/project-registration.test.js && node test/project-registry.test.js && node test/state.test.js && node test/tools.test.js && node test/run-bash.test.js && node test/ui.test.js && node test/task-contract.test.js && node test/cli-worker.test.js && node test/task-loop.test.js && node test/task-executor.test.js && node test/task-runner.test.js && node test/verifier.test.js && node test/execution-log.test.js && node test/task-state-store.test.js && node test/ralph-task-service.test.js && node test/r1-mixed-requirements.test.js && node test/r1-mixed-e2e.test.js && node test/e2e.test.js
+
+✔ loads the shipped finance-dashboard configuration as a new object (2.856156ms)
+✔ configPath overrides the repository-root configuration path (1.631832ms)
+✔ defaults the normal worker to Codex when no explicit worker is configured (0.734214ms)
+✔ defaults attempts to two but preserves an explicit project retry limit (0.678513ms)
+✔ unknown projects fail with a clear error (0.776615ms)
+✔ preserves an explicit review skip explanation and rejects invalid reason values (1.926938ms)
+✔ malformed JSON and missing configuration files fail closed (0.648812ms)
+✔ invalid top-level configuration shapes are rejected (0.855417ms)
+✔ representative invalid project field values are rejected (1.981438ms)
+✔ mixed-engine implementation is explicit and validates its owner policy (1.663232ms)
+✔ owner runtime supports the shared Node and Python contract only (1.173822ms)
+✔ legacy Finance Python policy stays loadable until the staged migration (#87) (10.679608ms)
+✔ dependency parsing is an explicit validated owner project policy (1.464729ms)
+✔ dependency policy requires independent always review and automatic merge (0.98172ms)
+✔ milestone admission is an explicit boolean opt-in and is disabled in shipped policies (1.837236ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 45.396584
+✔ defaults target the finance-dashboard project and ralph-finance-autopilot units (2.856256ms)
+✔ timer fires about every five minutes and is persistent (0.616812ms)
+✔ service is a oneshot autopilot pass and never the AgentLoop daemon (1.890037ms)
+✔ exec arguments are quoted and escaped for systemd (0.47901ms)
+✔ unit directory honours XDG_CONFIG_HOME (1.117022ms)
+✔ install writes units, reloads, enables the timer, runs once, and enables linger (2.891256ms)
+✔ a failing oneshot run fails the install (1.221823ms)
+✔ linger already on is left alone; a refusal is reported without failing (0.620212ms)
+✔ dry run prints units without touching systemd or disk (0.842516ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 26.70342
+✔ renders a persistent AgentLoop daemon service, not a scheduler (2.306445ms)
+✔ installation explicitly writes and enables only agentloop.service (2.676552ms)
+✔ dry run is the default and does not write files or call systemd (2.128042ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 17.062733
+✔ discovers and normalizes ready issues in oldest issue-number order (5.1387ms)
+✔ fails closed for gh errors, malformed JSON, and unexpected response shapes (1.736634ms)
+✔ observes the persisted PR head through GitHub Actions and normalizes workflow states (2.979758ms)
+✔ only a successful run of the required test workflow for the exact commit is green CI (2.873656ms)
+✔ CI observation rejects malformed Actions responses (1.109822ms)
+✔ observes exact PR identity, merges with GitHub expected-head protection, and closes the issue (2.244643ms)
+✔ classifies real gh merge failures by the HTTP status gh prints on stderr (1.918937ms)
+✔ collects deterministic failed job and log diagnostics without re-running workflows (3.117561ms)
+✔ issue closure: an already closed GitHub issue is confirmed without a redundant PATCH (0.724914ms)
+✔ issue closure: a 422 after GitHub closed it concurrently is reconciled by a verified GET (1.308225ms)
+✔ issue closure: 422 with issue still open, malformed identity, or malformed GitHub is never approved (2.450548ms)
+✔ issue closure rejects transferred issue identity, even if same issue number and closed (0.51771ms)
+✔ issue closure rejects a PR-shaped response at the issues endpoint (1.246625ms)
+✔ issue closure rejects a successful PATCH response with another repository identity (0.785916ms)
+✔ issue closure preserves original PATCH HTTP 422 and subsequent read failure diagnostics (2.480148ms)
+✔ issue closure initial GET errors fail closed without any PATCH (0.756714ms)
+✔ issue closure preserves malformed PATCH body error and failed read error together (0.936918ms)
+✔ issue closure keeps HTTP failure classification when read confirms issue remains open (0.996619ms)
+✔ issue closure accepts only the configured HTTPS GitHub API host and exact repository endpoint (0.913918ms)
+✔ failed PATCH and failed follow-up GET keep both original errors, stacks, and causes (1.369526ms)
+ℹ tests 20
+ℹ suites 0
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 48.703448
+✔ complete preview and publication reuse GitHub operations without labels or registration changes (7.425144ms)
+✔ missing or malformed metadata and accidental labels fail before GitHub access (2.309545ms)
+✔ retries recover identical drafts with read-only operations and reject ready labels or drift (4.401285ms)
+✔ failure and ambiguous creation never automatically repeat POST; retry remains read-only (3.315764ms)
+✔ unrelated empty issue bodies and pull requests do not prevent a spec draft (0.954619ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 29.390172
+✔ Claude reviewer gathers current PR diff, immutable standards, CI evidence, and accepts an exact PASS (7.580948ms)
+✔ Claude review prompt includes the deterministic command, SHA, exit code and test output (2.004839ms)
+✔ Claude reviewer refuses missing, failed or different-SHA deterministic verification before invoking Claude (1.632532ms)
+✔ Claude reviewer fails closed and terminates when stdin reports EPIPE (2.158442ms)
+✔ repository standards uses real Git to load root and nested files beyond the old tree listing limit (294.901244ms)
+✔ Claude reviewer fails closed for malformed output, is_error, wrong SHA, and missing diff (11.869231ms)
+✔ Claude reviewer returns actionable NEEDS_CHANGES and SIGKILLs a term-ignoring timeout (24.596679ms)
+✔ Claude reviewer SIGKILLs a term-ignoring process after output overflow (17.738246ms)
+✔ Claude reviewer fails closed when the PR head moves while the model is reviewing (2.248544ms)
+✔ Claude reviewer keeps untrusted evidence from manufacturing prompt sections (0.569011ms)
+✔ Claude reviewer bounds aggregate repository guidance (1.50953ms)
+✔ Claude reviewer removes parent-session and GitHub authority markers from its environment (0.264605ms)
+✔ oversized passing verification is reviewable as an identified excerpt without losing its SHA-bound verdict (4.744592ms)
+✔ large multibyte stderr is represented faithfully as bounded review evidence (4.435887ms)
+✔ oversized failed verification is still rejected before a model is invoked (0.306706ms)
+✔ review excerpts never break a multibyte UTF-8 character at their head or tail boundaries (2.162242ms)
+✔ JSON-escaped terminal output also fits the bounded independent review prompt (6.908335ms)
+✔ spoofed excerpt metadata in short verification output remains plain untrusted stdout (1.796635ms)
+✔ HTML-like verification output and near-limit diff are measured after prompt escaping (20.807505ms)
+✔ large verification wrong SHA or timeout cannot invoke the reviewer (0.319706ms)
+✔ full original verifier output persists through durable Ralph job state while reviewer uses excerpt (26.862023ms)
+ℹ tests 21
+ℹ suites 0
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1023.534835
+✔ delivers a passed issue by committing, pushing, and opening a PR that closes it (6.441326ms)
+✔ targets main when the project does not name a base branch (1.724634ms)
+✔ pushes a clean passed worktree without creating an empty commit (1.138223ms)
+✔ reuses an existing open PR for the deterministic branch instead of creating a duplicate (0.98852ms)
+✔ creates a PR when only PRs for other branches match the head filter (1.353026ms)
+✔ does not reuse a PR for the issue branch when it targets a different base (1.255024ms)
+✔ refuses to commit, push, or open a PR unless Ralph reported passed (1.194823ms)
+✔ does not push when committing the passed changes fails (1.313726ms)
+✔ does not open a PR when the push fails (1.284425ms)
+✔ surfaces a PR creation failure after the push has been checkpointed (2.106441ms)
+✔ rejects malformed gh pull request output (0.978419ms)
+✔ a corrective delivery commits a new change to the same branch and refuses an unchanged head (1.601331ms)
+✔ reports durable delivery checkpoints after the commit, push, and PR (0.896518ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 35.878599
+✔ derives stable, safe branch names and deterministic worktree paths (3.449667ms)
+✔ reuses a persisted branch for a resumed issue even after its title changes (115.762354ms)
+✔ prepares an isolated worktree from the configured origin base ref and cleans it idempotently (116.450268ms)
+✔ removes a finished issue worktree and its repo-local virtual environment (98.005809ms)
+✔ prunes stale metadata after an issue worktree disappears unexpectedly (100.464557ms)
+✔ instruction-only legacy Python setup fails with migration guidance and remains cleanable (115.867456ms)
+✔ fetches origin before creating a worktree, so the base is not a stale local remote ref (114.064221ms)
+✔ reattaches an existing delivery branch and refuses non-empty deterministic destinations (92.023492ms)
+✔ reports git failures by operation without leaking subprocess details (49.81617ms)
+✔ best-effort cleans a destination created by a failed worktree add (45.980896ms)
+✔ does not recursively remove a registered worktree when Git removal fails (110.037843ms)
+✔ a corrective workspace continues the delivered branch at its red head commit (190.278605ms)
+✔ cleanup refuses a path outside the configured worktree root (41.386306ms)
+✔ cleanup never removes a different registered worktree at an issue path (70.597275ms)
+✔ cleanup refuses the main checkout even when it sits at an issue path in the worktree root (58.999649ms)
+✔ terminal job cleanup removes only the recorded issue worktree and its .venv, then prunes (235.021377ms)
+✔ terminal job cleanup refuses recorded paths naming the main checkout or an unrelated worktree (133.878508ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1703.884083
+✔ clean divergence creates a normal merge, verifies exact head and resumes without another commit (1987.73321ms)
+✔ safe package script collision carries stages to bounded resolver and preserves both commands (2261.228034ms)
+✔ ambiguous unresolved conflict fails closed and preserves the published head (954.795793ms)
+✔ reload recovers merge commit without another merge, completed verifier or push (2086.58353ms)
+✔ reload recovers verifier completion without another merge, completed verifier or push (1953.511237ms)
+✔ reload recovers push intent without another merge, completed verifier or push (2061.910046ms)
+✔ reload recovers push completion without another merge, completed verifier or push (2137.326612ms)
+✔ reload recovers final checkpoint without another merge, completed verifier or push (1917.542131ms)
+✔ one-shot runner invalidates PASS when target advances, then requires new CI and Claude review (3988.053535ms)
+✔ target lock serializes independent issues and is released for later passes (279.763446ms)
+✔ red integrated verifier gets one repair and fresh exact-commit verification (2138.071718ms)
+✔ interrupted conflict agent is never invoked twice after reload (1003.126626ms)
+✔ unexpected PR head refuses before any merge or agent invocation (275.075255ms)
+✔ resolver-attributed edits outside its worktree refuse publication (958.287952ms)
+✔ protected resolver configuration edits refuse publication (934.792394ms)
+✔ another authorized worktree can change while conflict resolution is running (2367.621582ms)
+✔ total synchronization budget refuses another target advance without discarding passing work (5014.150683ms)
+✔ fork identity and corrupt durable transitions fail closed (281.867786ms)
+✔ one-shot runner blocks green CI without explicit exact-SHA evidence (1872.369736ms)
+✔ one-shot conflict resolution uses the authorized integration worker instead of replaying implementation (2397.689256ms)
+✔ new untracked resolver files with conflict markers cannot enter the merge commit (1261.864854ms)
+✔ reload after repair commit preserves the failed verifier and never repeats the repair worker (2373.713087ms)
+✔ prepared project verification command is used and recorded for the exact integrated commit (1621.883456ms)
+✔ a failed resolver process cannot become successful through a task-service PASS (974.031251ms)
+✔ one-shot integration inherits verification timeout undefined (1531.515196ms)
+✔ one-shot integration inherits verification timeout 900000 (1550.992275ms)
+✔ target contention defers durably without consuming any job attempts (274.711145ms)
+✔ contention after Claude PASS preserves approval and resumes without another review (2170.036116ms)
+✔ one-shot fetch transport retry survives reload and respects deadline without spending model budgets (1913.464023ms)
+✔ one-shot ls-remote transport retry survives reload and respects deadline without spending model budgets (2298.562913ms)
+✔ three matching failures exhaust across restarts; auth refuses immediately (804.426648ms)
+✔ 500 pending CI and target polls keep bounded summaries and retain green/base transitions and raw evidence (75183.756523ms)
+✔ uncertain completed push reconciles read-only and preserves pre-push read retry evidence (2379.651418ms)
+✔ final target ls-remote transport failure defers with retained exact PASS and no extra review (2435.705405ms)
+✔ a successful fetch clears only its own streak while a pre-push read remains deferred (19813.488527ms)
+✔ loss between the first Git result and its checkpoint cannot reset retry reservation (3142.425406ms)
+✔ temporary worktree read process failure resumes at the real persisted run seam (3301.864497ms)
+✔ temporary rev-parse read process failure resumes at the real persisted run seam (3433.04424ms)
+✔ reattaching a removed delivery worktree retries its own fetch with persisted infrastructure budget (3773.006835ms)
+✔ an unexplained push response is reconciled read-only and never authorizes a blind retry (6086.263325ms)
+✔ malformed delivered or observed commit identities stop immediately without transport retries (838.849379ms)
+ℹ tests 41
+ℹ suites 0
+ℹ pass 41
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 174052.76163
+✔ discovers repository AGENTS instructions without reading git or virtual-environment internals (14.035572ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 24.382773
+✔ builds a corrective task from the original issue, instructions, and CI diagnostics only (2.802054ms)
+✔ builds a reviewer corrective task with findings and original issue context (0.590612ms)
+✔ builds a bounded Codex Ralph task from issue data and repository instructions (1.141322ms)
+✔ uses two attempts by default and honors an explicit project retry limit (0.372907ms)
+✔ extracts checklist criteria from a conventional heading with a colon (1.333526ms)
+✔ extracts explicit acceptance criteria without requiring a Markdown heading marker (0.350307ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 17.108632
+✔ retired bare venv setup cannot produce readiness (existing=false) (5.182001ms)
+✔ retired bare venv setup cannot produce readiness (existing=true) (1.194123ms)
+✔ uncontracted non-Python projects retain ordinary execution (3.378165ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 18.964768
+✔ native tools receive blocking output endpoints and burst output survives forwarding (153.062771ms)
+✔ a signalled native command flushes both forwarded streams before the runner mirrors its signal (76.886492ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 237.740714
+✔ Node locked install is ready despite failing application tests and captures lifecycle streams (1313.553391ms)
+✔ Node preparation diagnoses contract_missing before installer admission (23.18645ms)
+✔ Node preparation diagnoses runtime_invalid before installer admission (20.580499ms)
+✔ Node preparation diagnoses lockfile_missing before installer admission (21.370715ms)
+✔ Node preparation diagnoses lockfile_invalid before installer admission (20.927706ms)
+✔ Node preparation diagnoses lockfile_uncommitted before installer admission (81.643584ms)
+✔ Node preparation diagnoses verification_missing before installer admission (21.690321ms)
+✔ Node installer install_failed retains full diagnostics and releases its process claim (805.056623ms)
+✔ Node installer lockfile_changed retains full diagnostics and releases its process claim (784.206218ms)
+✔ Node installer timeout retains full diagnostics and releases its process claim (1662.758867ms)
+✔ Node installer cancelled retains full diagnostics and releases its process claim (919.84905ms)
+✔ ordinary system node/npm resolve without a private tool directory or bubblewrap (1061.10789ms)
+✔ npm ci rejects package/lock dependency mismatch without rewriting the lockfile (779.556227ms)
+✔ missing verification executable blocks tool readiness (1070.983082ms)
+✔ public R1 Node red-tests: durable readiness and zero wasted setup attempts (1673.719077ms)
+✔ public R1 Node missing-lock: durable readiness and zero wasted setup attempts (201.99752ms)
+✔ public R1 Node restart-dead: durable readiness and zero wasted setup attempts (3742.004906ms)
+✔ public R1 Node restart-ambiguous: durable readiness and zero wasted setup attempts (2109.197023ms)
+✔ clean passing Node project is ready without changing owner activation policy (1155.218913ms)
+✔ invalid common contract fails concretely: { (24.541576ms)
+✔ invalid common contract fails concretely: {"runtime":"node","lockfile":"package-lock.json","verification":"check","autoMerge":true} (23.074447ms)
+✔ npm script signal exit remains visible in the baseline evidence (1102.226984ms)
+✔ Node project preparation allows a six-minute integration baseline but remains bounded at fifteen minutes (0.840816ms)
+✔ Node project preparation retains explicit shorter deadline and cancellation precedence (0.440108ms)
+✔ full Node project preparation accepts a six-minute baseline and blocks over fifteen minutes (2261.097767ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 25
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 20917.997184
+✔ real locked Python setup uses local venv, preserves red application checks and all raw streams (1220.709582ms)
+✔ Python lockfile_missing lock/setup errors require explicit repair (23.70116ms)
+✔ Python lockfile_uncommitted lock/setup errors require explicit repair (78.033614ms)
+✔ Python invalid lock/setup errors require explicit repair (216.917208ms)
+✔ Python stale lock/setup errors require explicit repair (206.884414ms)
+✔ Python metadata_missing lock/setup errors require explicit repair (21.983926ms)
+✔ Python tooling resolves ordinary PATH and reports missing uv without installation (384.861166ms)
+✔ Python verification_unavailable terminates setup ownership and supports recovery (739.632049ms)
+✔ Python timeout terminates setup ownership and supports recovery (1934.818534ms)
+✔ Python cancelled terminates setup ownership and supports recovery (787.113569ms)
+✔ public R1 Python red-tests: durable readiness and zero wasted setup attempts (680.278697ms)
+✔ public R1 Python missing-lock: durable readiness and zero wasted setup attempts (129.210907ms)
+✔ public R1 Python restart-dead: durable readiness and zero wasted setup attempts (1341.591624ms)
+✔ public R1 Python restart-ambiguous: durable readiness and zero wasted setup attempts (693.876259ms)
+✔ real pytest source/cache failure preserves exact diagnostics, then repaired setup admits red tests (1704.260858ms)
+✔ ambient active venv and uv target cannot redirect project-local setup (387.261412ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 10586.546864
+✔ persists the delivered branch and commit and rejects a foreign branch (26.523914ms)
+✔ a newly delivered commit invalidates an approval for the prior head (17.166032ms)
+✔ review skip evidence survives reload and is invalidated by a new delivered SHA (27.917741ms)
+✔ invalid skip reasons and malformed persisted skip evidence fail closed (1.175223ms)
+✔ verification evidence is checkpointed before delivery, bound once, and preserved across delivery restart (43.532345ms)
+✔ verification evidence preserves full test output and rejects malformed persisted records (1.240024ms)
+✔ persists review policy, structured findings, and attempt metadata with the verdict and exact SHA (30.9374ms)
+✔ rejects review records that omit policy or attempt metadata or mismatch findings and verdict (1.710433ms)
+✔ legacy PASS-only review records written before review metadata remain readable (16.48622ms)
+✔ review history retains verdicts across delivered SHAs and verbatim failures across reload (32.062022ms)
+✔ corrupt review attempt history fails closed while older jobs without history still load (17.348436ms)
+✔ persists every job field and reloads it through a fresh store (21.286712ms)
+✔ persists normalized CI observations with workflow run identifiers (17.063131ms)
+✔ persists red CI diagnostics and the single corrective cycle before correction (16.712324ms)
+✔ writes atomically and leaves no temporary files behind (27.543634ms)
+✔ missing state is empty but malformed state is never silently ignored (1.110022ms)
+✔ rejects an incomplete recovery record instead of treating it as a fresh job (0.807715ms)
+✔ rejects recovery records that omit a required field or corrupt diagnostics (1.361627ms)
+✔ terminal state and complete failure diagnostics survive reload (16.885627ms)
+✔ per-issue lock blocks a live owner and reclaims a lock from a dead or rebooted owner (21.776722ms)
+✔ selection resumes unfinished jobs first and never restarts terminal or passed jobs (0.914717ms)
+✔ state directory defaults per project and honors a configured override (0.51071ms)
+✔ summarizes the last Ralph attempt for diagnostics (0.377908ms)
+✔ merge records require full identity, persist, reconcile issue closure, and reject malformed records on load (29.222666ms)
+✔ failure journal preserves both HTTP classifications and does not affect successful merge budgets (16.557021ms)
+✔ nested error cause stacks are preserved in owner-readable durable state (17.665443ms)
+✔ durable failure evidence retains the separate observation error and its nested cause (16.992529ms)
+ℹ tests 27
+ℹ suites 0
+ℹ pass 27
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 439.083917
+✔ dry run inspects disabled projects and reports its selected candidate (8.26136ms)
+✔ dry run reports no candidate using the configured ready label (0.800716ms)
+✔ real pass reports no candidate using the configured ready label (1.219024ms)
+✔ rejects malformed and unknown arguments (0.988919ms)
+✔ runs an enabled issue through the isolated Ralph path and always cleans the workspace (103.336304ms)
+✔ Ralph verification status alone decides pass versus needs_planning (0.562511ms)
+✔ reports a passed Ralph run as deliverable and still cleans the workspace (95.626654ms)
+✔ finishes a passed git-only delivery and persists its branch and commit (105.919755ms)
+✔ does not prepare or mutate a workspace for dry runs (1.016919ms)
+✔ skips disabled projects without discovery, cleanup, or workspace preparation (0.805516ms)
+✔ main exits zero for a disabled project (0.972719ms)
+✔ cleans a prepared workspace when repository setup fails before Ralph runs (94.396831ms)
+✔ persists a delivered PR awaiting CI and does not start duplicate worker work (132.768475ms)
+✔ a green persisted PR CI observation becomes ready for human merge without a workspace (141.79065ms)
+✔ green CI cannot become merge-ready without a valid review skip reason, including after restart (668.488966ms)
+✔ a review skip reason is checkpointed for the exact SHA and survives a crash before merge-ready (102.393586ms)
+✔ restart cannot use a skip reason persisted for a different delivered SHA (56.107289ms)
+✔ review receives actual deterministic verification evidence after delivery and restart (242.557005ms)
+✔ missing, failed, timed-out, or stale verification cannot authorize a review or cached PASS (721.018785ms)
+✔ an always-review project persists a matching independent PASS before becoming merge-ready (160.31271ms)
+✔ scheduled polling reviews only after the required CI workflow succeeds for the exact head, once (275.090535ms)
+✔ restart reuses a persisted exact-head PASS even when review attempts are exhausted (56.965505ms)
+✔ restart refuses further reviews once the persisted review-attempt limit is reached (114.552522ms)
+✔ restart never reuses a persisted PASS for a different delivered SHA (79.829149ms)
+✔ the legacy independentReviewer injection remains a supported review interface (156.434435ms)
+✔ a matching reviewer NEEDS_CHANGES is deferred, corrected once, then independently re-reviewed (313.684184ms)
+✔ structured reviewer findings are persisted with the risk policy and passed to the corrective worker (144.89731ms)
+✔ a reviewer failure still consumes a durable review attempt without recording a review (163.129064ms)
+✔ reviewer errors preserve complete review attempt evidence and never approve (84.55474ms)
+✔ reviewer timeouts preserve complete review attempt evidence and never approve (80.251257ms)
+✔ malformed verdicts preserve complete review attempt evidence and never approve (81.801387ms)
+✔ restart recovers an interrupted review with its original identity and no duplicate invocation (73.632228ms)
+✔ restart preserves a checkpointed reviewer failure when the terminal save was interrupted (85.452657ms)
+✔ a second matching reviewer NEEDS_CHANGES after the reviewer budget is spent is handed to a human (69.187742ms)
+✔ a second reviewer block and an interrupted reviewer worker are exhausted without duplicate work (111.888571ms)
+✔ an always-review project fails closed for absent, invalid, mismatched, or finding-bearing PASS review results (807.450161ms)
+✔ a risk-review project fails closed for missing or invalid review results (466.538549ms)
+✔ a red persisted PR CI observation is recorded without starting corrective work (137.950175ms)
+✔ red CI diagnostics are gathered and persisted before any correction (166.028221ms)
+✔ red CI diagnostics come from the GitHub adapter and survive reload without launching a worker (129.716116ms)
+✔ a passed correction uses issue context plus CI diagnostics and is pushed to the same branch (386.865004ms)
+✔ a correction that fails local verification is handed to a human with diagnostics (197.572532ms)
+✔ a correction without a code change is never pushed and goes to a human (211.606504ms)
+✔ an interrupted correction is not started a second time (167.04204ms)
+✔ a correction pushed before an interrupted delivery resumes from its corrective commit without rerunning Ralph (294.145705ms)
+✔ a correction committed before an interrupted push resumes from its corrective commit without rerunning Ralph (294.538513ms)
+✔ red CI permits one later correction and then becomes terminal if CI remains red (248.959128ms)
+✔ the correction budget gate keys on the persisted correctiveCycles counter (140.868732ms)
+✔ CI observation failures keep the job awaiting CI and never restart Ralph (171.929734ms)
+✔ reloads a failed job on the next run and resumes it with the persisted branch (143.210877ms)
+✔ hands issue 68 with an existing open PR to a human before creating a workspace or worker (40.122178ms)
+✔ hands ambiguous open PR associations to a human without creating a workspace or worker (26.845621ms)
+✔ persists a needs_planning job and does not start duplicate work on the next run (70.098959ms)
+✔ resumes a failed delivery without rerunning Ralph and reuses its branch and PR (156.816841ms)
+✔ persists a successful push before a later delivery failure for a safe reconcile on resume (104.566428ms)
+✔ a passed Ralph verdict pushes the deterministic branch, opens a PR to main, and persists both (133.400587ms)
+✔ a resumed delivery reuses the open PR for its deterministic branch instead of opening a duplicate (216.899907ms)
+✔ a failed PR creation keeps the pushed job resumable without recording a PR (118.439097ms)
+✔ needs_planning never commits, pushes, or opens a PR and leaves delivery unrecorded (68.419427ms)
+✔ an unexpected Ralph status never commits or pushes (73.480825ms)
+✔ reloads an interrupted job, reconciles its leftover workspace, and resumes it before new issues (128.330989ms)
+✔ records failures and stops retrying a job after the run bound (59.675457ms)
+✔ refuses to work an issue whose job is owned by another live process (4.692891ms)
+✔ cleans only the recorded workspace of terminal jobs and leaves live or unfinished work alone (136.847854ms)
+✔ records a refused terminal cleanup without aborting the run (30.690295ms)
+✔ dry runs never clean terminal workspaces (15.068292ms)
+✔ autoMerge false preserves ready_for_human_merge for an independently approved job (58.105327ms)
+✔ autoMerge merges only the exact approved PR once and recovers a remote merge without POSTing again (147.195655ms)
+✔ autoMerge retains recovered GitHub issue PATCH failure in the durable evidence (70.550668ms)
+✔ crash recovery records a remote MERGED PR at the expected head without ever calling merge (68.774234ms)
+✔ autoMerge rejects a persisted exact-SHA PASS that carries findings, with no reviewer to mask it (30.482291ms)
+✔ autoMerge fails closed without merging for every unsafe PR, CI, review, or verification state (742.188694ms)
+✔ a structured permanent merge rejection is terminal, while a transient merge error gets one bounded retry (213.005031ms)
+✔ a transient first PR observation failure stays retryable and bounded on the approved and fresh-review paths (459.045102ms)
+✔ an unconfirmed merge response is re-observed and recovered before handing off (101.701573ms)
+✔ mixed-engine failed-child recovery is checkpointed before worktree cleanup (87.207591ms)
+✔ failed recovery capture blocks destructive cleanup and leaves worktree registered (69.429746ms)
+✔ terminal child restart retries unsafe capture without deleting, then completes after valid receipt (58.369332ms)
+ℹ tests 78
+ℹ suites 0
+ℹ pass 78
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 12008.028595
+✔ dispatch and loop discover new managed Git worktrees without registry edits (154.7246ms)
+✔ authorized HTTP jobs persist under a configured project and expose compact state/result (28.134645ms)
+✔ HTTP submission and legacy dispatch/loop fail closed for unknown projects and cwd spoofing (8.285461ms)
+✔ a second block names its own task number and plan item (0.53671ms)
+✔ a blocked entry falls back to the walked plan position (0.402408ms)
+✔ a worker that commits its own changes counts as progress (0.397507ms)
+✔ an edit to an already-dirty file counts as progress (0.259105ms)
+✔ the tree snapshot sees content, not just status codes (73.851532ms)
+✔ a sibling project commit never blocks a queued loop (61.247387ms)
+✔ a commit inside the project advances its revision (62.322108ms)
+✔ a worker commit becomes the checkpoint sha only over a clean tree (0.260505ms)
+✔ a continued checkpoint carries the cycle task, not the done count (0.239905ms)
+✔ a checkpoint only adopts a commit that touched the project (0.259605ms)
+✔ a queued loop revalidates its tree before the first checkpoint (0.162603ms)
+✔ the start gate passes an unchanged tree and rejects real drift (135.872735ms)
+✔ the start gate reads the tree, not the revision (0.242905ms)
+✔ a missing git snapshot never counts as no progress (0.137503ms)
+✔ checkpoint commits are restricted to the project path (0.190103ms)
+✔ both polish endings checkpoint the validated tree (0.154503ms)
+✔ a legacy config model is never stamped onto a new loop (0.196404ms)
+✔ checkpointCommit throws GitCheckpointError on git failure (37.562329ms)
+✔ finishLoopCritic fails the cycle and spends retry when checkpoint commit fails (44.754668ms)
+✔ finishLoopWorker retries on worker failure reasons instead of ending loop (3.775073ms)
+✔ stop() marks running loop terminal with daemon_shutdown and logs dirty files (39.371764ms)
+✔ finishLoop callbacks after stop() has begun return without throwing (12.759048ms)
+✔ finishLoopCritic fails the cycle, leaves verdict FAIL, and does not latch hasPassedCycle when final-pass checkpoint fails (42.368422ms)
+✔ finishLoopCritic fails the cycle, leaves verdict FAIL, and does not complete the loop when polish SHIP checkpoint fails (43.407941ms)
+✔ registerFailedCycle records checkpoint error into cycle checkpointError and emits checkpoint_failed event when blocked checkpoint fails (44.33926ms)
+✔ loop roles can be independently selected and old engine-only requests remain valid (0.384207ms)
+✔ null loop requests preserve default engine fallback (0.150103ms)
+✔ HTTP access rejects rebinding Hosts and cross-site Origins and keeps legacy filenames (40.980295ms)
+✔ R1 worker authorization denial holds the exact session and permits retry without losing history (23.132249ms)
+✔ R1 critic authorization denial holds the exact session and permits retry without losing history (21.018108ms)
+✔ non-milestone R1 session tolerates a parent lookup returning null (8.723369ms)
+✔ non-milestone R1 session tolerates a parent lookup returning ENOENT (7.854753ms)
+ℹ tests 35
+ℹ suites 0
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 916.174567
+fatal: Not a valid commit name 0000000000000000000000000000000000000000
+✔ failed implementation survives workspace cleanup as owner-bound, digest-verified patch (182.221834ms)
+✔ missing source allowlist blocks recovery instead of silently archiving files (70.033058ms)
+✔ unexpected source file and secret text refuse capture and leave worktree untouched (114.190214ms)
+✔ ownership, active process, changed baseline, and symlink fail closed (73.046017ms)
+✔ corrupted or incomplete snapshot cannot be silently replaced (164.209985ms)
+✔ repository-defined Git filters or attributes cannot run during owner snapshot (120.193131ms)
+✔ a symlinked state ancestor cannot redirect recovery inside an unsafe directory (53.742343ms)
+✔ durable child selection refuses an active sibling, stale attempt, or ambiguous reservation (117.620881ms)
+✔ another terminal job resolves its own durable parent, not the current R1 task (118.878106ms)
+✔ a later R1 parent cannot silently rebind a failed job belonging to an earlier parent (44.660566ms)
+✔ legacy terminal or already attempted jobs cannot acquire a new parent identity (44.928371ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1115.555134
+✔ opt-in implementation uses durable child PASS then deterministic verifier, leaves no synthetic instructions (70.214661ms)
+✔ a rejected or partial child never invokes deterministic verification (61.256888ms)
+✔ worker cannot smuggle generated instructions into a commit (62.825518ms)
+✔ existing repository PLAN is never replaced (32.286926ms)
+✔ an earlier PASS followed by FAIL never satisfies final critic gate (61.048084ms)
+✔ timeout cancels child, waits for terminal state, and then removes temporary files (68.111821ms)
+✔ a resumed invocation reattaches to matching synthetic files (64.023141ms)
+✔ persisted initial baseline catches a prior commit that added and then removed generated instructions (81.383878ms)
+✔ Finance #75 mixed acceptance becomes one child coding obligation, not PR/CI/review tasks (1.192123ms)
+✔ quoted issue markdown cannot create additional actionable loop tasks (0.645913ms)
+✔ mixed child cancellation reports deferred request and preserves work until daemon confirms exit (56.144289ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 568.516125
+✔ offline confirmed R1 recovery is audited and fails the child terminal (2.161742ms)
+✔ an unconfirmed request or running daemon cannot release child (1.410127ms)
+✔ operator cannot release an unrelated loop or a mismatched reservation (0.448309ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 14.313778
+✔ Linux process identity includes a stable start-time fingerprint (1.788735ms)
+✔ unclaimed process remains ambiguous and must block restart (0.308506ms)
+✔ a known vanished process group can be safely recovered (0.345807ms)
+✔ normal unowned tasks are unaffected by R1 process safety gate (0.180903ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 12.88135
+Preparing worktree (new branch 'issue-5')
+Dashboard: http://127.0.0.1:45817
+✔ R1 parent with maxConcurrent=1 admits its own child but not unrelated jobs (2653.154449ms)
+R1 child t-787d4c95: R1 child process termination unconfirmed; worktree retained. Retry cancel after verifying the old process group has ended.
+✔ daemon restart marks interrupted child terminal and recovers its R1 parent without duplicate child (65.424969ms)
+✔ cancelling an R1 parent cancels its pending reserved child before any worker starts (120.052628ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2851.791701
+✔ only current reserved child of active R1 parent is admitted (1.929437ms)
+✔ cancelled, completed or moved parent never authorizes child execution (0.539211ms)
+✔ forged child, unauthorized scope and changed worktree all fail closed (0.652013ms)
+✔ child on older attempt is rejected even if reservation still exists (0.322106ms)
+✔ child is denied after its reservation has moved out of pending (0.345607ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 14.846588
+✔ repeated requests for same parent attempt use one durable child across queue stages (51.489798ms)
+✔ incomplete reservation fails closed after crash without creating a second child (27.510834ms)
+✔ an attempt cannot reuse a reservation with incompatible job parameters (26.611716ms)
+✔ competing OS processes cannot reserve two children for one parent and attempt (110.947951ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 224.222648
+✔ one authorized parent creates one durable child and repeated calls reuse it (110.324939ms)
+✔ child survives failed parent checkpoint and a reconstructed handoff (99.974638ms)
+✔ rejects missing, completed, mismatched and unauthorized parent without creating a child (41.420803ms)
+✔ rejects a similarly named worktree from a different Git repository (89.25293ms)
+✔ rejects duplicate or mismatched durable child association (89.72504ms)
+✔ refuses to replace a missing checkpointed child with a fresh loop (54.461456ms)
+✔ refuses parent child checkpoints from a different attempt (53.286233ms)
+✔ an active prior-attempt child blocks a new attempt on the same worktree (88.015806ms)
+✔ a parent cancelled during authorization does not enqueue a child (54.008848ms)
+✔ a different child recorded after reservation is never overwritten (73.76653ms)
+✔ parent attempt changing after reservation blocks stale checkpoint (74.152738ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 840.547399
+✔ R1 submission is independent, serialized, checkpointed, fail closed and retrievable after restart (16688.035857ms)
+R1 job t-0000abcd: transcript append failed.
+R1 job t-0000abcd: transcript checkpoint failed.
+✔ R1 submission accepts issue worktrees planned inside an owner-managed root only (43.839449ms)
+✔ R1 navigation summaries retain bounded failure facts alongside the complete raw journal (1.080721ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 16740.626776
+✔ the continuous runner admits ready issues itself and drives each to exactly one durable outcome (48428.153708ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 48435.738554
+✔ registry exposes both engines and rejects unknown ones (2.223643ms)
+✔ Claude reports its final message from the result event (0.627212ms)
+✔ Claude surfaces session cost only when the result event carries one (0.269405ms)
+✔ Claude counts tool blocks and surfaces their target (1.456428ms)
+✔ Claude marks assistant prose as a message, not a tool call (0.287706ms)
+✔ Claude ignores thinking blocks and unrelated system events (0.306306ms)
+✔ Codex counts completed tool items (0.361507ms)
+✔ both engines pass non-JSON lines through untouched (0.281605ms)
+✔ only Codex needs a final-message file (0.239505ms)
+✔ model resolution prefers the task override, then per-engine config, then legacy key (0.404907ms)
+✔ a configured engine path overrides PATH lookup (0.420008ms)
+✔ per-engine config beats the legacy model key (0.150803ms)
+✔ PATH lookup skips a directory that shares the command name (0.804915ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 20.12659
+✔ canonical PASS and FAIL lines parse unchanged (2.832554ms)
+✔ verdict parsing tolerates whitespace variance (0.315506ms)
+✔ the verdict must be the final non-blank line (0.463809ms)
+✔ near-miss verdict lines are rejected (0.262405ms)
+✔ CONTINUE lines parse into done and next (0.322106ms)
+✔ CONTINUE parsing tolerates whitespace variance (0.400807ms)
+✔ CONTINUE splits done from next at the first next marker (0.468209ms)
+✔ malformed CONTINUE lines are rejected (0.303606ms)
+✔ critic prompt states the completeness policy and CONTINUE grammar (0.625912ms)
+✔ critic prompt injects blocked items as delimited data (0.566511ms)
+✔ worker prompt wraps critic fixes in data delimiters (0.346507ms)
+✔ worker prompt lists blocked items to skip as delimited data (0.188903ms)
+✔ plan tasks come from top-level list items in order (0.442609ms)
+✔ plans without a recognizable list yield no tasks (0.153903ms)
+✔ plan task titles and list length are bounded (0.403108ms)
+✔ polish verdict parsing is unchanged (0.428608ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 22.447935
+✔ no engine bypasses its approval layer (1.323126ms)
+✔ Codex sessions use workspace sandboxing (0.372108ms)
+✔ Codex sessions disable apps and plugins before exec (0.905918ms)
+✔ Claude sessions accept edits without inheriting operator config (0.282206ms)
+✔ Claude workers do not inherit a parent Claude Code session (0.368708ms)
+✔ every engine passes the selected model through (0.371907ms)
+✔ independent critics are read-only while one-shot Claude keeps existing permissions (0.395108ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 14.938289
+✔ real owner commands draft, preview, explicitly activate and inspect across restarts without changing admission (855.243468ms)
+✔ reject mismatched registration, spec and unbounded limits, and ID reuse (1061.31476ms)
+✔ interrupted approval never authorizes; retry requires explicit approval (528.061029ms)
+✔ interrupted atomic activation leaves a draft and a durable approval request (583.570505ms)
+✔ activation rechecks registration and expiry; lifecycle distinctions survive storage (1100.982928ms)
+✔ write failure before atomic publication cannot create an active grant (317.775656ms)
+✔ concurrent activation is rejected and cancellation requires a fresh approval (411.557573ms)
+✔ owner actions preview exact transitions, audit retries and preserve successive pause/resume cycles (314.200386ms)
+✔ amendment requires the next revision, rejects identity changes and detects owner edits during approval (86.494675ms)
+✔ durable authoritative time prevents expiration rollback across module restart (83.736022ms)
+✔ unchanged and rolled-back clock reads do not append durable records (13.107954ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5367.257975
+✔ isolated draft through owner scope confirmation, receipt and configured label; retry is idempotent (160.762815ms)
+✔ label failure retries from durable receipt, including after restart (132.093159ms)
+✔ untrusted scope, exclusions, category, exact identity, revision and spec fail closed (201.85541ms)
+✔ changed title/body, missing GitHub data, labels, PR and closed issues never label (187.090924ms)
+✔ persistence failure prevents labels; expired and inactive grants reject even a receipt (153.916481ms)
+✔ quota counts distinct issues once, not repeated authorizations (121.524354ms)
+✔ scope approval requires preview digest and rechecks exact issue after prompt (91.243667ms)
+✔ concurrent release shares grant quota lock; registration/label changes invalidate approval (121.934662ms)
+✔ transport failure, malformed dependency metadata and changed issue before commit hold release (118.503196ms)
+✔ CLI accepts exact ticket commands and rejects publication/activation options (1.55873ms)
+✔ ambiguous successful labeling reconciles without a second mutation or quota charge (140.742726ms)
+✔ a durable receipt rejects changed bytes and cannot be transferred to another issue (141.500241ms)
+✔ owner edits during GitHub reads cannot be overwritten or label a revoked grant (81.05517ms)
+✔ incomplete stored scope evidence cannot authorize; corrupted receipt evidence rejects (164.093679ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1830.303255
+✔ two-ticket conversation batch previews, publishes unlabeled, confirms scope and releases exact receipts (526.731303ms)
+✔ ambiguous creation, partial labeling and fresh command retries retain one issue and receipt per identity (493.245354ms)
+✔ native write ambiguity reconciles; blocked tickets WAIT without receipts or quota consumption (458.775387ms)
+✔ one preview explains all four decisions without changing labels or consuming quota (493.162353ms)
+✔ preview projects active quota; closing a ticket frees active capacity but never issued quota (541.868196ms)
+✔ edit, conflicting native dependencies, cross-repo and unknown tasks require review (476.771635ms)
+✔ durable failure and concurrent publishers cannot produce duplicate side effects (338.432055ms)
+✔ unresolved creation or blocker intent never repeats a remote POST when reconciliation finds nothing (335.402897ms)
+✔ stable identities handle object property names and reordered JSON without changing batch digest (408.749318ms)
+✔ racing releases cannot exceed active quota while the first publisher is between receipt and label (318.812975ms)
+✔ CLI batch commands are explicit and reject automatic owner authorization on release (1.213423ms)
+✔ abrupt process exits after creation, native linking, receipt commit and labeling resume from durable state (1616.721815ms)
+✔ pause during publication reads prevents the first new issue without deleting creation intent (113.552999ms)
+✔ synthetic release completes dependent work across restart; out-of-scope ready issue never starts (1169.050443ms)
+✔ owner summary is read-only, retains raw evidence and diagnoses damaged stores and expiry (341.498914ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7653.692852
+Milestone authorization blocked demo#106: Require one exact ticket receipt.
+✔ manual R1 submit and discovery reject ready labels without receipts durably (65.55317ms)
+✔ authorized submit progresses; queued recovery rechecks revocation without erasing evidence (131.548648ms)
+✔ actual R1 resume and guarded merge with none authorization after green CI and Claude PASS (312.315149ms)
+✔ actual R1 resume and guarded merge with revoked authorization after green CI and Claude PASS (302.56156ms)
+✔ actual R1 resume and guarded merge with expired authorization after green CI and Claude PASS (296.971152ms)
+✔ actual R1 resume and guarded merge with edited authorization after green CI and Claude PASS (277.886883ms)
+✔ actual R1 resume and guarded merge with paused authorization after green CI and Claude PASS (438.794599ms)
+✔ actual R1 submit fails closed with durable diagnostic: missing-store (110.332037ms)
+✔ actual R1 submit fails closed with durable diagnostic: invalid-json (110.530341ms)
+✔ actual R1 submit fails closed with durable diagnostic: unreadable-store (107.558884ms)
+✔ actual R1 submit fails closed with durable diagnostic: missing-receipt (110.564842ms)
+✔ actual R1 submit fails closed with durable diagnostic: invalid-receipt (141.116333ms)
+✔ actual R1 submit fails closed with durable diagnostic: revoked-receipt (116.845263ms)
+✔ actual R1 submit fails closed with durable diagnostic: missing-approval (173.49856ms)
+✔ actual R1 submit fails closed with durable diagnostic: changed-title (139.864309ms)
+✔ actual R1 submit fails closed with durable diagnostic: wrong-label (111.220254ms)
+✔ actual R1 submit fails closed with durable diagnostic: github-unavailable (108.289498ms)
+✔ actual R1 submit fails closed with durable diagnostic: changed-registration (108.624004ms)
+✔ actual R1 submit fails closed with durable diagnostic: changed-spec (112.476879ms)
+✔ actual R1 submit fails closed with durable diagnostic: paused (109.613523ms)
+✔ discovery admits a receipted issue through the same R1 submit interface (122.763178ms)
+✔ receipts do not bypass exact-head independently reviewed merged prerequisite evidence (155.612414ms)
+✔ a reserved mixed implementation child rechecks the milestone before queue execution (206.584801ms)
+✔ owner revocation during a GitHub read cannot authorize a stale receipt (118.372793ms)
+✔ a queued R1 job cannot switch to a replacement receipt after submission (124.854118ms)
+✔ expiration during the final GitHub read fails closed (122.87028ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4250.694129
+✔ reads existing household planning metadata; fails closed on invalid syntax (3.175462ms)
+✔ blocked issue cannot starve independent issue; merged record releases next (0.982319ms)
+✔ all review, verification, CI and merge gates fail closed (2.167042ms)
+✔ missing commit and permissive None declaration are never admitted (0.361007ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15.837607
+✔ real autopilot dry run blocks Household Purchases without merged #1 (5.031698ms)
+✔ other repositories retain their previous issue selection (0.644812ms)
+✔ real autopilot dry run accepts issue #2 after durable approved merge #1 (0.692214ms)
+✔ dependency rules are selected by owner policy rather than a repository name (0.317306ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 17.931047
+✔ read-only Household selection proves ALLOW, WAIT, NEEDS_APPROVAL and DENY with durable blockers (183.28475ms)
+✔ malformed Household metadata is a durable WAIT and never starts work (45.574983ms)
+✔ Household actual resume and guarded merge rechecks none (341.160608ms)
+✔ Household actual resume and guarded merge rechecks edited (302.176952ms)
+✔ Household actual resume and guarded merge rechecks revoked (288.736792ms)
+✔ Household actual resume and guarded merge rechecks expired (290.643629ms)
+✔ Household actual resume and guarded merge rechecks receipt (291.22744ms)
+✔ Household actual resume and guarded merge rechecks dependency (298.43568ms)
+✔ Household worker admission checks again after preparation and preserves labels and workspace (193.756252ms)
+✔ legitimate Household work advances once through the existing worker and resumes without duplicate admission (436.693358ms)
+✔ ready-labeled Household selection blocks missing after prerequisites merge (144.499598ms)
+✔ ready-labeled Household selection blocks ambiguous after prerequisites merge (147.024248ms)
+✔ ready-labeled Household selection blocks out-of-scope after prerequisites merge (144.971307ms)
+✔ ready-labeled Household selection blocks stale-body after prerequisites merge (150.75802ms)
+✔ ready-labeled Household selection blocks wrong-repository after prerequisites merge (146.451636ms)
+✔ ready-labeled Household selection blocks registration after prerequisites merge (145.854725ms)
+✔ ready-labeled Household selection blocks missing-approval after prerequisites merge (147.388854ms)
+✔ R1 scanner yields receipted Household work to its existing autopilot (124.084803ms)
+✔ owner pause after admission and green review retains evidence and resumes across runner restart (425.43974ms)
+✔ amendment preserves immutable approved history; receipt restoration requires fresh exact owner approval (467.348251ms)
+✔ cooperative cancellation records actual work result and retains original execution evidence (481.510725ms)
+✔ native task retries reread the paused grant and preserve the original failed attempt (307.245451ms)
+ℹ tests 22
+ℹ suites 0
+ℹ pass 22
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5514.596002
+✔ node: staged add, duplicate, red baseline readiness, explicit activation (2755.878071ms)
+✔ python: staged add, duplicate, red baseline readiness, explicit activation (2180.656129ms)
+✔ onboarding missing-lock preserves failed evidence and supports retry (667.916535ms)
+✔ onboarding stale-lock preserves failed evidence and supports retry (2119.892951ms)
+✔ onboarding missing-runtime preserves failed evidence and supports retry (2917.123588ms)
+✔ onboarding cancelled preserves failed evidence and supports retry (2406.340796ms)
+✔ onboarding interrupted preserves failed evidence and supports retry (2457.586086ms)
+✔ owner cancellation, concurrent operation, external edit and duplicate conflicts preserve owner intent (2225.698695ms)
+✔ two-store write failure 0 rolls back exactly and retry succeeds (1472.685814ms)
+✔ two-store write failure 1 rolls back exactly and retry succeeds (1530.272229ms)
+✔ recovery rolls back interrupted transaction and refuses to erase a divergent owner edit (34.377666ms)
+✔ activation refuses a moved base and preserves merge policy set by the owner (3132.395946ms)
+✔ CLI failures persist complete records, discoverable through the real dashboard API (160.232902ms)
+✔ SIGTERM during a real check preserves complete diagnostics, stops setup and permits retry (4706.379516ms)
+✔ onboarding rejects local-only base commits and tag refs (1200.589543ms)
+✔ registration refuses a tag supplied as a base branch (274.460613ms)
+✔ activation refuses local branch divergence after successful readiness (2725.914071ms)
+✔ node: migrate a staged legacy alias without replacing owner preferences (3926.328207ms)
+✔ python: migrate a staged legacy alias without replacing owner preferences (3410.674321ms)
+✔ legacy migration refuses active projects, conflicting aliases and registry roots without any write (24.144667ms)
+✔ legacy migration preserves omitted policy fields rather than changing effective defaults (707.046086ms)
+ℹ tests 21
+ℹ suites 0
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 41050.5844
+✔ only owner-registered worktrees resolve; task paths cannot add authority (77.687604ms)
+✔ a redirected worktree and worker-writable registry fail closed (41.3332ms)
+✔ worker authorization is checked before spawn and cannot come from task content (56.496894ms)
+✔ MCP discovers a managed worktree and cannot replace it with a request path or registry (128.886795ms)
+✔ a worktree from a different repository cannot inherit authorization (87.978603ms)
+✔ an owner-managed worktree root authorizes only verified worktrees of its own repository (145.259511ms)
+✔ managed selection rejects unsafe names and directories while preserving explicit aliases (158.694572ms)
+✔ worker revalidates managed worktrees after admission before spawning (60.792777ms)
+✔ redirecting the registered checkout cannot authorize a different repository (92.428189ms)
+✔ an unrelated stale Git worktree record does not block the authorized worktree (66.267482ms)
+✔ discovered managed worktree workers edit only the selected checkout with ordinary local subprocesses (173.804264ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1103.232855
+✔ absolute paths collapse to their last segment (3.315764ms)
+✔ non-ASCII path segments collapse too (3.306664ms)
+✔ single-segment absolute paths collapse too (0.352507ms)
+✔ non-path text survives path stripping (0.51091ms)
+✔ sanitizeState scrubs every string in the payload (1.591331ms)
+✔ pending items expose whitelisted fields with basenames only (0.441108ms)
+✔ running tasks omit activity fields until activity exists (0.484809ms)
+✔ running loops map cycles into the dashboard verdict vocabulary (0.786815ms)
+✔ polish and ship cycles carry the polish phase and no task tag (0.445809ms)
+✔ plan rail walks cycles into per-task statuses (0.687914ms)
+✔ a pass completes the remaining plan and fills missing shas from the pass checkpoint (0.344006ms)
+✔ recent records whitelist fields and only claim task counts when they exist (0.694514ms)
+✔ recent loops count the plan item the pass completed (0.444909ms)
+✔ a polish checkpoint does not displace the final-pass sha (3.581369ms)
+✔ cycle cost sums fall back to worker cost and respect the since filter (0.200004ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 30.820497
+✔ structuredContent only ever carries a JSON object (2.719053ms)
+✔ every tool advertises an object input schema (0.230605ms)
+✔ ralph_run_task advertises the structured task contract (0.432108ms)
+✔ ralph_run_task passes only supplied task fields and returns a compact result (0.99402ms)
+✔ ralph_run_task preserves supplied optional task fields (0.635612ms)
+✔ ralph_run_task bounds each verification stream and keeps its tail (0.52371ms)
+✔ ralph_run_task returns compact worker errors (0.705014ms)
+✔ ralph_run_task converts service errors to MCP failures (0.418309ms)
+✔ ralph_run_task rejects unknown, empty, and path-like projects before starting a worker (0.883317ms)
+✔ registered Ralph projects resolve to their canonical configured root (1.740233ms)
+✔ submit_job queues a registered project and returns its persisted id without waiting (3.852475ms)
+✔ job tools read compact status and completed result without worker-private fields (0.669813ms)
+✔ R1 tools use their own job namespace and leave generic job tools unchanged (0.709714ms)
+✔ submit_job rejects unknown projects and reports a down daemon (0.715214ms)
+✔ dispatch_task requires and forwards a registered project name (0.55171ms)
+✔ start_loop exposes independently selectable worker and critic engines (0.180304ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 27.659335
+✔ pwd starts in the fixed default directory without a project (16.893427ms)
+✔ a registered project sets the starting directory and git status works there (10.772609ms)
+✔ commands run as the current unprivileged user (10.152196ms)
+✔ printf output is returned exactly (7.125038ms)
+✔ a failing command reports its exit code and stderr (6.896634ms)
+✔ invalid projects, worktrees, paths, and timeouts are rejected before anything runs (1.757534ms)
+✔ a startup failure is reported rather than thrown (5.554007ms)
+✔ output keeps only the most recent bytes and reports truncation (9.616986ms)
+✔ a timeout kills the whole process group (1028.430306ms)
+✔ background jobs left by a finished command are cleaned up (29.798076ms)
+✔ only one command runs at a time and the lock is free afterwards (1023.155004ms)
+✔ leftover lock file contents never block or grant the lock (15.941408ms)
+✔ a lock held by another process blocks the call and is recovered when that process dies (92.390089ms)
+✔ a server that dies holding the lock does not leave it held (140.880527ms)
+✔ separate processes racing for the lock never both run a command (2549.173841ms)
+✔ the command environment excludes the server credentials (8.548566ms)
+✔ the audit log records metadata but not the command text or output (6.811732ms)
+✔ run_bash is not in the shared tool list and is refused unless enabled (7.400443ms)
+✔ run_bash is advertised as state-changing and destructive (0.257705ms)
+✔ the stdio MCP server lists run_bash only with --enable-run-bash (138.47678ms)
+✔ MCP stdin EOF during an active command stops its whole process group before exiting (200.142374ms)
+✔ MCP SIGTERM during an active command stops its whole process group before exiting (198.467642ms)
+✔ MCP SIGINT during an active command stops its whole process group before exiting (129.456406ms)
+✔ MCP shutdown escalates to SIGKILL for a command that ignores SIGTERM (2125.275734ms)
+✔ MCP stdin EOF with no active command exits promptly (74.594443ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 25
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7862.470682
+✔ Dashboard sources compile and stay aligned (6.892634ms)
+✔ raw execution records render complete inert text with paths and token values (9.567785ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 27.015722
+✔ valid minimal task passes validation (1.923337ms)
+✔ normalization adds defaults (1.04792ms)
+✔ all optional fields and alternate allowed values are preserved (0.319606ms)
+✔ each required field is rejected when missing or invalid (2.115741ms)
+✔ invalid worker is rejected (0.378807ms)
+✔ maxAttempts rejects out-of-bounds and non-integer values (0.312706ms)
+✔ invalid reviewPolicy is rejected (0.355307ms)
+✔ model must be a non-empty string when provided (0.278005ms)
+✔ unknown top-level fields are rejected (0.592611ms)
+✔ normalization returns a new object and does not mutate input (0.758315ms)
+✔ non-object input is rejected (0.377407ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 18.938866
+✔ prompt includes task details and delegates final verification to Ralph (1.675433ms)
+✔ failed verification retry includes only bounded, untrusted diagnostics (0.662212ms)
+✔ worker error retry includes only the error name and bounded message (0.443808ms)
+✔ Codex uses registry arguments, model, cwd, and stdin prompt (4.341584ms)
+✔ Cli worker passes retry context into the stdin prompt (1.196223ms)
+✔ Claude uses registry arguments, sanitizes environment, and honors task.model (1.239524ms)
+✔ Codex output file supplies result and is removed after exit (1.809636ms)
+✔ Claude stream-json result and cost survive chunk boundaries (1.225624ms)
+✔ nonzero exit returns metadata (1.00062ms)
+✔ timeout terminates the child and returns metadata (6.425424ms)
+✔ start and prompt delivery failures reject (1.731033ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 31.562711
+✔ passing on the first attempt stops immediately (48.163333ms)
+✔ first verification fails and second passes (87.242688ms)
+✔ maxAttempts exhaustion returns needs_planning (75.908169ms)
+✔ exactly maxAttempts attempts occur, never more (163.491764ms)
+✔ maxAttempts: 1 performs only one attempt (37.679429ms)
+✔ worker error is recorded and retried (43.044933ms)
+✔ third attempt receives only the immediately preceding attempt (119.802818ms)
+✔ repeated worker errors eventually produce needs_planning (1.028919ms)
+✔ defaults cause two attempts when maxAttempts is omitted (78.255215ms)
+✔ normalization occurs before any worker runs (76.98569ms)
+✔ runWorker is required before attempts begin (1.03582ms)
+✔ first-attempt pass emits working then passed with normalized task (36.936615ms)
+✔ failed verification then pass emits completed failed attempt before retry (79.485038ms)
+✔ worker error is present in completed-attempt state (39.530965ms)
+✔ exhausted attempts emit one needs_planning terminal state (76.865587ms)
+✔ async state callback finishes before a worker begins (40.421082ms)
+✔ callback mutation cannot change internal task, attempts, or later snapshots (78.00431ms)
+✔ state callback rejection stops execution before another worker attempt (38.796251ms)
+✔ invalid state callback is rejected before any worker runs (0.372007ms)
+ℹ tests 19
+ℹ suites 0
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1134.358655
+✔ worker creates a file and verification confirms it (48.900246ms)
+✔ verification failure overrides a worker success claim (37.146419ms)
+✔ verification success overrides a worker failure claim (37.121818ms)
+✔ verification waits for the worker to finish (38.518245ms)
+✔ worker errors propagate and prevent verification (1.57743ms)
+✔ invalid runWorker is rejected before task normalization or execution (0.592312ms)
+✔ normalization defaults are passed to the worker and returned (3.60107ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 176.952825
+✔ a passing task returns the normalized task and full verification result (14.072472ms)
+✔ a failing verification command returns failed with its exit code (2.836754ms)
+✔ stdout and stderr are preserved in verification (3.166961ms)
+✔ a timed out command returns failed and records the timeout (103.702207ms)
+✔ verification runs in projectPath (3.975477ms)
+✔ an invalid task rejects before executing its verification command (1.404328ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 138.231375
+✔ a successful command passes and reports its exit code and duration (12.566343ms)
+✔ a nonzero exit fails and retains the exit code (2.887456ms)
+✔ the command runs in projectPath (3.329264ms)
+✔ stdout and stderr are captured separately (3.484268ms)
+✔ a timeout terminates the command and fails verification (103.916211ms)
+✔ spawn failure preserves command, exception and signal diagnostics (2.951957ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 137.551763
+✔ native command capture preserves binary bytes, split UTF-8, CRLF and unterminated stderr (58.903541ms)
+✔ cancelled or abruptly killed CLI retains output and precise SIGTERM outcome (46.846507ms)
+✔ cancelled or abruptly killed CLI retains output and precise SIGKILL outcome (44.787667ms)
+✔ timed-out verification retains prior output, command, signal and timeout evidence (514.947866ms)
+✔ a torn final crash record remains retrievable and cannot corrupt the next append (8.558065ms)
+✔ persistence failure reports the exact fault through the remaining log sinks (0.672813ms)
+✔ synchronous command output and failure diagnostics remain complete (93.829216ms)
+✔ large task and job diagnostics keep full checkpoints and bounded dashboard projections (343.237543ms)
+✔ chatty output coalesces disk barriers and terminal records flush immediately (205.64278ms)
+✔ SIGKILL before the batch timer retains kernel-written bytes on restart (80.454957ms)
+✔ Native installer stream capture preserves binary pipes while callback diagnostics stay bounded (49.936466ms)
+✔ previews cannot overwrite complete checkpoints when journal persistence fails (1.02392ms)
+✔ preview budgets bound short findings, unfamiliar fields and deeply nested output (69.512246ms)
+✔ nested status checkpoints journal only new evidence and explicit removals (644.988783ms)
+✔ startup builds recoverable projections without changing canonical files (64.411046ms)
+✔ eight critic retry cycles retain exact previous fixes in the next worker prompt after reload (64.692252ms)
+✔ CI corrective prompt receives every diagnostic byte, including the tail, after job-store reload (30.319687ms)
+✔ daemon recovers with corrupt historical files while huge output stays out of state polls (904.084697ms)
+✔ projection write failures preserve canonical checkpoints and cache reads; invalid cache shapes repair (20.585598ms)
+ℹ tests 19
+ℹ suites 0
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3286.571808
+✔ writer persists the exact record with an absolute project path and injected timestamp (2.921956ms)
+✔ writer awaits an asynchronous store (0.622712ms)
+✔ writer propagates store errors (0.953018ms)
+✔ writer rejects invalid project paths (0.276906ms)
+✔ real store round-trips the latest state (2.725853ms)
+✔ task ids with slash and backslash stay inside task-runs (0.758514ms)
+✔ missing task-run state returns null (0.413308ms)
+✔ malformed task-run JSON is reported (0.591611ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 22.418234
+✔ creates one worker with configured options and reuses it across runs (3.323565ms)
+✔ returns the exact promise from runTask (0.424108ms)
+✔ propagates runTask errors unchanged (1.113721ms)
+✔ propagates state-writer creation errors unchanged (0.336407ms)
+✔ cancellation signals the owned worker and denies the next attempt without inventing a terminal result (0.780515ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 16.599421
+✔ original Finance #75 requirements produce one local implementation task while parent owns delivery (2.754054ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 12.634044
+✔ opt-in parent executes Codex FAIL -> Claude critic -> Codex correction -> Claude PASS then R1 gates (5187.186386ms)
+✔ rejected final critic never delivers, observes CI, or records final PR review (4026.688523ms)
+✔ complete worker, critic and failed verification output is paged verbatim after daemon restart (5217.490562ms)
+✔ daemon SIGKILL during active child execution preserves captured output through recovery (8716.321654ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 23158.088927
+✔ scenario: clean-pass completes and checkpoints (1936.456167ms)
+✔ mixed Codex worker and Claude critic persist role selection and model choice (1492.448976ms)
+✔ a Claude failure sends concrete corrections to a fresh Codex worker (1617.551696ms)
+✔ eight large critic failures reach each subsequent worker exactly through daemon reloads (2571.192144ms)
+✔ legacy engine-only loops retain the same worker and critic engine (304.9758ms)
+✔ scenario: multi-task plan walk checkpoints each task (1784.212318ms)
+✔ scenario: task retry within budget succeeds (1333.185692ms)
+✔ scenario: budget exhaustion marks loop maxed (1498.535591ms)
+✔ scenario: invalid critic verdict retries on task budget then passes (1515.563019ms)
+✔ scenario: no-change worker is graded by critic and passes (1397.24613ms)
+✔ HTTP job survives the submit connection and is retrieved later by ID (4387.711079ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 22890.571838

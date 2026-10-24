@@ -300,3 +300,129 @@ test('pause during publication reads prevents the first new issue without deleti
   assert.ok(result.tickets.every(ticket => ticket.decision !== 'ALLOW'));
   assert.equal(f.journal().batches['batch-one'].tickets.one.creationAttempted, true);
 });
+
+test('synthetic release completes dependent work across restart; out-of-scope ready issue never starts', async t => {
+  const f = await fixture(t);
+  f.batch.tickets[0].draft.title = 'Implement synthetic total calculator';
+  f.batch.tickets[0].draft.acceptanceCriteria = ['The calculator totals an explicit list of numbers'];
+  f.batch.tickets[1].draft.title = 'Build synthetic report using the calculator';
+  f.batch.tickets[1].draft.acceptanceCriteria = ['The report formats the calculator total'];
+  f.batch.tickets[1].draft.blockers = [200];
+  await f.run('publish'); await f.approve();
+  const released = await f.run('release');
+  assert.equal(released.tickets[0].decision, 'ALLOW');
+  assert.equal(released.tickets[1].decision, 'WAIT');
+  const approvals = structuredClone(f.db().grants.g1.ticketApprovals);
+  const { createJobStore } = require('../src/autopilot-state');
+  const { run } = require('../src/autopilot');
+  const { milestoneSummary } = require('../src/milestone-summary');
+  const execute = require('node:util').promisify(require('node:child_process').execFile);
+  const project = { ...f.project, enabled: true, worker: 'codex', reviewPolicy: 'always', autoMerge: true,
+    baseBranch: 'main', verification: 'node synthetic.test.js', worktreeRoot: path.join(f.root, 'worktrees') };
+  const stateDir = path.join(f.root, 'demo');
+  const outsider = { number: 202, title: 'Unrelated deployment', body: 'Outside approved scope', state: 'open', labels: [{ name: 'custom-ready' }], html_url: 'https://github.com/owner/demo/issues/202' };
+  const started = [], merged = [], reviewed = [];
+  const head = 'a'.repeat(40), target = 'b'.repeat(40);
+  const deps = {
+    loadProjectConfig: () => project, milestoneOptions: f.options, execFile: f.options.execFile,
+    discoverReadyIssues: async () => [outsider, ...f.issues].filter(i => i.state === 'open' && i.labels.length),
+    write() {}, findOpenIssuePullRequests: async () => [], cleanupIssueWorkspace: async () => {},
+    prepareIssueWorkspace: async (_, issue) => ({ worktreePath: f.root, branch: `ralph/issue-${issue.number}`, baseRef: 'origin/main' }),
+    readRepositoryInstructions: async () => [], prepareRepositoryEnvironment: async () => ({}),
+    createRalphTaskService: () => ({ run: async (_, task) => {
+      started.push(task.id);
+      const first = task.id.endsWith('#200');
+      if (first) fs.writeFileSync(path.join(f.root, 'total.cjs'), 'module.exports = values => values.reduce((a, b) => a + b, 0);\n');
+      else fs.writeFileSync(path.join(f.root, 'report.cjs'), "module.exports = values => 'Total: ' + require('./total.cjs')(values);\n");
+      const assertion = first ? "assert.equal(require('./total.cjs')([2, 3, 5]), 10);" : "assert.equal(require('./report.cjs')([2, 3, 5]), 'Total: 10');";
+      fs.writeFileSync(path.join(f.root, 'synthetic.test.js'), "const assert = require('node:assert/strict');\n" + assertion + "\nprocess.stdout.write('synthetic product acceptance passed\\n');\n");
+      const { stdout } = await execute(process.execPath, ['synthetic.test.js'], { cwd: f.root, encoding: 'utf8' });
+      return { status: 'passed', task: { verification: project.verification }, attempts: [{ status: 'passed', verification: { passed: true, exitCode: 0, timedOut: false, stdout, stderr: '' } }] };
+    } }),
+    deliverPassedWork: async ({ issue, workspace }) => ({ branch: workspace.branch, commit: head, pushed: true, pr: { number: issue.number + 100, url: `https://github.com/owner/demo/pull/${issue.number + 100}` } }),
+    synchronizeIssueBranch: async ({ job }) => { job.integration = { headSha: head, targetSha: target }; return { changed: false }; },
+    observePullRequestCi: async (_, pr) => ({ state: 'green', headCommit: head, prNumber: pr.number }),
+    reviewPullRequest: async () => { reviewed.push(head); return { reviewer: 'claude:synthetic-adapter', verdict: 'PASS', findings: [], commit: head }; },
+    observePullRequest: async (_, number) => ({ number, state: 'OPEN', isCrossRepository: false, headRefName: `ralph/issue-${number - 100}`, headRefOid: head, baseRefName: 'main' }),
+    observeTargetSha: async () => target,
+    mergePullRequest: async (_, job) => { merged.push(job.number - 100); return { mergeCommit: 'c'.repeat(40) }; },
+    reconcileIssueClosure: async (_, number) => { f.issues.find(i => i.number === number).state = 'closed'; return {}; },
+  };
+  // Every invocation reopens durable state, as a new process/conversation would.
+  const step = () => run(['--project', 'demo'], { ...deps, jobStore: createJobStore(stateDir) });
+  await step(); await step();
+  assert.deepEqual(merged, [200], JSON.stringify(createJobStore(stateDir).list()));
+  assert.equal(createJobStore(stateDir).load(201), null);
+  await f.run('release'); // Existing batch approval suffices after prerequisite proof.
+  assert.deepEqual(f.db().grants.g1.ticketApprovals, approvals);
+  await step(); await step(); await step();
+  assert.deepEqual(merged, [200, 201]); assert.equal(started.length, 2);
+  assert.deepEqual(reviewed, [head, head]);
+  const store = createJobStore(stateDir);
+  assert.equal(store.load(202), null);
+  for (const number of [200, 201]) {
+    const job = store.load(number);
+    assert.equal(job.terminalState, 'merged'); assert.equal(job.merge.approvedHead, head);
+    assert.equal(job.ci.headCommit, head); assert.equal(job.review.commit, head);
+    assert.equal(job.verification.passed, true); assert.equal(job.verification.exitCode, 0);
+  }
+  const before = fs.readFileSync(path.join(f.root, 'milestone-grants.json'), 'utf8');
+  const summary = milestoneSummary('g1', f.options);
+  assert.equal(summary.tickets.find(x => x.issue === 200).status, 'merged');
+  assert.deepEqual(summary.tickets.find(x => x.issue === 201).prerequisites, [200]);
+  assert.ok(summary.admissions.some(x => x.issue === 202));
+  const denied = summary.tickets.find(x => x.issue === 202);
+  assert.equal(denied.status, 'denied');
+  assert.equal(denied.lastAdmission.decision, 'NEEDS_APPROVAL');
+  assert.ok(denied.reasons.some(reason => reason.includes('Non-grant issue; admission blocked (denied)')));
+  assert.ok(summary.evidence.some(x => x.raw.includes('synthetic-adapter')));
+  assert.equal(summary.grant.spec.contentBase64, Buffer.from('Approved test scope').toString('base64'));
+  // Explicit rehearsal export retains full fake job/authorization evidence before fixture cleanup.
+  if (process.env.AGENTLOOP_REHEARSAL_EVIDENCE) fs.writeFileSync(process.env.AGENTLOOP_REHEARSAL_EVIDENCE, JSON.stringify({ synthetic: true, externalReviewAndCiVerified: false, productAcceptance: ['calculator total equals 10', 'dependent report equals Total: 10'], summary }, null, 2) + '\n');
+  assert.equal(fs.readFileSync(path.join(f.root, 'milestone-grants.json'), 'utf8'), before);
+});
+
+test('owner summary is read-only, retains raw evidence and diagnoses damaged stores and expiry', async t => {
+  const f = await fixture(t);
+  await f.run('publish'); await f.approve(); await f.run('release');
+  const { milestoneSummary } = require('../src/milestone-summary');
+  const { parseArguments, main } = require('../src/cli');
+  assert.equal(parseArguments(['grant', 'summary', 'g1']).action, 'summary');
+  assert.throws(() => parseArguments(['grant', 'summary', 'g1', '--yes']), /not valid/);
+  const file = path.join(f.root, 'milestone-grants.json');
+  const db = f.db(); db.grants.g1.expiresAt = '2000-01-01T00:00:00.000Z';
+  fs.writeFileSync(file, JSON.stringify(db));
+  fs.mkdirSync(path.join(f.root, 'demo'), { recursive: true });
+  fs.writeFileSync(path.join(f.root, 'demo', 'issue-200.json'), '{broken');
+  fs.mkdirSync(path.join(f.root, 'tasks', 'running'), { recursive: true });
+  fs.mkdirSync(path.join(f.root, 'logs'), { recursive: true });
+  fs.writeFileSync(path.join(f.root, 'tasks', 'running', 't-summary.json'), JSON.stringify({ id: 't-summary', project: 'demo', issue: 200, status: 'running' }));
+  fs.writeFileSync(path.join(f.root, 'logs', 't-summary.execution.ndjson'), 'complete queued worker output\n');
+  const raw = 'complete raw stdout\u001b[31m\n' + 'long evidence '.repeat(10000);
+  fs.writeFileSync(path.join(f.root, 'demo', 'issue-200.execution.ndjson'), raw);
+  const snapshot = () => {
+    const all = {};
+    function visit(dir) { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const name = path.join(dir, entry.name); if (entry.isDirectory()) visit(name); else all[name] = fs.readFileSync(name).toString('base64');
+    } }
+    visit(f.root); return all;
+  };
+  const before = snapshot();
+  const summary = milestoneSummary('g1', f.options);
+  assert.equal(summary.effectiveState, 'expired');
+  assert.equal(summary.queueTasks[0].task.id, 't-summary');
+  assert.ok(summary.evidence.some(e => e.raw === 'complete queued worker output\n'));
+
+  assert.equal(summary.grant.state, 'active', 'summary does not persist lifecycle changes');
+  assert.ok(summary.errors.some(e => e.file?.endsWith('issue-200.json')));
+  assert.equal(summary.evidence.find(e => e.file.endsWith('issue-200.execution.ndjson')).raw, raw);
+  assert.ok(summary.tickets.every(ticket => ticket.status === 'denied'));
+  assert.deepEqual(snapshot(), before);
+  // Exercise the real CLI path without importing/initializing the writable owner store.
+  const previous = process.env.AGENTLOOP_STATE_DIR, output = console.log;
+  process.env.AGENTLOOP_STATE_DIR = f.root; console.log = () => {};
+  try {
+    const result = await main(['grant', 'summary', 'g1', '--projects', f.options.projectsPath]);
+    assert.equal(result.grant.id, 'g1'); assert.deepEqual(snapshot(), before);
+  } finally { console.log = output; if (previous === undefined) delete process.env.AGENTLOOP_STATE_DIR; else process.env.AGENTLOOP_STATE_DIR = previous; }
+});
