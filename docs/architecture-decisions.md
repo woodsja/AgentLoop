@@ -93,7 +93,30 @@ blocked. Recorded decisions are immutable; a different submission cannot
 replace acceptance or rejection. Repeating the same submission returns the
 original evidence and retries an uncertain ADR publication by its exact marker.
 
-The ADR issue needs its own ordinary milestone approval and explicit release.
+Admission mode is fixed by the original durable job. With
+`milestoneAuthorization: true`, the exact original receipt and active, unexpired,
+unrevoked grant remain required, including scope, revision, quota, native blockers
+and textual dependencies. Disabling grants cannot convert that job to ready-label
+authority. A replaced receipt still blocks ADE resume.
+
+With milestone authorization disabled, a new ADE job records its original
+ready-label admission: project/repository/issue identity, exact title/body digest,
+configured ready label, owner registration and execution policy. No grant is
+created or required. Resume re-reads the original open GitHub issue, rejects PRs
+and decision issues, requires that same label and revision, and checks textual
+`Depends on: #...` plus any configured dependency policy against canonical
+verification/Claude-PASS/exact-head-green-CI/guarded-merge receipts. GitHub closure
+alone is insufficient. Changed mode, label, repository, worker/host settings or
+scope blocks resume. Older nongrant jobs without admission metadata fail closed;
+do not fabricate metadata or reset their history to bypass this check.
+
+The ADR issue needs its own explicit release under the project's original mode.
+For a grant project, use its separate ordinary milestone approval and release.
+For a nongrant project, inspect the final ADR delivery issue title/body and apply
+the configured ready label through the existing owner workflow. Do not enable
+grants for this purpose. Acceptance itself leaves that ADR issue unlabeled;
+never mark the decision issue ready. Its deterministic decision marker and
+`needs-owner-decision` label independently exclude it from execution.
 Its worker then creates the specified ADR through the existing deterministic
 verification, independent Claude review, exact-head CI and guarded merge path.
 A proposed ADR, a locally committed file, a closed issue, or a merged PR without
@@ -101,12 +124,20 @@ that durable pipeline evidence cannot release dependent work.
 
 After that delivery, inspect the original decision again and use `resume` with
 its new digest and explicit confirmation. Resume checks the original durable job
-identity, exact original issue revision, active/unexpired grant and unchanged
-receipt, prerequisite merge evidence, independent ADR delivery evidence, remote
+identity, exact original issue revision and original admission mode (the unchanged
+ready-label binding or active/unexpired grant and unchanged receipt), prerequisite merge evidence, independent ADR delivery evidence, remote
 PR/head/merge identity and exact ADR contents both at the merge commit and on
 the configured base branch. Existing ADR snapshots must still match; conflicting
 changes require owner reconciliation. Failures retain a readable blocked reason.
-These checks run again when execution picks up the resume request.
+These checks run again when execution picks up the resume request and before
+subsequent execution attempts and delivery gates. Every check uses live GitHub
+reads; a saved scope check is never reusable authority. A removed label or an
+uncertain GitHub response returns the same job to `paused_owner_decision` with an
+actionable reason and retained worktree, budget, failure history and raw logs.
+There is no automatic acceptance or resume. After correcting a reversible cause,
+inspect again and explicitly run authenticated `ralph decision resume PROJECT#ISSUE`
+with the new digest. An edited source ticket or policy binding needs supported
+owner recovery; restoring eligibility does not silently queue the job.
 
 The original parent queue record is moved back to pending once, retaining its
 ID, phases, errors, child associations and complete execution journal. The
@@ -140,9 +171,9 @@ execution remain in canonical records and the complete journal.
 
 `scopeCheck` explicitly reports `not_checked`, or the last resume validation's
 result and timestamp. It is an observation, not a reusable permission. Resume
-and subsequent execution still validate live scope, grant expiry/revocation,
+and subsequent execution still validate the original admission mode, live scope, applicable grant expiry/revocation,
 dependencies and exact ADR contents. A previously passed observation does not
-promise a grant is still active now.
+promise that admission remains valid now.
 
 After verifying owner acceptance and guarded ADR delivery, `resume` appends one
 deterministic resolution to the original GitHub decision issue and closes it.

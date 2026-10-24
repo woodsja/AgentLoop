@@ -29,6 +29,7 @@ function createRalphTaskService(options = {}) {
           await options.onPhaseChange?.('implementation');
           if (cancellation.signal.aborted) throw cancellation.signal.reason;
           await options.beforeAttempt?.();
+          options.onWorkerStart?.();
           const result = await runWorker(...args);
           await options.onPhaseChange?.('verification');
           return result;

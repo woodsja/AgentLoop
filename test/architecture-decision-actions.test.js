@@ -11,24 +11,24 @@ const { createJob, createJobStore } = require('../src/autopilot-state');
 const { grantCommand } = require('../src/milestone-grants');
 const { ticketCommand, ticketDigest } = require('../src/milestone-tickets');
 const proposal = { key: 'storage', problem: 'Choose storage', options: [{ name: 'SQL', tradeoffs: 'Transactions; migration cost' }, { name: 'Journal', tradeoffs: 'Simple; compaction cost' }], recommendation: 'SQL', consequences: 'Maintain migrations', conflicts: 'Preserve ADR 0001', grantImplications: 'None', newEvidence: '', settledDecision: false, expensiveToReverse: true, surprisingWithoutContext: true, genuineTradeoff: true };
-async function fixture(t) {
+async function fixture(t, nongrant = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ade-actions-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const project = { enabled: true, autoMerge: true, architectureDecisions: true, milestoneAuthorization: true, repo: 'owner/demo', checkout: root, worktreeRoot: path.join(root, 'worktrees'), stateDir: path.join(root, 'jobs'), baseBranch: 'main', readyLabel: 'ready', humanLabel: 'human', worker: 'codex', reviewPolicy: 'always', verification: 'npm test' };
+  const project = { enabled: true, autoMerge: true, architectureDecisions: true, milestoneAuthorization: !nongrant, repo: 'owner/demo', checkout: root, worktreeRoot: path.join(root, 'worktrees'), stateDir: path.join(root, 'jobs'), baseBranch: 'main', readyLabel: 'ready', humanLabel: 'human', worker: 'codex', reviewPolicy: 'always', verification: 'npm test' };
   const options = { stateDir: root, configPath: path.join(root, 'config.json'), projectsPath: path.join(root, 'projects.json'), inputPath: path.join(root, 'input.json'), specPath: path.join(root, 'spec.md'), approve: async () => true, record() {} };
   fs.writeFileSync(options.configPath, JSON.stringify({ allowedProjects: { demo: root } }));
   fs.writeFileSync(options.projectsPath, JSON.stringify({ demo: project }));
   fs.writeFileSync(options.specPath, 'Approved architecture and implementation');
   fs.writeFileSync(options.inputPath, JSON.stringify({ project: 'demo', repo: project.repo, spec: { identity: '#1', digest: crypto.createHash('sha256').update(fs.readFileSync(options.specPath)).digest('hex') }, objective: 'Bounded implementation', allowedCategories: ['implementation'], exclusions: ['deployment'], revision: 1, ticketLimit: 3, concurrencyLimit: 2, expiresAt: new Date(Date.now() + 86400000).toISOString() }));
-  const grant = await grantCommand('draft', 'g1', options);
-  await grantCommand('activate', 'g1', { ...options, digest: grant.digest });
+  const grant = nongrant ? {} : await grantCommand('draft', 'g1', options);
+  if (!nongrant) await grantCommand('activate', 'g1', { ...options, digest: grant.digest });
   const issue = { number: 10, title: '[DRAFT] Implement storage', body: 'Implement authorized storage', state: 'open', html_url: 'https://github.com/owner/demo/issues/10', labels: [] };
   const adrIssue = { number: 20, title: '[DRAFT] Record storage ADR', body: 'Record architecture decision', html_url: 'https://github.com/owner/demo/issues/20', state: 'open', labels: [] };
   const store = createJobStore(project.stateDir), requests = [];
   const job = createJob({ projectName: 'demo', repo: project.repo, issue, branch: 'ralph/issue-10', worktreePath: root, now: store.now, maxReviewRounds: 2 });
   const oldAdr = { path: 'docs/decisions/0001.md', content: 'Accepted owner trust boundary' };
   const decisionIssue = { number: 15, html_url: 'https://github.com/owner/demo/issues/15', state: 'open', body: store.load(10)?.architectureDecision?.marker || '', labels: [{ name: 'needs-owner-decision' }] };
-  let remoteMerged = true, remoteContent = null, loseResolution = false;
+  let remoteMerged = true, remoteContent = null, loseResolution = false, remoteBase = 'main';
   options.execFile = (file, args, opts, cb) => {
     requests.push(args);
     const url = args[1] === '--method' ? args[3] : args[1];
@@ -42,16 +42,20 @@ async function fixture(t) {
     }
     if (args[0] === 'issue') return cb(null, '');
     if (url.includes('/contents/')) {
-      const content = url.includes('0001.md') ? oldAdr.content : remoteContent ?? store.load(10).architectureDecision?.adr?.content;
+      const content = url.includes('0001.md') ? oldAdr.content : remoteContent ?? (store.load(10).architectureDecision || store.load(10).architectureDecisionHistory?.at(-1))?.adr?.content;
       return cb(null, JSON.stringify({ encoding: 'base64', content: Buffer.from(content || '').toString('base64') }));
     }
-    if (url.includes('/pulls/')) return cb(null, JSON.stringify({ merged: remoteMerged, head: { sha: 'a'.repeat(40) }, merge_commit_sha: 'b'.repeat(40), base: { repo: { full_name: project.repo }, ref: 'main' } }));
+    if (url.includes('/pulls/')) return cb(null, JSON.stringify({ number: Number(url.split('/').at(-1)), merged: remoteMerged, head: { sha: 'a'.repeat(40) }, merge_commit_sha: 'b'.repeat(40), base: { repo: { full_name: project.repo }, ref: remoteBase } }));
     cb(null, JSON.stringify(url.endsWith('/20') ? adrIssue : url.endsWith('/15') ? decisionIssue : issue));
   };
-  const request = { repo: project.repo, issue: 10, grantDigest: grant.digest, revision: 1, spec: { identity: grant.spec.identity, digest: grant.spec.digest }, ticketDigest: ticketDigest(issue), category: 'implementation', scope: 'in-scope', reason: 'Within owner scope' };
+  const request = { repo: project.repo, issue: 10, grantDigest: grant.digest, revision: 1, spec: { identity: grant.spec?.identity, digest: grant.spec?.digest }, ticketDigest: ticketDigest(issue), category: 'implementation', scope: 'in-scope', reason: 'Within owner scope' };
   const ticket = async (action, extra = {}) => ticketCommand(action, 'g1', { ...options, request, ...extra });
-  const p = await ticket('preview'); await ticket('approve', { digest: p.digest }); await ticket('release');
+  if (!nongrant) { const p = await ticket('preview'); await ticket('approve', { digest: p.digest }); await ticket('release'); }
+  else issue.labels = [{ name: 'ready' }];
   job.milestoneAuthorization = await require('../src/milestone-admission').checkMilestoneAdmission('demo', project, 10, { ...options, jobs: [] });
+  if (nongrant) {
+    await decisions.captureAdmission(project, job, store, options);
+  }
   job.runs = 1; require('../src/autopilot-state').recordFailure(job, 'worker', 'Original diagnostic', store.now);
   job.ralph = { status: 'paused_owner_decision', attempts: 1, taskId: 'original-worker' };
   decisions.pause(job, proposal, [oldAdr], store);
@@ -75,6 +79,7 @@ async function fixture(t) {
     store.save(adr);
   };
   const releaseAdr = async () => {
+    if (nongrant) { adrIssue.labels = [{ name: 'ready' }]; return; }
     const adrRequest = { ...request, issue: 20, ticketDigest: ticketDigest(adrIssue) };
     const preview = await ticketCommand('preview', 'g1', { ...options, request: adrRequest });
     await ticketCommand('approve', 'g1', { ...options, request: adrRequest, digest: preview.digest });
@@ -82,7 +87,7 @@ async function fixture(t) {
     assert.equal(released.released, true, JSON.stringify(released.reasons));
   };
   const changeGrant = patch => { const f = path.join(root, 'milestone-grants.json'), db = JSON.parse(fs.readFileSync(f)); Object.assign(db.grants.g1, patch); fs.writeFileSync(f, JSON.stringify(db)); };
-  return { root, options, project, store, issue, adrIssue, decisionIssue, requests, input, command, mergeAdr, releaseAdr, changeGrant, loseResolution: () => { loseResolution = true; }, unmerge: () => { remoteMerged = false; }, alterAdr: () => { remoteContent = 'Proposed only'; } };
+  return { root, options, project, store, issue, adrIssue, decisionIssue, requests, input, command, mergeAdr, releaseAdr, changeGrant, oldAdr, staleBase: () => { remoteBase = 'old-base'; }, loseResolution: () => { loseResolution = true; }, unmerge: () => { remoteMerged = false; }, alterAdr: () => { remoteContent = 'Proposed only'; } };
 }
 test('owner accepts once, persists exact evidence and proposes an unreleased ADR without granting execution', async t => {
   const f = await fixture(t), before = f.store.load(10);
@@ -305,9 +310,13 @@ test('read-only R1 status recovers CLI actions from the durable project job afte
   assert.equal(task.r1.architectureDecision.ownerDecision, undefined);
 });
 
-test('synthetic ADR and resumed implementation pass normal one-shot CI, independent review and guarded merge gates', async t => {
-  const f = await fixture(t);
+for (const nongrant of [false, true]) test(`synthetic ${nongrant ? 'ready-label' : 'grant'} ADR and resumed implementation pass normal one-shot CI, independent review and guarded merge gates`, async t => {
+  const f = await fixture(t, nongrant);
+  const original = f.store.load(10);
   fs.writeFileSync(path.join(f.root, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "console.log(\'synthetic checks passed\')"' } }));
+  const unrelated = await require('../src/task-loop').runTask(f.root, { id: 'unrelated', goal: 'Routine independent work', acceptance: ['verifies'], worker: 'codex', verification: 'node -e \"console.log(1)\"' }, { runWorker: async () => ({ exitCode: 0, stdout: 'Unrelated issue continues', stderr: '' }) });
+  assert.equal(unrelated.status, 'passed');
+  assert.equal(f.store.load(10).status, 'paused_owner_decision');
   await f.command('accept'); await f.releaseAdr();
   const { run } = require('../src/autopilot');
   const reviewed = [], merged = [], observed = [];
@@ -364,6 +373,15 @@ test('synthetic ADR and resumed implementation pass normal one-shot CI, independ
   assert.equal(recovered.decisions[0].state, 'merged');
   assert.equal(recovered.decisions[0].acceptedAdr.commit, 'b'.repeat(40));
   assert.equal(recovered.architectureDecisionHistory[0].resolution.status, 'complete');
+  const completedOriginal = f.store.load(10);
+  assert.equal(completedOriginal.createdAt, original.createdAt);
+  assert.equal(completedOriginal.worktreePath, original.worktreePath);
+  assert.equal(completedOriginal.runs, original.runs + 1);
+  assert.equal(completedOriginal.failures[0].message, original.failures[0].message);
+  if (nongrant) {
+    assert.equal(completedOriginal.milestoneAuthorization, null);
+    assert.equal(fs.existsSync(path.join(f.root, 'milestone-grants.json')), false);
+  }
 });
 
 test('resolution refuses transferred decision identity and preserves the pause', async t => {
@@ -373,4 +391,168 @@ test('resolution refuses transferred decision identity and preserves the pause',
   assert.equal(f.store.load(10).status, 'paused_owner_decision');
   assert.equal(f.decisionIssue.state, 'open');
   assert.equal(f.requests.filter(a => a.includes('PATCH') && a.includes('repos/owner/demo/issues/15')).length, 0);
+});
+
+const admissionChanges = {
+  label: f => { f.issue.labels = []; },
+  missing: f => { delete f.issue.number; },
+  transferred: f => { f.issue.html_url = 'https://github.com/elsewhere/repo/issues/10'; },
+  closed: f => { f.issue.state = 'closed'; },
+  pr: f => { f.issue.pull_request = {}; },
+  title: f => { f.issue.title += ' edited'; },
+  body: f => { f.issue.body += ' edited'; },
+  dependencies: f => { f.issue.body += '\nDepends on: #5'; },
+  'decision-label': f => { f.issue.labels.push({ name: 'needs-owner-decision' }); },
+  'decision-marker': f => { f.issue.body += '\n<!-- ralph-decision:' + 'a'.repeat(64) + ' -->\n'; },
+  mode: f => { f.project.milestoneAuthorization = true; },
+  readyLabel: f => { f.project.readyLabel = 'different-ready'; },
+  repo: f => { f.project.repo = 'elsewhere/repo'; },
+  worker: f => { f.project.worker = 'claude'; },
+  host: f => { fs.writeFileSync(f.options.configPath, JSON.stringify({ allowedProjects: { demo: f.root }, hostAccess: true })); },
+  scope: f => { f.project.dependencyFormat = 'household-blocked-by'; },
+  metadata: f => { const j = f.store.load(10); delete j.admission; delete j.architectureDecision.admission; f.store.save(j); },
+  'receipt-mode-conflict': f => { const j = f.store.load(10); j.milestoneAuthorization = { receiptId: 'unexpected' }; j.architectureDecision.authorization = j.milestoneAuthorization; f.store.save(j); },
+  receipt: f => { const j = f.store.load(10); j.milestoneAuthorization = { receiptId: 'unexpected' }; f.store.save(j); },
+  'canonical-receipt': f => { fs.writeFileSync(path.join(f.root, 'milestone-grants.json'), JSON.stringify({ version: 1, grants: { conflict: { receipts: { 'owner/demo#10': {} } } } })); },
+  'malformed-canonical-receipt': f => { fs.writeFileSync(path.join(f.root, 'milestone-grants.json'), JSON.stringify({ version: 1, grants: { conflict: { receipts: { 'owner/demo#10': null } } } })); },
+  transport: f => { f.options.execFile = (_file, _args, _opts, cb) => cb(new Error('GitHub transport unavailable')); },
+  'unmerged-adr': f => f.unmerge(),
+  'stale-base': f => f.staleBase(),
+  'missing-adr': f => { fs.rmSync(path.join(f.project.stateDir, 'issue-20.json')); },
+  'accepted-adr-change': f => { f.oldAdr.content = 'Changed trust boundary'; },
+  'edited-adr': f => f.alterAdr(),
+  'red-ci': f => { const j = f.store.load(20); j.ci.state = 'red'; f.store.save(j); },
+  'wrong-reviewer': f => { const j = f.store.load(20); j.review.reviewer = 'codex:worker'; f.store.save(j); },
+  'stale-head': f => { const j = f.store.load(20); j.delivery.commit = 'c'.repeat(40); f.store.save(j); },
+};
+for (const [change, mutate] of Object.entries(admissionChanges)) {
+  for (const phase of ['owner', 'execution']) test(`ready-label ${phase} resume blocks ${change} without attempts`, async t => {
+    const f = await fixture(t, true); await f.command('accept'); f.mergeAdr();
+    const before = f.store.load(10);
+    if (phase === 'execution') await f.command('resume', {});
+    mutate(f);
+    // Reflect changed owner policy in the file the authenticated CLI reads.
+    fs.writeFileSync(f.options.projectsPath, JSON.stringify({ demo: f.project }));
+    if (phase === 'owner') await assert.rejects(f.command('resume', {}));
+    else await require('../src/autopilot').run(['--project', 'demo'], {
+      loadProjectConfig: () => f.project, jobStore: createJobStore(f.project.stateDir), milestoneOptions: f.options,
+      execFile: f.options.execFile, discoverReadyIssues: async () => { assert.fail('Resume must validate the canonical issue directly'); }, write() {},
+      createRalphTaskService: () => { assert.fail('Premature worker'); },
+      independentReview: () => { assert.fail('Premature reviewer'); },
+      mergePullRequest: () => { assert.fail('Premature merge'); },
+    });
+    const after = createJobStore(f.project.stateDir).load(10);
+    assert.equal(after.status, 'paused_owner_decision');
+    assert.equal(after.createdAt, before.createdAt); assert.equal(after.runs, before.runs);
+    assert.equal(after.worktreePath, before.worktreePath);
+    assert.deepEqual(after.failures, before.failures); assert.deepEqual(after.ralph, before.ralph);
+    assert.equal(after.reviewAttempts, before.reviewAttempts);
+    assert.ok(after.architectureDecision.blockedReason);
+  });
+}
+test('grant origin never downgrades when owner disables grants', async t => {
+  const f = await fixture(t); await f.command('accept'); f.mergeAdr();
+  f.project.milestoneAuthorization = false;
+  fs.writeFileSync(f.options.projectsPath, JSON.stringify({ demo: f.project }));
+  await assert.rejects(f.command('resume', {}), /Original milestone grant/);
+  assert.equal(f.store.load(10).runs, 1);
+});
+test('ready-label resume checks canonical prerequisite receipts rather than closure', async t => {
+  const f = await fixture(t, true); f.mergeAdr();
+  const predecessor = f.store.load(20); predecessor.issue.number = 5; f.store.save(predecessor);
+  // Build a separately admitted initial revision with an approved prerequisite.
+  const j = f.store.load(10); delete j.admission;
+  f.issue.body += '\nDepends on: #5'; j.originalIssue = structuredClone(f.issue);
+  await decisions.captureAdmission(f.project, j, f.store, f.options);
+  j.architectureDecision.sourceIssue = structuredClone(f.issue);
+  j.architectureDecision.admission = structuredClone(j.admission); f.store.save(j);
+  await f.command('accept'); f.mergeAdr();
+  const blocked = f.store.load(5); blocked.ci.state = 'red'; f.store.save(blocked);
+  await assert.rejects(f.command('resume', {}), /approved merged prerequisites/);
+  assert.equal(f.store.load(10).runs, 1);
+});
+test('ready-label removal during resumed preparation preserves the unused run and original transcript', async t => {
+  const f = await fixture(t, true); await f.command('accept'); f.mergeAdr(); await f.command('resume', {});
+  const before = f.store.load(10);
+  await require('../src/autopilot').run(['--project', 'demo'], {
+    loadProjectConfig: () => f.project, jobStore: f.store, milestoneOptions: f.options,
+    execFile: f.options.execFile, discoverReadyIssues: async () => [f.issue], write() {},
+    readRepositoryInstructions: async () => [],
+    prepareRepositoryEnvironment: async () => { f.issue.labels = []; return {}; },
+    createRalphTaskService: () => { assert.fail('No worker after label removal'); },
+  });
+  const after = f.store.load(10);
+  assert.equal(after.status, 'paused_owner_decision');
+  assert.equal(after.runs, before.runs); assert.deepEqual(after.ralph, before.ralph);
+  assert.deepEqual(after.failures, before.failures);
+});
+test('label removal while resumed delivery awaits CI returns to pause before any review or merge', async t => {
+  const f = await fixture(t, true); await f.command('accept'); f.mergeAdr(); await f.command('resume', {});
+  const j = f.store.load(10), adr = f.store.load(20);
+  j.architectureDecision.resumedAt = f.store.now();
+  j.architectureDecisionHistory = [j.architectureDecision]; delete j.architectureDecision;
+  j.status = 'awaiting_ci'; j.ralph.status = 'passed';
+  j.delivery = adr.delivery; j.verification = adr.verification;
+  j.pr = { number: 11, url: 'https://github.com/owner/demo/pull/11' };
+  f.store.save(j); f.issue.labels = [];
+  await require('../src/autopilot').run(['--project', 'demo'], {
+    loadProjectConfig: () => f.project, jobStore: f.store, milestoneOptions: f.options,
+    execFile: f.options.execFile, discoverReadyIssues: async () => { assert.fail('Use original admission'); }, write() {},
+    independentReview: () => { assert.fail('No review'); }, mergePullRequest: () => { assert.fail('No merge'); },
+  });
+  const after = f.store.load(10);
+  assert.equal(after.status, 'paused_owner_decision'); assert.equal(after.runs, j.runs);
+  assert.deepEqual(after.ralph, j.ralph); assert.deepEqual(after.failures, j.failures);
+  assert.match(after.architectureDecision.blockedReason, /label changed/);
+});
+test('grant execution recheck reads changed owner mode even with an earlier in-memory project', async t => {
+  const f = await fixture(t); await f.command('accept'); f.mergeAdr(); await f.command('resume', {});
+  fs.writeFileSync(f.options.projectsPath, JSON.stringify({ demo: { ...f.project, milestoneAuthorization: false } }));
+  await require('../src/autopilot').run(['--project', 'demo'], {
+    loadProjectConfig: () => f.project, jobStore: f.store, milestoneOptions: f.options,
+    execFile: f.options.execFile, discoverReadyIssues: async () => [], write() {},
+    createRalphTaskService: () => { assert.fail('No worker under changed mode'); },
+  });
+  assert.equal(f.store.load(10).status, 'paused_owner_decision');
+  assert.match(f.store.load(10).architectureDecision.blockedReason, /mode changed/);
+  assert.equal(f.store.load(10).runs, 1);
+});
+test('failed resumed worker admission preserves the unused run even after service creation', async t => {
+  const f = await fixture(t, true); await f.command('accept'); f.mergeAdr(); await f.command('resume', {});
+  const before = f.store.load(10);
+  await require('../src/autopilot').run(['--project', 'demo'], {
+    loadProjectConfig: () => f.project, jobStore: f.store, milestoneOptions: f.options,
+    execFile: f.options.execFile, discoverReadyIssues: async () => [], write() {},
+    readRepositoryInstructions: async () => [], prepareRepositoryEnvironment: async () => ({}),
+    createRalphTaskService: options => ({ run: async () => {
+      f.issue.labels = []; await options.beforeAttempt(); assert.fail('No worker');
+    } }),
+  });
+  const after = f.store.load(10);
+  assert.equal(after.status, 'paused_owner_decision'); assert.equal(after.runs, before.runs);
+  assert.deepEqual(after.ralph, before.ralph); assert.deepEqual(after.failures, before.failures);
+  assert.equal(after.architectureDecision.scopeCheck.status, 'blocked');
+});
+test('last worker admission failure in the real task service propagates without a paid or budgeted attempt', async t => {
+  const f = await fixture(t, true); await f.command('accept'); f.mergeAdr(); await f.command('resume', {});
+  const before = f.store.load(10); let checks = 0;
+  await require('../src/autopilot').run(['--project', 'demo'], {
+    loadProjectConfig: () => f.project, jobStore: f.store, milestoneOptions: f.options,
+    execFile: f.options.execFile, discoverReadyIssues: async () => [], write() {},
+    readRepositoryInstructions: async () => [], prepareRepositoryEnvironment: async () => ({}),
+    createRalphTaskService: options => require('../src/ralph-task-service').createRalphTaskService({
+      ...options,
+      createCliWorkerImpl: () => async () => { assert.fail('No actual worker'); },
+      createTaskStateWriterImpl: () => async () => {},
+      beforeAttempt: async () => {
+        if (++checks === 2) f.issue.labels = [];
+        await options.beforeAttempt();
+      },
+    }),
+  });
+  const after = f.store.load(10);
+  assert.equal(checks, 2); assert.equal(after.status, 'paused_owner_decision');
+  assert.equal(after.runs, before.runs); assert.deepEqual(after.ralph, before.ralph);
+  assert.deepEqual(after.failures, before.failures);
+  assert.match(fs.readFileSync(after.executionJournal.file, 'utf8'), /architecture_resume_blocked/);
 });

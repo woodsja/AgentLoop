@@ -13,7 +13,8 @@ function preview(job) {
   const d = job.architectureDecision;
   if (!d) throw new Error('No pending architecture decision.');
   return { identity: d.identity, proposal: d.proposal, references: d.references, issue: d.issue,
-    job: job.r1ParentJobId || job.createdAt, source: d.sourceIssue, authorization: d.authorization,
+    admissionMode: d.authorization ? 'milestone-grant' : d.admission?.mode || 'unknown',
+    job: job.r1ParentJobId || job.createdAt, source: d.sourceIssue, authorization: d.authorization, admission: d.admission,
     ownerDecision: d.ownerDecision, adr: d.adr, status: require('./architecture-decision-status').decisionStatus(job) };
 }
 function adrFor(job, input) {
@@ -37,7 +38,7 @@ async function publishAdr(job, store, options) {
     if (issue.number !== d.adr.issue || issue.state !== 'open' || issue.pull_request
       || !Array.isArray(issue.labels) || issue.labels.length !== 0) throw new Error('ADR proposal requires a separate open, unreleased issue.');
     const marker = `${d.marker} ADR proposal`;
-    const addition = `${marker}\nOwner-approved architecture choice; separate milestone authorization and release required.\nCreate only ${d.adr.path} with the exact following content; preserve earlier ADRs. Deliver through deterministic verification, independent Claude review, exact-head CI and guarded merge. No deployment.\n\n${d.adr.content}`;
+    const addition = `${marker}\nOwner-approved architecture choice; separate ${d.authorization ? 'milestone authorization' : 'owner ready-label admission'} and release required.\nCreate only ${d.adr.path} with the exact following content; preserve earlier ADRs. Deliver through deterministic verification, independent Claude review, exact-head CI and guarded merge. No deployment.\n\n${d.adr.content}`;
     if (typeof issue.body !== 'string') throw new Error('ADR issue body missing.');
     if (issue.body.includes(marker) && !issue.body.endsWith(addition)) throw new Error('ADR proposal changed; owner reconciliation required.');
     if (!issue.body.includes(marker)) await gh(['api', '--method', 'PATCH', `repos/${job.repo}/issues/${d.adr.issue}`, '-f', `body=${issue.body}\n\n${addition}`]);
@@ -50,21 +51,32 @@ async function validateResumeChecks(project, job, store, options = {}) {
   if (!d.ownerDecision.actor || !d.ownerDecision.at || !d.ownerDecision.digest) throw new Error('Missing authenticated owner decision evidence.');
   if (d.ownerDecision.conflictsResolved !== true) throw new Error('Existing ADR conflicts remain unresolved; owner reconciliation required.');
   if (d.ownerDecision.requiresMilestoneAmendment !== false) throw new Error('Architectural choice requires a separate milestone amendment; no new scope, credentials, host access or deployment is authorized.');
-  if (!d.authorization || project.milestoneAuthorization !== true) throw new Error('Original milestone grant evidence required; request a separate milestone amendment.');
+  const grantMode = Boolean(d.authorization || job.milestoneAuthorization);
+  if (grantMode && (d.admission?.mode === 'ready-label' || job.admission?.mode === 'ready-label')) throw new Error('Grant receipt conflicts with original ready-label admission mode.');
+  if (grantMode && (!d.authorization || !same(d.authorization, job.milestoneAuthorization) || project.milestoneAuthorization !== true)) throw new Error('Original milestone grant evidence required; request a separate milestone amendment.');
+  if (!grantMode && (!same(d.admission, job.admission) || !d.admission)) throw new Error('Original ready-label admission metadata missing or changed; explicit owner recovery required.');
   if (job.project !== d.project || job.repo !== d.repo || (job.r1ParentJobId || job.createdAt) !== d.originatingJob
-    || job.issue.number !== d.originatingIssue) throw new Error('Original durable job identity changed.');
+    || job.issue.number !== d.originatingIssue || (d.worktreePath && job.worktreePath !== d.worktreePath)) throw new Error('Original durable job identity changed.');
   const gh = args => runGh(args, options.execFile, 'Architecture resume');
   const issue = JSON.parse(await gh(['api', `repos/${job.repo}/issues/${job.issue.number}`]));
-  if (issue.state !== 'open' || ticketDigest(issue) !== ticketDigest(d.sourceIssue)) throw new Error('Original issue content revision or state changed.');
-  const authorization = await require('./milestone-admission').checkMilestoneAdmission(job.project, project, job.issue.number, {
-    ...options, jobs: () => store.dependencyJobs ? store.dependencyJobs() : store.list(), expectedIssue: issue, expectedAuthorization: d.authorization,
-  });
+  if (!issue || issue.number !== d.originatingIssue || issue.html_url !== `https://github.com/${d.repo}/issues/${d.originatingIssue}`
+    || issue.state !== 'open' || issue.pull_request || typeof issue.title !== 'string' || typeof issue.body !== 'string'
+    || ticketDigest(issue) !== ticketDigest(d.sourceIssue)) throw new Error('Original issue identity, content revision or state changed.');
+  const recheck = async () => {
+    if (!grantMode) return require('./architecture-decision-admission').check(project, job, d.admission, store, options);
+    const projectsPath = options.projectsPath || path.join(__dirname, '../autopilot-projects.json');
+    if (JSON.parse(fs.readFileSync(projectsPath, 'utf8'))[job.project]?.milestoneAuthorization !== true) throw new Error('Original milestone grant mode changed in owner policy.');
+    return require('./milestone-admission').checkMilestoneAdmission(job.project, project, job.issue.number, {
+      ...options, jobs: () => store.dependencyJobs ? store.dependencyJobs() : store.list(), expectedIssue: issue, expectedAuthorization: d.authorization,
+    });
+  };
+  const authorization = await recheck();
   if (!same(authorization, d.authorization)) throw new Error('Milestone grant changed; request a separate milestone amendment.');
   if (d.adr?.publication !== 'complete') throw new Error('ADR proposal publication is incomplete.');
   const adrJob = store.load(d.adr.issue);
   if (!require('./r1-dependencies').approved(adrJob, d.adr.issue, job.project, job.repo)) throw new Error('ADR awaits independent Claude PASS, exact-head green CI and guarded merge.');
   const pr = JSON.parse(await gh(['api', `repos/${job.repo}/pulls/${adrJob.merge.prNumber}`]));
-  if (pr.merged !== true || pr.head?.sha !== adrJob.delivery.commit || pr.merge_commit_sha !== adrJob.merge.commit
+  if (pr.number !== adrJob.merge.prNumber || pr.merged !== true || pr.head?.sha !== adrJob.delivery.commit || pr.merge_commit_sha !== adrJob.merge.commit
     || pr.base?.repo?.full_name !== job.repo || pr.base?.ref !== project.baseBranch) throw new Error('ADR remote merged identity does not match guarded evidence.');
   const read = async ref => JSON.parse(await gh(['api', `repos/${job.repo}/contents/${d.adr.path}?ref=${encodeURIComponent(ref)}`]));
   for (const ref of [adrJob.merge.commit, project.baseBranch]) {
@@ -76,13 +88,11 @@ async function validateResumeChecks(project, job, store, options = {}) {
     const file = JSON.parse(await gh(['api', `repos/${job.repo}/contents/${r.path}?ref=${encodeURIComponent(project.baseBranch)}`]));
     if (file.encoding !== 'base64' || Buffer.from(file.content, 'base64').toString('utf8') !== r.content) throw new Error(`Unresolved existing ADR change: ${r.path}`);
   }
-  if (job.runs >= (project.maxJobRuns ?? require('./autopilot-state').DEFAULT_MAX_JOB_RUNS)) throw new Error('Original implementation run budget exhausted; explicit supported recovery required.');
+  if (!options.executionRecheck && job.runs >= (project.maxJobRuns ?? require('./autopilot-state').DEFAULT_MAX_JOB_RUNS)) throw new Error('Original implementation run budget exhausted; explicit supported recovery required.');
   if (!fs.existsSync(job.worktreePath)) throw new Error('Original worktree missing; explicit recovery required.');
-  const fresh = await require('./milestone-admission').checkMilestoneAdmission(job.project, project, job.issue.number, {
-    ...options, jobs: () => store.dependencyJobs ? store.dependencyJobs() : store.list(), expectedIssue: issue, expectedAuthorization: d.authorization,
-  });
+  const fresh = await recheck();
   if (!same(fresh, d.authorization)) throw new Error('Milestone grant changed during ADR validation.');
-  return { at: store.now(), adrIssue: d.adr.issue, merge: adrJob.merge, authorization };
+  return { at: store.now(), adrIssue: d.adr.issue, merge: adrJob.merge, authorization, admissionMode: grantMode ? 'milestone-grant' : 'ready-label' };
 }
 // Read-only remote validation, with its observation time preserved for status.
 // A status read never refreshes authority or implicitly requests execution.
@@ -90,11 +100,16 @@ async function validateResume(project, job, store, options = {}) {
   const d = job.architectureDecision;
   try {
     const evidence = await validateResumeChecks(project, job, store, options);
-    d.scopeCheck = { at: store.now(), status: 'passed', authorization: evidence.authorization };
+    d.scopeCheck = { at: store.now(), status: 'passed', admissionMode: evidence.admissionMode, authorization: evidence.authorization };
     store.save(job);
     return evidence;
   } catch (error) {
-    if (d) { d.scopeCheck = { at: store.now(), status: 'blocked', reason: error.message }; store.save(job); }
+    if (d) {
+      d.scopeCheck = { at: store.now(), status: 'blocked', reason: error.message };
+      d.resumeRequested = false;
+      job.status = job.terminalState = 'paused_owner_decision'; job.terminal = true;
+      store.save(job);
+    }
     throw error;
   }
 }
@@ -108,7 +123,7 @@ async function publishResolution(project, job, store, options = {}) {
   const marker = `${d.marker} resolution`;
   const merge = d.resumeEvidence.merge;
   const adrUrl = `https://github.com/${job.repo}/blob/${merge.commit}/${d.adr.path}`;
-  const suffix = `${marker}\n## Verified owner decision\nAccepted option: ${d.ownerDecision.option}\nAccepted ADR: ${adrUrl}\nADR delivery: https://github.com/${job.repo}/pull/${merge.prNumber}\nOriginating implementation: https://github.com/${job.repo}/issues/${d.originatingIssue}\nOriginal job: ${d.originatingJob}\nOwner decision recorded: ${d.ownerDecision.at}\nResume remains subject to fresh milestone and exact ADR checks. Merge does not imply deployment.`;
+  const suffix = `${marker}\n## Verified owner decision\nAccepted option: ${d.ownerDecision.option}\nAccepted ADR: ${adrUrl}\nADR delivery: https://github.com/${job.repo}/pull/${merge.prNumber}\nOriginating implementation: https://github.com/${job.repo}/issues/${d.originatingIssue}\nOriginal job: ${d.originatingJob}\nOwner decision recorded: ${d.ownerDecision.at}\nResume remains subject to fresh original admission and exact ADR checks. Merge does not imply deployment.`;
   d.resolution = { status: 'pending', adrUrl }; store.save(job);
   try {
     const issue = JSON.parse(await gh(['api', `repos/${job.repo}/issues/${d.issue.number}`]));
@@ -185,7 +200,7 @@ async function decisionCommand(action, id, options = {}) {
     if (action === 'accept') {
       if (typeof input.conflictsResolved !== 'boolean') throw new Error('Explicit ADR conflict assessment required.');
       if (typeof input.requiresMilestoneAmendment !== 'boolean') throw new Error('Explicit milestone amendment assessment required.');
-      if (!Number.isSafeInteger(input.adrIssue) || input.adrIssue <= 0 || [job.issue.number, d.issue?.number].includes(input.adrIssue)) throw new Error('Supply a separate ADR delivery issue; its release needs independent milestone authorization.');
+      if (!Number.isSafeInteger(input.adrIssue) || input.adrIssue <= 0 || [job.issue.number, d.issue?.number].includes(input.adrIssue)) throw new Error('Supply a separate ADR delivery issue; release it separately using the original project admission mode (grant or owner ready label).');
       if (!d.issue?.url || !d.sourceIssue) throw new Error('Published decision and original issue revision required.');
       d.adr = { ...adrFor(job, input), issue: input.adrIssue };
     }
@@ -206,4 +221,4 @@ async function decisionCommand(action, id, options = {}) {
     return job;
   } finally { lock.release(); }
 }
-module.exports = { decisionCommand, validateResume, preview, adrFor, hash };
+module.exports = { validateResumeChecks, decisionCommand, validateResume, preview, adrFor, hash };

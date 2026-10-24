@@ -52,8 +52,9 @@ function pause(job, proposal, references, store) {
       proposal, references,
       pausedExecution: { ralph: structuredClone(job.ralph), runs: job.runs,
         failures: structuredClone(job.failures), executionJournal: job.executionJournal },
-      project: job.project, repo: job.repo, sourceIssue: structuredClone(job.originalIssue || job.issue),
+      worktreePath: job.worktreePath, project: job.project, repo: job.repo, sourceIssue: structuredClone(job.originalIssue || job.issue),
       authorization: structuredClone(job.milestoneAuthorization || null),
+      admission: structuredClone(job.admission || null),
       originatingIssue: job.issue.number, originatingJob: job.r1ParentJobId || job.createdAt,
       notification: { status: 'pending', owner: null, attempts: [] }, publication: 'pending' };
   }
@@ -128,4 +129,4 @@ async function publish(project, job, store, options = {}) {
     d.publicationError = error.message; save();
   }
 }
-module.exports = { reconcile, FILE, context, instructions, readProposal, pause, publish, bodyFor };
+module.exports = { captureAdmission: require('./architecture-decision-admission').capture, reconcile, FILE, context, instructions, readProposal, pause, publish, bodyFor };

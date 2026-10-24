@@ -205,12 +205,23 @@ async function run(argv, dependencies = {}) {
   const store = dependencies.jobStore
     || createJobStore(resolveStateDir(projectName, project, dependencies.stateRoot));
   let job;
-  const authorizeMilestone = (issue = candidate, existing = job) => project.milestoneAuthorization !== true ? Promise.resolve(null) : dependencies.checkMilestoneAuthorization
+  const authorizeMilestoneRaw = (issue = candidate, existing = job) => project.milestoneAuthorization !== true ? Promise.resolve(null) : dependencies.checkMilestoneAuthorization
     ? dependencies.checkMilestoneAuthorization(issue, existing)
     : checkMilestoneAdmission(projectName, project, issue.number, {
       ...dependencies.milestoneOptions, execFile: dependencies.execFile, jobs: () => store.list(),
       expectedAuthorization: existing?.milestoneAuthorization, expectedIssue: issue,
     });
+  const authorizeMilestone = async (issue = candidate, existing = job) => {
+    const decision = existing?.architectureDecisionHistory?.at(-1);
+    if (decision?.resumedAt) {
+      try {
+        await require('./architecture-decision-actions').validateResumeChecks(project,
+          { ...existing, architectureDecision: decision }, store,
+          { ...dependencies.milestoneOptions, execFile: dependencies.execFile, executionRecheck: true });
+      } catch (error) { error.code = 'ARCHITECTURE_RESUME_BLOCKED'; throw error; }
+    }
+    return authorizeMilestoneRaw(issue, existing);
+  };
   const workOptions = () => ({
     authorization: job?.milestoneAuthorization, options: dependencies.milestoneOptions, authorize: authorizeMilestone,
     onInterruptedResult: result => {
@@ -234,8 +245,13 @@ async function run(argv, dependencies = {}) {
   }
   if (!dryRun) await cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, dependencies.captureFailedWork);
   if (!dryRun) await decisions.reconcile(project, store, { execFile: dependencies.execFile });
-  const discovered = await discover(project);
   const recorded = store.list();
+  const requestedDecisions = recorded.filter(saved => saved.architectureDecision?.resumeRequested
+    || (!saved.terminal && saved.architectureDecisionHistory?.at(-1)?.resumedAt));
+  const resumeSource = saved => (saved.architectureDecision || saved.architectureDecisionHistory.at(-1)).sourceIssue;
+  const discovered = requestedDecisions.length
+    ? requestedDecisions.map(resumeSource)
+    : await discover(project);
   const dependencyAdmitted = project.dependencyFormat === 'household-blocked-by'
     ? householdEligible(discovered, recorded, projectName, project.repo, (number, message) => {
       if (project.milestoneAuthorization === true) {
@@ -246,11 +262,16 @@ async function run(argv, dependencies = {}) {
   const admitted = [];
   for (const issue of dependencyAdmitted) {
     try {
-      await authorizeMilestone(issue, recorded.find(saved => saved.issue.number === issue.number));
+      await authorizeMilestoneRaw(issue, recorded.find(saved => saved.issue.number === issue.number));
       admitted.push(issue);
     } catch (error) {
       write(`${error.decision || 'DENY'}: ${error.message}`);
     }
+  }
+  // An explicit resume must be validated even when discovery no longer lists
+  // the original issue (label removal, closure, transfer or policy change).
+  for (const saved of requestedDecisions) {
+    if (!admitted.some(i => i.number === saved.issue.number)) admitted.push(resumeSource(saved));
   }
   const selection = selectIssueForJobs(admitted, recorded, choose);
 
@@ -456,6 +477,7 @@ async function run(argv, dependencies = {}) {
   let workspace;
   let targetLock;
   let phase = 'reconcile';
+  let resumePreparation = null;
   const holdAuthorization = error => {
     job.authorizationBlocked = { at: store.now(), decision: error.decision || 'DENY', message: error.message };
     recordFailure(job, 'authorization', error.message, store.now);
@@ -520,6 +542,7 @@ async function run(argv, dependencies = {}) {
       }
     }
     catch (error) {
+      if (error.code === 'ARCHITECTURE_RESUME_BLOCKED') throw error;
       job ||= createJob({ projectName, repo: project.repo, issue: candidate, branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
       holdAuthorization(error); store.save(job);
       return { issue: candidate, job, outcome: { status: 'authorization_blocked', terminal: false, deliverable: false } };
@@ -547,6 +570,9 @@ async function run(argv, dependencies = {}) {
         now: store.now,
       });
       if (authorization) job.milestoneAuthorization = authorization;
+      if (project.architectureDecisions === true && !authorization) {
+        await decisions.captureAdmission(project, job, store, { ...dependencies.milestoneOptions, execFile: dependencies.execFile });
+      }
       const findExistingPullRequests = dependencies.findOpenIssuePullRequests || findOpenIssuePullRequests;
       let existingPullRequests;
       try {
@@ -820,7 +846,11 @@ async function run(argv, dependencies = {}) {
       store.save(job);
       return { issue: candidate, job, outcome: { status: READY_FOR_HUMAN } };
     }
-    if (job.ralph?.status !== 'passed') job.runs += 1;
+    if (job.architectureDecisionHistory?.at(-1)?.resumedAt) await authorizeMilestone();
+    if (job.ralph?.status !== 'passed') {
+      if (job.architectureDecisionHistory?.at(-1)?.resumedAt) resumePreparation = { runs: job.runs, ralph: structuredClone(job.ralph), verification: structuredClone(job.verification) };
+      job.runs += 1;
+    }
     job.status = 'preparing';
     store.save(job);
     // A verified correction whose delivery was interrupted resumes from its
@@ -880,6 +910,7 @@ async function run(argv, dependencies = {}) {
       if (job.architectureDecisionHistory?.length) task.goal += `\n\nOwner accepted decisions (merged ADR authority; no additional permissions):\n${JSON.stringify(job.architectureDecisionHistory.map(d => ({ ownerDecision: d.ownerDecision, adr: d.adr, merge: d.resumeEvidence })))}`;
       if (project.architectureDecisions === true) task.goal += `\n\n${decisions.instructions(decisionReferences)}`;
       const service = createService({ config: storeConfig, ...attemptOptions(),
+        onWorkerStart: () => { resumePreparation = null; },
         recordBaseline: sha => {
           if (!job.ralph.baselineSha) { job.ralph.baselineSha = sha; store.save(job); }
           return job.ralph.baselineSha;
@@ -893,10 +924,14 @@ async function run(argv, dependencies = {}) {
       if (correction) correction.status = 'running';
       store.save(job);
       try {
-        result = await require('./milestone-work').runAuthorizedWork(service, workspace.worktreePath, task, workOptions());
+        const executionService = resumePreparation ? {
+          ...service,
+          run: async (...args) => { const result = await service.run(...args); resumePreparation = null; return result; },
+        } : service;
+        result = await require('./milestone-work').runAuthorizedWork(executionService, workspace.worktreePath, task, workOptions());
       } catch (error) {
         // A mixed child may stop without critic PASS because implementation is waiting for the owner.
-        if (error.code === 'MILESTONE_AUTHORIZATION_BLOCKED') throw error;
+        if (['MILESTONE_AUTHORIZATION_BLOCKED', 'ARCHITECTURE_RESUME_BLOCKED'].includes(error.code)) throw error;
         if (!decisions.readProposal(workspace.worktreePath, project.architectureDecisions)) throw error;
         recordFailure(job, 'decision-worker', error, store.now);
         result = { status: 'paused_owner_decision', attempts: [] };
@@ -1014,6 +1049,17 @@ async function run(argv, dependencies = {}) {
     write(`Autopilot: project ${projectName}; issue #${candidate.number}; status ${outcome.status}${stopped}.`);
     return { issue: candidate, workspace, result, outcome, job };
   } catch (error) {
+    if (error.code === 'ARCHITECTURE_RESUME_BLOCKED' && job) {
+      store.appendIntegrationEvent?.(job, { event: 'architecture_resume_blocked', message: error.message, stack: error.stack });
+      if (resumePreparation) Object.assign(job, resumePreparation);
+      const d = job.architectureDecision || job.architectureDecisionHistory.pop();
+      delete d.resumedAt; d.resumeRequested = false; d.blockedReason = error.message;
+      d.scopeCheck = { at: store.now(), status: 'blocked', reason: error.message };
+      job.architectureDecision = d;
+      job.status = job.terminalState = 'paused_owner_decision'; job.terminal = true;
+      store.save(job);
+      return { issue: candidate, job, outcome: { status: 'paused_owner_decision', terminal: true, deliverable: false } };
+    }
     if (error.code === 'AUTOPILOT_GIT_DEFERRED') {
       job.status = 'awaiting_ci'; store.save(job);
       write(`Autopilot: issue #${candidate.number}; ${error.message}`);
