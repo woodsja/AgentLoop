@@ -94,9 +94,14 @@ test('closing original 111 cannot unlock ADE or bypass smaller-number dependency
   assert.equal(original.terminalState, 'ready_for_human');
 });
 
-test('complete recovery diff fits deployed reviewer cap without hiding code patches', () => {
+test('retained packaged recovery diff fits reviewer cap without hiding code patches', () => {
   const { MAX_DIFF_BYTES } = require('../src/autopilot-review');
-  const diff = git('diff', '--no-ext-diff', '0055c5d9ad8fd7f1f136de90f9eb91ed45131143', 'HEAD');
+  // Audit the retained packaging receipt, so unrelated future repository growth
+  // cannot turn this historical regression into a new global patch-size policy.
+  // R1 independently applies its cap to every complete new exact-head PR diff.
+  const provenance = JSON.parse(fs.readFileSync(path.join(root, 'docs/evidence/issue-142/provenance.json')));
+  git('merge-base', '--is-ancestor', provenance.packagedReviewHead, 'HEAD');
+  const diff = git('diff', '--no-ext-diff', provenance.deployedBase, provenance.packagedReviewHead);
   assert.ok(diff.length <= MAX_DIFF_BYTES, `${diff.length} exceeds ${MAX_DIFF_BYTES}`);
   for (const file of ['src/cli.js', 'src/milestone-summary.js', 'test/milestone-batches.test.js']) {
     assert.ok(diff.includes(Buffer.from(`diff --git a/${file} b/${file}`)), file + ' full patch retained');

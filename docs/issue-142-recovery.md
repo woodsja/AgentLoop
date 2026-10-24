@@ -32,8 +32,10 @@ source digests and ancestry. Add `--live` on the original VM to compare retained
 source files and protected failed #137/config baselines read-only. It fails on
 mismatch and never repairs or mutates anything. The regression first failed on
 missing packaging, then passes after packaging; corruption and mismatched digest
-cases fail closed. The normal suite checks complete base-to-head diff size and
-passes every patch section through the deployed validator during R1 delivery.
+cases fail closed. The normal suite checks the complete retained packaging revision against the
+cap. R1 independently checks the complete current PR diff and every patch section
+through its deployed validator during delivery. The retained revision is a
+post-commit local packaging receipt, not an independent delivery approval.
 
 ## Guarded delivery checklist — remaining external gates
 
