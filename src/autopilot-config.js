@@ -107,6 +107,11 @@ function validateProject(projectName, project) {
     throw new TypeError('Mixed-engine R1 implementation requires Codex worker and independent review.');
   }
 
+  if (Object.hasOwn(project, 'maxReviewRounds')
+    && (!Number.isInteger(project.maxReviewRounds) || project.maxReviewRounds < 1 || project.maxReviewRounds > 5)) {
+    throw new TypeError(`maxReviewRounds for project ${projectName} must be an integer from 1 through 5`);
+  }
+
   if (Object.hasOwn(project, 'maxAttempts') &&
       (!Number.isInteger(project.maxAttempts) || project.maxAttempts < 1 || project.maxAttempts > 10)) {
     throw new TypeError(`maxAttempts for project ${projectName} must be an integer from 1 through 10`);
@@ -155,6 +160,7 @@ function loadProjectConfig(projectName, options = {}) {
     // Keep the normal autonomous run bounded, while allowing an explicit
     // project policy to choose a different retry limit.
     maxAttempts: project.maxAttempts ?? 2,
+    maxReviewRounds: project.maxReviewRounds ?? 2,
     ...(project.implementationStrategy ? { implementationStrategy: project.implementationStrategy } : {}),
   };
 }

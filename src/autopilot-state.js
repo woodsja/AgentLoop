@@ -25,6 +25,8 @@ const CORRECTION_STATUSES = new Set(['eligible', 'running', 'passed', 'delivered
 const REVIEW_VERDICTS = new Set(['PASS', 'NEEDS_CHANGES']);
 const REVIEW_POLICIES = new Set(['risk', 'always']);
 const MAX_REVIEW_FINDINGS = 50;
+// Preserve histories from older reintegration jobs; new jobs are also
+// constrained by their persisted maxReviewRounds (at most five).
 const MAX_REVIEW_HISTORY = 8;
 const REVIEW_ATTEMPT_STATUSES = new Set(['running', 'completed', 'failed', 'timed_out', 'invalid_verdict', 'interrupted']);
 const JOB_FILE = /^issue-([1-9][0-9]*)\.json$/;
@@ -125,11 +127,12 @@ function writeJsonDurably(filePath, value) {
   fsyncDirectory(directory);
 }
 
-function createJob({ projectName, repo, issue, branch, worktreePath, now }) {
+function createJob({ projectName, repo, issue, branch, worktreePath, now, maxReviewRounds }) {
   validateIssueNumber(issue && issue.number);
   const timestamp = now();
   return {
     schemaVersion: SCHEMA_VERSION,
+    ...(maxReviewRounds !== undefined ? { maxReviewRounds, originalIssue: structuredClone(issue) } : {}),
     project: projectName,
     repo,
     issue: { number: issue.number, title: issue.title },
@@ -246,7 +249,8 @@ function validateJob(job, filePath) {
         && value.review.attempt.number <= (value.reviewAttempts ?? 0))));
   const hasValidReviewCorrection = value => value.reviewCorrection === undefined || value.reviewCorrection === null
     || (isPlainObject(value.reviewCorrection)
-      && value.reviewCorrection.cycle === 1
+      && Number.isSafeInteger(value.reviewCorrection.cycle)
+      && value.reviewCorrection.cycle >= 1 && value.reviewCorrection.cycle < (value.maxReviewRounds ?? 2)
       && CORRECTION_STATUSES.has(value.reviewCorrection.status)
       && typeof value.reviewCorrection.reviewCommit === 'string' && value.reviewCorrection.reviewCommit.length > 0
       && typeof value.reviewCorrection.reviewer === 'string' && value.reviewCorrection.reviewer.length > 0
@@ -326,9 +330,15 @@ function validateJob(job, filePath) {
                     && (entry.status === 'running' || typeof entry.completedAt === 'string')
                     && (entry.status !== 'retry_wait' || Number.isFinite(Date.parse(entry.nextEligibleAt)))
                     && (!entry.diagnostics || typeof entry.diagnostics.code === 'string' && typeof entry.diagnostics.message === 'string' && entry.diagnostics.message.length <= 2048))) ? 'invalid review preparation history'
+                : job.maxReviewRounds !== undefined && (!Number.isSafeInteger(job.maxReviewRounds) || job.maxReviewRounds < 1 || job.maxReviewRounds > 5) ? 'invalid maxReviewRounds'
                 : !hasValidReviewHistory(job) ? 'invalid review attempt history'
                 : !hasValidReviewSkip(job) ? 'invalid review skip state'
                 : !hasValidReviewCorrection(job) ? 'invalid reviewer corrective cycle state'
+                : job.reviewCorrectionHistory !== undefined && (!Array.isArray(job.reviewCorrectionHistory)
+                  || job.reviewCorrectionHistory.length !== Math.max(0, (job.reviewCorrectiveCycles ?? 0) - 1)
+                  || job.reviewCorrectionHistory.some((entry, index) => !hasValidReviewCorrection({ ...job, reviewCorrection: entry })
+                    || entry.cycle !== index + 1 || entry.status !== 'delivered' || !entry.commit)) ? 'invalid reviewer correction history'
+                : (job.reviewCorrectiveCycles ?? 0) > 1 && !job.reviewCorrectionHistory ? 'missing reviewer correction history'
                 : !hasValidCorrection(job) ? 'invalid corrective cycle state'
           : typeof job.terminal !== 'boolean' ? 'missing terminal flag'
             : !(job.terminalState === null || typeof job.terminalState === 'string') ? 'invalid terminal state'
@@ -336,9 +346,9 @@ function validateJob(job, filePath) {
               || !job.failures.every(hasValidFailure) ? 'invalid failure diagnostics'
               : !Number.isSafeInteger(job.runs) || job.runs < 0
                 || !Number.isSafeInteger(job.correctiveCycles) || ![0, 1].includes(job.correctiveCycles) ? 'invalid counters'
-                : job.reviewCorrectiveCycles !== undefined && (!Number.isSafeInteger(job.reviewCorrectiveCycles) || ![0, 1].includes(job.reviewCorrectiveCycles)) ? 'invalid review corrective counters'
-                : job.reviewAttempts !== undefined && (!Number.isSafeInteger(job.reviewAttempts) || job.reviewAttempts < 0) ? 'invalid review attempt counter'
-                : job.reviewCorrection && job.reviewCorrectiveCycles !== 1 ? 'review corrective cycle counter does not match state'
+                : job.reviewCorrectiveCycles !== undefined && (!Number.isSafeInteger(job.reviewCorrectiveCycles) || (job.reviewCorrectiveCycles < 0 || job.reviewCorrectiveCycles >= (job.maxReviewRounds ?? 2))) ? 'invalid review corrective counters'
+                : job.reviewAttempts !== undefined && (!Number.isSafeInteger(job.reviewAttempts) || job.reviewAttempts < 0 || job.reviewAttempts > (job.maxReviewRounds ?? MAX_REVIEW_HISTORY)) ? 'invalid review attempt counter'
+                : job.reviewCorrection && job.reviewCorrectiveCycles !== job.reviewCorrection.cycle ? 'review corrective cycle counter does not match state'
                 : typeof job.createdAt !== 'string' || !job.createdAt
                   || typeof job.updatedAt !== 'string' || !job.updatedAt ? 'missing timestamps'
                   : null;
@@ -503,6 +513,9 @@ function recordReviewSkip(job, { commit, reason }, now = () => new Date().toISOS
 // Each reviewer invocation consumes an attempt number before it starts, so a
 // crashed or failed review is still counted and never reused for a new record.
 function beginReviewAttempt(job, now = () => new Date().toISOString(), identity = null) {
+  if ((job.reviewAttempts ?? 0) >= (job.maxReviewRounds ?? MAX_REVIEW_HISTORY)) {
+    throw new TypeError('Independent review attempt limit reached; no history capacity remains');
+  }
   if (identity && (typeof identity.reviewer !== 'string' || !identity.reviewer.trim()
     || typeof identity.model !== 'string' || !identity.model.trim() || !REVIEW_POLICIES.has(identity.policy)
     || typeof identity.commit !== 'string' || !identity.commit.trim()
@@ -571,19 +584,26 @@ function recordReview(job, { reviewer, verdict, commit, policy, findings, attemp
   return job;
 }
 
-// Reviewer feedback has its own one-cycle budget.  It deliberately does not
-// share the CI counter: a green build can still need one code-review repair.
+// Reviewer corrections have a durable budget independent of CI corrections.
 function recordReviewCorrectiveCycle(job, { reviewCommit, reviewer, findings } = {}) {
-  if ((job.reviewCorrectiveCycles ?? 0) !== 0) {
-    throw new Error('Autopilot permits only one reviewer corrective cycle per issue');
+  if ((job.reviewCorrectiveCycles ?? 0) >= (job.maxReviewRounds ?? 2) - 1) {
+    throw new Error('Autopilot reviewer corrective cycle budget exhausted');
+  }
+  if (job.reviewCorrection && (job.reviewCorrection.status !== 'delivered'
+    || job.reviewCorrection.reviewCommit === reviewCommit)) {
+    throw new Error('Previous reviewer corrective cycle must be delivered before the next cycle');
   }
   if (typeof reviewCommit !== 'string' || !reviewCommit || typeof reviewer !== 'string' || !reviewer.trim()
     || typeof findings !== 'string' || !findings.trim()) {
     throw new TypeError('A reviewer corrective cycle requires the reviewed commit, reviewer identity, and findings');
   }
-  job.reviewCorrectiveCycles = 1;
+  if (job.reviewCorrection) {
+    job.reviewCorrectionHistory ??= [];
+    job.reviewCorrectionHistory.push(structuredClone(job.reviewCorrection));
+  }
+  job.reviewCorrectiveCycles = (job.reviewCorrectiveCycles ?? 0) + 1;
   job.reviewCorrection = {
-    cycle: 1, status: 'eligible', reviewCommit, reviewer: reviewer.trim(),
+    cycle: job.reviewCorrectiveCycles, status: 'eligible', reviewCommit, reviewer: reviewer.trim(),
     findings: diagnosticText(findings), commit: null,
   };
   return job;

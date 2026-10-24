@@ -16,6 +16,7 @@
     "autoMerge": false
   },
   "ralph": {
+    "maxReviewRounds": 5,
     "enabled": true,
     "repo": "woodsja/AgentLoop",
     "checkout": "/home/woodsja/tools/ralph",

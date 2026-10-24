@@ -23,6 +23,7 @@ const {
   recordVerification,
   hasPassingVerification,
   recordReviewSkip,
+  recordReviewCorrectiveCycle,
   resolveStateDir,
   selectIssueForJobs,
   summarizeRalphAttempt,
@@ -539,4 +540,44 @@ test('durable failure evidence retains the separate observation error and its ne
   assert.match(evidence.observationError.stack, /autopilot-state.test.js/);
   assert.equal(evidence.observationError.cause.message, parseError.message);
   assert.match(evidence.observationError.cause.stack, /autopilot-state.test.js/);
+});
+
+
+test('five-round state preserves all correction cycles and rejects corrupt budgets on reload', () => {
+  const store = createJobStore(temporaryDirectory());
+  let job = createJob({ projectName: 'demo', repo: 'example/repo', issue: { number: 147, title: 'Five rounds', body: 'Original requirements' }, branch: 'ralph/issue-147', worktreePath: null, now: store.now, maxReviewRounds: 5 });
+  for (let round = 1; round <= 5; round++) {
+    const commit = `sha-${round}`;
+    recordDelivery(job, { commit });
+    const attempt = beginReviewAttempt(job, store.now, { reviewer: 'claude:sonnet', model: 'sonnet', policy: 'always', commit });
+    recordReview(job, { reviewer: 'claude:sonnet', verdict: 'NEEDS_CHANGES', findings: `finding ${round}`, policy: 'always', commit, attempt }, store.now);
+    if (round < 5) {
+      recordReviewCorrectiveCycle(job, { reviewCommit: commit, reviewer: 'claude:sonnet', findings: `finding ${round}` });
+      assert.throws(() => recordReviewCorrectiveCycle(job, { reviewCommit: commit, reviewer: 'claude:sonnet', findings: 'duplicate' }));
+      job.reviewCorrection.status = 'delivered';
+      job.reviewCorrection.commit = `sha-${round + 1}`;
+    }
+    store.save(job);
+    job = createJobStore(store.directory).load(147);
+  }
+  assert.equal(job.schemaVersion, 1);
+  assert.equal(job.reviewAttempts, 5);
+  assert.equal(job.reviewCorrectionHistory.length, 3);
+  assert.deepEqual(job.reviewCorrectionHistory.map(entry => [entry.cycle, entry.reviewCommit, entry.commit]), [[1, 'sha-1', 'sha-2'], [2, 'sha-2', 'sha-3'], [3, 'sha-3', 'sha-4']]);
+  assert.throws(() => beginReviewAttempt(job, store.now), /limit/);
+  assert.throws(() => recordReviewCorrectiveCycle(job, { reviewCommit: 'sha-5', reviewer: 'claude:sonnet', findings: 'sixth round' }), /budget/);
+  for (const mutate of [
+    value => { value.maxReviewRounds = 6; },
+    value => { value.maxReviewRounds = 2; },
+    value => { value.reviewAttempts = 6; },
+    value => { value.reviewCorrectiveCycles = 5; },
+    value => { value.reviewCorrection.cycle = 3; },
+    value => { value.reviewCorrectionHistory.pop(); },
+    value => { value.reviewCorrectionHistory[0].cycle = 2; },
+    value => { value.reviewCorrectionHistory[0].status = 'running'; },
+  ]) {
+    const corrupt = structuredClone(job); mutate(corrupt);
+    fs.writeFileSync(path.join(store.directory, 'issue-147.json'), JSON.stringify(corrupt));
+    assert.throws(() => createJobStore(store.directory).load(147), /invalid/);
+  }
 });
