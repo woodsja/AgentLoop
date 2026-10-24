@@ -484,7 +484,9 @@ test('an always-review project persists a matching independent PASS before becom
       assert.deepEqual(context.pullRequest, { number: 99, url: 'https://github.com/example/repo/pull/99', headCommit: 'abc123' });
       assert.equal(context.headCommit, 'abc123');
       assert.deepEqual(context.verification, verifiedEvidence('abc123'));
+      assert.match(context.ci.observedAt, /^\d{4}-\d\d-\d\dT/);
       assert.deepEqual(context.ci, {
+        requiredWorkflow: 'CI', observedAt: context.ci.observedAt, providerError: false,
         state: 'green', details: 'CI (#501): completed/success', prNumber: 99, headCommit: 'abc123', runs: [],
       });
       // The terminal transition must follow a durable review checkpoint.
@@ -1054,7 +1056,9 @@ test('a red persisted PR CI observation is recorded without starting corrective 
   assert.equal(saved.status, 'correction_eligible');
   assert.equal(saved.correctiveCycles, 1);
   assert.equal(saved.terminal, false);
+  assert.match(saved.ci.observedAt, /^\d{4}-\d\d-\d\dT/);
   assert.deepEqual(saved.ci, {
+    requiredWorkflow: 'CI', observedAt: saved.ci.observedAt, providerError: false,
     state: 'red', details: 'CI (#601): completed/failure', prNumber: 99, headCommit: 'abc123',
     runs: [{ databaseId: 601, status: 'completed', conclusion: 'failure', name: 'test', workflowName: 'CI', url: 'https://example/run/601', startedAt: null, updatedAt: null }],
     diagnostics: 'diagnostics for abc123',
@@ -1470,7 +1474,9 @@ test('CI observation failures keep the job awaiting CI and never restart Ralph',
     const saved = createJobStore(store.directory).load(25);
     assert.equal(saved.status, 'awaiting_ci');
     assert.equal(saved.terminal, false);
-    assert.equal(saved.ci, null);
+    assert.equal(saved.ci.state, 'pending');
+    assert.equal(saved.ci.providerError, true);
+    assert.equal(saved.ci.headCommit, 'abc123');
   }
 
   let ralphStarted = false;
@@ -1481,6 +1487,7 @@ test('CI observation failures keep the job awaiting CI and never restart Ralph',
   }));
   assert.equal(ralphStarted, false);
   assert.equal(createJobStore(store.directory).load(25).ci.state, 'pending');
+  assert.equal(createJobStore(store.directory).load(25).ci.providerError, false);
 });
 
 test('reloads a failed job on the next run and resumes it with the persisted branch', async () => {

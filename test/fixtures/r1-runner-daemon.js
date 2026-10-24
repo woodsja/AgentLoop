@@ -70,11 +70,12 @@ require('../../src/daemon').start({ r1: {
     },
     observePullRequestCi: async (_project, pr) => {
       record('ci', { number: pr.number, at: Date.now() });
+      if (pr.number === fixture.gatedCi && fs.existsSync(file('ci-error'))) throw new Error(fixture.adversarial);
       const calls = (ciCalls.get(pr.commit) || 0) + 1;
       ciCalls.set(pr.commit, calls);
       const green = pr.number === fixture.neverGreen ? false
         : pr.number === fixture.gatedCi ? fs.existsSync(file('ci-release')) : calls > 1;
-      return { state: green ? 'green' : 'pending', details: green ? 'CI (#1): completed/success' : 'pending', headCommit: pr.commit, prNumber: pr.number, runs: [] };
+      return { state: green ? 'green' : 'pending', details: green ? 'CI (#1): completed/success' : 'pending', headCommit: pr.commit, prNumber: pr.number, runs: [{ databaseId: 1, status: green ? 'completed' : 'in_progress', conclusion: green ? 'success' : null, workflowName: project.ciWorkflow, name: null, url: null, startedAt: null, updatedAt: null }] };
     },
     reviewPullRequest: Object.assign(async context => {
       record('reviews', { number: context.pullRequest.number, commit: context.headCommit });

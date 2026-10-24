@@ -15,7 +15,7 @@ const reviewPullRequest = Object.assign(async context => {
   if (fs.existsSync(path.join(fixture.root, 'review-error'))) throw new Error('Fake reviewer failed: token=private');
   return { reviewer: 'claude:sonnet', verdict: 'PASS', commit: context.headCommit, policy: 'always', findings: [] };
 }, { reviewer: 'claude:sonnet', model: 'sonnet' });
-require('../../src/daemon').start({ r1: { ciPollMs: 50, autopilotDependencies: {
+require('../../src/daemon').start({ r1: { ciPollMs: fixture.ciPollMs ?? 50, autopilotDependencies: {
   loadProjectConfig: () => project,
   discoverReadyIssues: async () => [1, 2, 3, 4].map(number => ({ number, title: `Issue ${number}`, body: '## Acceptance criteria\n- Write the answer' })),
   findOpenIssuePullRequests: async () => [],
@@ -43,6 +43,15 @@ require('../../src/daemon').start({ r1: { ciPollMs: 50, autopilotDependencies: {
     await onProgress(delivery);
     return delivery;
   },
-  observePullRequestCi: async (_project, pr) => ({ state: 'green', headCommit: pr.commit, prNumber: pr.number }),
+  observePullRequestCi: async (_project, pr) => {
+    const input = path.join(fixture.root, 'ci-input.json');
+    if (!fs.existsSync(input)) return { state: 'green', headCommit: pr.commit, prNumber: pr.number };
+    fs.appendFileSync(path.join(fixture.root, 'ci-calls'), JSON.stringify(pr) + '\n');
+    const value = JSON.parse(fs.readFileSync(input));
+    if (value.error) throw new Error(value.error);
+    return require('../../src/autopilot-github').observePullRequestCi(project, pr, {
+      execFile: (_file, _args, _options, callback) => callback(null, JSON.stringify(value.runs || []), ''),
+    });
+  },
   reviewPullRequest,
 } } });
