@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  runGh,
   discoverReadyIssues,
   selectReadyIssue,
   observePullRequestCi,
@@ -11,6 +12,21 @@ const {
   reconcileIssueClosure,
   collectCiFailureDiagnostics,
 } = require('../src/autopilot-github');
+
+test('GitHub transport preserves resource failure cause and complete callback diagnostics', async () => {
+  const cause = Object.assign(new Error('stdout maxBuffer length exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+  const stdout = 'owner token=raw\r\n' + 'x'.repeat(1024 * 1024) + '\0end';
+  const stderr = 'raw stderr\r\n\u001b[31m';
+  await assert.rejects(runGh(['api', 'repos/example/repo/issues'], (file, args, options, cb) => cb(cause, stdout, stderr)), failure => {
+    assert.equal(failure.code, 'AUTOPILOT_GITHUB_TRANSPORT');
+    assert.equal(failure.transportCode, cause.code);
+    assert.equal(failure.cause, cause);
+    assert.equal(failure.stdout, stdout);
+    assert.equal(failure.stderr, stderr);
+    assert.match(failure.message, /ERR_CHILD_PROCESS_STDIO_MAXBUFFER.*maxBuffer/);
+    return true;
+  });
+});
 
 function ghResponse(stdout, error = null, stderr = '') {
   return (file, args, options, callback) => {
