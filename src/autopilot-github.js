@@ -12,7 +12,7 @@ function runGh(args, executeFile = execFile, operation = 'GitHub issue discovery
     try {
       executeFile('gh', args, unattendedOptions({ encoding: 'utf8', maxBuffer, shell: false }), (error, stdout, stderr) => {
         if (error) {
-          const failure = new Error(`${operation} failed: gh exited unsuccessfully${stderr ? `: ${String(stderr).trim()}` : ''}`);
+          const failure = new Error(`${operation} failed: gh exited unsuccessfully: ${error.code === undefined ? '' : `[${error.code}] `}${error.message}${stderr ? `: ${String(stderr).trim()}` : ''}`, { cause: error });
           // Keep the transport result structured for callers which need to
           // decide whether an operation may safely be retried.
           failure.code = 'AUTOPILOT_GITHUB_TRANSPORT';
@@ -33,7 +33,7 @@ function runGh(args, executeFile = execFile, operation = 'GitHub issue discovery
         resolve(String(stdout));
       });
     } catch (error) {
-      reject(new Error(`${operation} failed: unable to execute gh: ${error.message}`));
+      reject(new Error(`${operation} failed: unable to execute gh: ${error.code === undefined ? '' : `[${error.code}] `}${error.message}`, { cause: error }));
     }
   });
 }

@@ -84,24 +84,97 @@ async function reconcile(project, store, options = {}) {
     } finally { lock.release(); }
   }
 }
+// Ten full GitHub issue bodies fit an ordinary adapter buffer in normal use.
+// An oversized individual page still fails closed; no whole-history buffer or
+// stdout filtering is used, so execution-log captures every raw response.
+const HISTORY_PAGE_SIZE = 10;
+const MAX_HISTORY_PAGES = 10000;
+const exactMarker = (body, marker) => typeof body === 'string'
+  && body.split(/\r?\n/).some(line => line === marker);
+function validHistoryIssue(issue) {
+  return issue && typeof issue === 'object' && !Array.isArray(issue)
+    && Number.isSafeInteger(issue.number) && issue.number > 0
+    && ['open', 'closed'].includes(issue.state)
+    && (typeof issue.body === 'string' || issue.body === null)
+    && typeof issue.html_url === 'string' && issue.html_url.length > 0
+    && (issue.assignees === undefined || (Array.isArray(issue.assignees)
+      && issue.assignees.every(a => a && typeof a.login === 'string')));
+}
+async function findDecision(gh, repo, marker) {
+  const seen = new Set();
+  let match, advertisedLastPage = 1;
+  for (let page = 1; page <= MAX_HISTORY_PAGES; page++) {
+    // Ascending creation order avoids offset shifts when new issues are added.
+    const endpoint = `repos/${repo}/issues?state=all&sort=created&direction=asc&per_page=${HISTORY_PAGE_SIZE}&page=${page}`;
+    const raw = await gh(['api', '--include', endpoint]);
+    const separator = /\r?\n\r?\n/.exec(raw);
+    if (!separator || !/^HTTP\/[^ ]+ 200(?: |\r?\n)/.test(raw)) throw new Error('Decision history page missing successful HTTP headers');
+    const headers = raw.slice(0, separator.index).split(/\r?\n/).slice(1);
+    const links = headers.filter(line => /^link:/i.test(line));
+    if (links.length > 1) throw new Error('Ambiguous decision history pagination');
+    let hasNext = false, lastPage;
+    if (links.length) {
+      const relations = new Set();
+      for (const link of links[0].slice(5).trim().split(/,\s*/)) {
+        const parsed = /^<([^>]+)>;\s*rel="(next|prev|first|last)"$/.exec(link);
+        if (!parsed || relations.has(parsed[2])) throw new Error('Malformed decision history pagination');
+        relations.add(parsed[2]);
+        const url = new URL(parsed[1]);
+        const expected = new URL(`https://example.invalid/${endpoint}`);
+        const ghHost = String(process.env.GH_HOST || 'github.com').toLowerCase();
+        const hosts = ghHost === 'github.com' ? ['api.github.com'] : [ghHost, `api.${ghHost}`];
+        const targetPage = Number(url.searchParams.get('page'));
+        if (url.protocol !== 'https:' || !hosts.includes(url.hostname) || url.username || url.password || url.hash
+          || (url.port && url.port !== '443')
+          || ![expected.pathname, `/api/v3${expected.pathname}`].includes(url.pathname)
+          || [...url.searchParams].length !== [...expected.searchParams].length
+          || [...expected.searchParams].some(([key, value]) => key !== 'page' && url.searchParams.get(key) !== value)
+          || !Number.isSafeInteger(targetPage) || targetPage < 1
+          || (parsed[2] === 'next' && targetPage !== page + 1)
+          || (parsed[2] === 'prev' && targetPage !== page - 1)
+          || (parsed[2] === 'first' && targetPage !== 1)
+          || (parsed[2] === 'last' && targetPage < page)) {
+          throw new Error('Unexpected decision history pagination target');
+        }
+        if (parsed[2] === 'next') hasNext = true;
+        if (parsed[2] === 'last') lastPage = targetPage;
+      }
+    }
+    advertisedLastPage = Math.max(advertisedLastPage, lastPage || page, hasNext ? page + 1 : page);
+    if (advertisedLastPage > page && !hasNext) throw new Error('Partial decision history pagination; next page missing');
+    const issues = JSON.parse(raw.slice(separator.index + separator[0].length));
+    if (!Array.isArray(issues) || issues.length > HISTORY_PAGE_SIZE
+      || (hasNext && issues.length !== HISTORY_PAGE_SIZE) || !issues.every(validHistoryIssue)) {
+      throw new Error('Malformed or partial decision history page');
+    }
+    for (const issue of issues) {
+      if (seen.has(issue.number)) throw new Error('Duplicate issue across decision history pages; owner reconciliation required');
+      seen.add(issue.number);
+      if (!Object.hasOwn(issue, 'pull_request') && exactMarker(issue.body, marker)) {
+        if (match) throw new Error('Multiple decision issues have the same identity; owner reconciliation required');
+        match = issue;
+      }
+    }
+    if (!hasNext) return match;
+  }
+  throw new Error('Decision history page resource limit exceeded; owner reconciliation required');
+}
 async function publish(project, job, store, options = {}) {
   const d = job.architectureDecision;
   if (!d || d.publication === 'complete') return;
   const gh = args => runGh(args, options.execFile, 'Architecture decision publication');
   const save = () => store.save(job);
   try {
-    // Paginated, all-state reconciliation uses exact body identity, not search indexing.
-    const pages = JSON.parse(await gh(['api', '--paginate', '--slurp', `repos/${project.repo}/issues?state=all&per_page=100`]));
-    const matches = pages.flat().filter(i => !i.pull_request && typeof i.body === 'string' && i.body.includes(d.marker));
-    if (matches.length > 1) throw new Error('Multiple decision issues have the same identity; owner reconciliation required');
-    let remote = matches[0];
+    let remote = await findDecision(gh, project.repo, d.marker);
     if (!remote && d.createAttempted) throw new Error('Decision creation outcome uncertain; awaiting remote reconciliation, no duplicate creation attempted');
     if (!remote) {
       await gh(['label', 'create', 'needs-owner-decision', '--repo', project.repo, '--color', 'D876E3', '--description', 'Non-executable owner architecture decision', '--force']);
       d.createAttempted = true; save();
       remote = JSON.parse(await gh(['api', '--method', 'POST', `repos/${project.repo}/issues`, '-f', `title=Architecture decision: ${d.proposal.problem.slice(0, 160)}`, '-f', `body=${bodyFor(job, project.decisionOwner)}`, '-f', 'labels[]=needs-owner-decision']));
     }
-    if (!Number.isSafeInteger(remote.number)) throw new Error('Decision publication returned no issue number');
+    if (!validHistoryIssue(remote) || Object.hasOwn(remote, 'pull_request') || !exactMarker(remote.body, d.marker)) {
+      throw new Error('Decision publication returned an ambiguous issue identity');
+    }
     d.issue = { number: remote.number, url: remote.html_url }; save();
     await gh(['issue', 'edit', String(remote.number), '--repo', project.repo, '--add-label', 'needs-owner-decision', '--remove-label', project.readyLabel]);
     if (d.notification.status === 'pending') {
@@ -124,9 +197,15 @@ async function publish(project, job, store, options = {}) {
       }
       save();
     }
-    d.publication = 'complete'; delete d.publicationError; save();
+    d.publication = 'complete'; delete d.publicationError; delete d.publicationFailure; save();
   } catch (error) {
-    d.publicationError = error.message; save();
+    d.publicationError = error.message;
+    d.publicationFailure = { message: error.message, stack: error.stack, code: error.code,
+      statusCode: error.statusCode, retryable: error.retryable,
+      cause: error.cause && { message: error.cause.message, stack: error.cause.stack,
+        code: error.cause.code, statusCode: error.cause.statusCode, signal: error.cause.signal, killed: error.cause.killed } };
+    require('./execution-log').currentRecorder()?.('architecture_publication_failure', d.publicationFailure);
+    save();
   }
 }
 module.exports = { captureAdmission: require('./architecture-decision-admission').capture, reconcile, FILE, context, instructions, readProposal, pause, publish, bodyFor };

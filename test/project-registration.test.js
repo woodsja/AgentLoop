@@ -159,8 +159,19 @@ test('SIGTERM during a real check preserves complete diagnostics, stops setup an
   t.after(() => { try { child.kill('SIGKILL'); } catch {} });
   const exited = new Promise(resolve => child.on('close', code => resolve(code)));
   const deadline = Date.now() + 15000;
-  while (!fs.existsSync(started)) {
-    if (Date.now() > deadline) assert.fail('check failed to start');
+  // The started file precedes console output. Wait for the journal to capture
+  // the diagnostics this test intends to preserve before cancelling the check.
+  const diagnosticsCaptured = () => {
+    if (!fs.existsSync(started)) return false;
+    const logs = path.join(f.root, 'state/logs');
+    const file = fs.readdirSync(logs).find(file => file.endsWith('.execution.ndjson'));
+    if (!file) return false;
+    const records = fs.readFileSync(path.join(logs, file), 'utf8').split('\n').slice(0, -1).filter(Boolean).map(JSON.parse);
+    const captured = stream => Buffer.concat(records.filter(r => r.event === 'output' && r.stream === stream).map(r => Buffer.from(r.base64, 'base64'))).toString();
+    return /Y{30000}/.test(captured('stdout')) && captured('stderr').includes('signal check stderr');
+  };
+  while (!diagnosticsCaptured()) {
+    if (Date.now() > deadline) assert.fail('check diagnostics were not captured');
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   await assert.rejects(f.run('check'), /Concurrent onboarding/);
