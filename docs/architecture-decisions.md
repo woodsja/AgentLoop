@@ -36,7 +36,13 @@ unavailable, failed or interrupted notification is visible and leaves the job
 paused. The initial owner mention is part of the single issue body.
 
 Existing scheduler passes reconcile incomplete publication under the original
-issue lock, using paginated all-state GitHub issue enumeration. A lost creation
+issue lock, using paginated all-state GitHub issue enumeration. Reconciliation
+reads and validates one page of 100 entries at a time, including closed issues,
+without a total-history subprocess buffer limit. Even a single page may exceed
+1 MiB; only this read removes the subprocess byte cap. Complete captured stdout
+and stderr remain in the execution journal. Failed or malformed pages block
+publication, and subprocess diagnostics retain the underlying error code and
+message, including buffer or resource failures. A lost creation
 response is recovered by exact marker, without creating a second issue. If a
 create was attempted but no remote match can be found, publication remains
 visibly uncertain and requires owner reconciliation rather than blindly
