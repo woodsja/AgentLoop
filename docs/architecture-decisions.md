@@ -43,6 +43,18 @@ visibly uncertain and requires owner reconciliation rather than blindly
 repeating POST. Repeated scans do not repeat assignment. Independent eligible
 issues continue through the existing admission path; there is no new daemon.
 
+Decision reconciliation reads canonical open and closed issue history in pages
+of ten, in ascending creation order, following validated HTTP pagination through
+the final page before any publication write. PRs and near-matching marker lines
+are excluded. Only issue numbers and one matching issue survive between pages;
+complete raw subprocess responses remain in the owner execution journal. The
+ordinary subprocess buffer and timeout stay unchanged. Malformed or partial
+pages, duplicate issue numbers or markers, transport/resource errors, or the
+10,000-page scan limit leave the original job paused. Publication diagnostics
+retain the child-process code/message, transport status and cause in canonical
+failure evidence and the execution journal. An ambiguous creation response keeps
+`createAttempted`, preventing another POST on retry or restart.
+
 Validation: `node test/architecture-decisions.test.js` exercises the worker,
 verification, temporary durable job store and fake GitHub at the existing
 one-shot autopilot seam, including lost responses and failed notification.

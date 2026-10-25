@@ -28,9 +28,10 @@ function fixture(t) {
     calls.push(args);
     const original = issues.find(i => args[1] === `repos/example/repo/issues/${i.number}`);
     if (original) return cb(null, JSON.stringify({ ...original, state: 'open', html_url: `https://github.com/example/repo/issues/${original.number}`, labels: [{ name: 'ready-for-agent' }] }));
+    if (args.includes('--include')) return cb(null, pageResponse(remote));
     if (args.includes('--slurp')) return cb(null, JSON.stringify([remote]));
     if (args.includes('POST')) {
-      const issue = { number: 50, html_url: 'https://github.com/example/repo/issues/50', body: args.find(a => a.startsWith('body=')).slice(5), assignees: [] };
+      const issue = { state: 'open', number: 50, html_url: 'https://github.com/example/repo/issues/50', body: args.find(a => a.startsWith('body=')).slice(5), assignees: [] };
       remote.push(issue);
       return loseCreate ? cb(new Error('connection lost'), '', 'lost create response') : cb(null, JSON.stringify(issue));
     }
@@ -118,3 +119,173 @@ test('restart recovers a completed proposal before workspace cleanup or another 
   assert.equal(evidence(result.job).architectureDecision.issue.number, 50);
   assert.equal(nextAction({ status: 'paused_owner_decision' }, evidence(result.job)).action, 'owner_decision');
 });
+
+function pageResponse(items, next) {
+  return 'HTTP/2.0 200 OK\r\n' + (next ? `Link: <https://api.github.com/repos/example/repo/issues?state=all&sort=created&direction=asc&per_page=10&page=${next}>; rel="next"\r\n` : '') + '\r\n' + JSON.stringify(items);
+}
+function historyIssue(number, body = '') {
+  return { number, body, state: 'closed', html_url: `https://github.com/example/repo/issues/${number}` };
+}
+async function pausedFixture(t) {
+  const f = fixture(t);
+  await run(['--project', 'demo'], f.dependencies);
+  const job = f.store.load(1);
+  job.architectureDecision.publication = 'pending';
+  delete job.architectureDecision.issue;
+  job.architectureDecision.notification = { status: 'pending', attempts: [] };
+  delete job.architectureDecision.createAttempted;
+  f.store.save(job);
+  return { ...f, job };
+}
+for (const linkPath of ['repos/example/repo/issues', 'repositories/123456/issues', 'repos/EXAMPLE/Repo/issues', 'api/v3/repositories/123456/issues']) {
+test(`public reconciliation scans over 1 MiB across all pages with ${linkPath} links before accepting a closed exact marker`, async t => {
+  const f = await pausedFixture(t), marker = f.job.architectureDecision.marker;
+  const pages = Array.from({ length: 3 }, (_, page) => Array.from({ length: 10 }, (_, i) => historyIssue(page * 10 + i + 100, 'x'.repeat(45000))));
+  pages[1][4].body = marker;
+  assert.ok(Buffer.byteLength(JSON.stringify(pages)) > 1024 * 1024);
+  const reads = [], writes = [];
+  const execFile = (file, args, options, cb) => {
+    assert.equal(options.maxBuffer, 1024 * 1024);
+    if (args.includes('--slurp')) {
+      const aggregate = JSON.stringify(pages);
+      return cb(Object.assign(new Error('stdout maxBuffer length exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }), aggregate.slice(0, options.maxBuffer), '');
+    }
+    if (args.includes('--include')) {
+      const endpoint = args.at(-1);
+      assert.match(endpoint, /state=all&sort=created&direction=asc&per_page=10&page=/);
+      const page = Number(new URL('https://api.github.com/' + endpoint).searchParams.get('page'));
+      reads.push(page);
+      return cb(null, pageResponse(pages[page - 1], page < 3 ? page + 1 : null)
+        .replace('repos/example/repo/issues?', `${linkPath}?`));
+    }
+    assert.equal(reads.length, 3, 'no write before complete scan');
+    writes.push(args); cb(null, '');
+  };
+  await decisions.reconcile(f.project, f.store, { execFile });
+  const saved = f.store.load(1);
+  assert.deepEqual(reads, [1, 2, 3]);
+  assert.equal(saved.architectureDecision.issue.number, 114);
+  assert.equal(saved.architectureDecision.publication, 'complete');
+  assert.ok(!writes.some(a => a.includes('POST')));
+  assert.deepEqual(saved.architectureDecision.pausedExecution, f.job.architectureDecision.pausedExecution);
+  assert.equal(saved.worktreePath, f.job.worktreePath);
+  assert.deepEqual(saved.admission, f.job.admission);
+  assert.equal(saved.runs, f.job.runs);
+  assert.equal(saved.status, 'paused_owner_decision');
+});
+}
+test('publication failure is durable even when the execution recorder throws', async t => {
+  const f = await pausedFixture(t);
+  const { withExecution } = require('../src/execution-log');
+  await assert.rejects(withExecution(() => { throw new Error('recorder unavailable'); }, () =>
+    decisions.publish(f.project, f.job, f.store, { execFile: (_file, _args, _options, cb) => {
+      cb(Object.assign(new Error('page read timed out'), { code: 'ETIMEDOUT' }), '', '');
+    } })), /recorder unavailable/);
+  const saved = f.store.load(1);
+  assert.match(saved.architectureDecision.publicationError, /ETIMEDOUT/);
+  assert.equal(saved.architectureDecision.publicationFailure.cause.code, 'ETIMEDOUT');
+  assert.equal(saved.architectureDecision.publication, 'pending');
+  assert.equal(saved.architectureDecision.createAttempted, undefined);
+});
+for (const scenario of ['duplicate markers', 'duplicate number', 'timeout', 'resource limit', 'garbled', 'partial', 'bad shape', 'PR and near matches', 'uncertain POST']) {
+  test(`history scan fails closed: ${scenario}`, async t => {
+    const f = await pausedFixture(t), marker = f.job.architectureDecision.marker;
+    if (['PR and near matches', 'uncertain POST'].includes(scenario)) {
+      f.job.architectureDecision.createAttempted = true; f.store.save(f.job);
+    }
+    let reads = 0;
+    const writes = [];
+    const execFile = (file, args, options, cb) => {
+      if (!args.includes('--include')) { writes.push(args); return cb(new Error('Unexpected write')); }
+      reads++;
+      if (reads === 1) return cb(null, pageResponse(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i, i === 0 && !['PR and near matches', 'uncertain POST'].includes(scenario) ? marker : '')), 2));
+      if (scenario === 'timeout' || scenario === 'resource limit') return cb(Object.assign(new Error('page read failed'), { code: scenario === 'timeout' ? 'ETIMEDOUT' : 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }), '', 'raw diagnostics');
+      if (scenario === 'garbled') return cb(null, 'HTTP/2.0 200 OK\r\n\r\n{broken');
+      if (scenario === 'partial') return cb(null, pageResponse([], 3));
+      if (scenario === 'bad shape') return cb(null, pageResponse([{}]));
+      const items = scenario === 'duplicate markers' ? [historyIssue(200, marker)] : scenario === 'duplicate number' ? [historyIssue(100)] : scenario === 'PR and near matches' ? [ { ...historyIssue(200, marker), pull_request: {} }, historyIssue(201, marker + 'suffix'), historyIssue(202, marker.replace(' -->', 'x -->')) ] : [];
+      cb(null, pageResponse(items));
+    };
+    await decisions.reconcile(f.project, f.store, { execFile });
+    const saved = f.store.load(1);
+    assert.ok(saved.architectureDecision.publicationError);
+    if (scenario === 'resource limit' || scenario === 'timeout') {
+      assert.equal(saved.architectureDecision.publicationFailure.code, 'AUTOPILOT_GITHUB_TRANSPORT');
+      assert.equal(saved.architectureDecision.publicationFailure.cause.code, scenario === 'timeout' ? 'ETIMEDOUT' : 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+    }
+    assert.equal(saved.architectureDecision.publication, 'pending');
+    assert.equal(saved.architectureDecision.notification.status, 'pending');
+    assert.deepEqual(saved.architectureDecision.pausedExecution, f.job.architectureDecision.pausedExecution);
+    assert.equal(saved.status, 'paused_owner_decision');
+    assert.equal(reads, 2);
+    assert.deepEqual(writes, []);
+  });
+}
+
+test('complete marker-free scan precedes POST; ambiguous response is durable and never notifies or retries create', async t => {
+  const f = await pausedFixture(t);
+  let reads = 0, posts = 0;
+  const execFile = (_file, args, _options, cb) => {
+    if (args.includes('--include')) {
+      reads++;
+      return cb(null, pageResponse(reads % 2 ? Array.from({ length: 10 }, (_, i) => i === 0
+        ? { ...historyIssue(100, f.job.architectureDecision.marker), pull_request: {} }
+        : historyIssue(100 + i, f.job.architectureDecision.marker + 'suffix')) : [], reads % 2 ? 2 : null));
+    }
+    assert.equal(reads, 2);
+    if (args.includes('POST')) {
+      posts++;
+      assert.equal(f.store.load(1).architectureDecision.createAttempted, true);
+      return cb(null, JSON.stringify(historyIssue(300, 'unrelated body')));
+    }
+    assert.equal(args[0], 'label', 'ambiguous issue must never be edited or assigned');
+    cb(null, '');
+  };
+  await decisions.publish(f.project, f.job, f.store, { execFile });
+  const saved = f.store.load(1);
+  assert.match(saved.architectureDecision.publicationError, /ambiguous/);
+  assert.equal(saved.architectureDecision.createAttempted, true);
+  await decisions.reconcile(f.project, createJobStore(f.store.directory), { execFile });
+  assert.equal(reads, 4);
+  assert.equal(posts, 1);
+  assert.match(f.store.load(1).architectureDecision.publicationError, /uncertain/);
+});
+test('a later page cannot terminate before the previously advertised last page', async t => {
+  const f = await pausedFixture(t);
+  let reads = 0;
+  const writes = [];
+  await decisions.reconcile(f.project, f.store, { execFile: (_file, args, _options, cb) => {
+    if (!args.includes('--include')) { writes.push(args); return cb(new Error('Unexpected write')); }
+    reads++;
+    const first = pageResponse(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i)), 2)
+      .replace('; rel="next"', '; rel="next", <https://api.github.com/repos/example/repo/issues?state=all&sort=created&direction=asc&per_page=10&page=3>; rel="last"');
+    cb(null, reads === 1 ? first : pageResponse([]));
+  } });
+  assert.equal(reads, 2);
+  assert.match(f.store.load(1).architectureDecision.publicationError, /Partial decision history pagination/);
+  assert.deepEqual(writes, []);
+});
+for (const response of [
+  '[]',
+  'HTTP/2.0 206 Partial Content\r\n\r\n[]',
+  'HTTP/2.0 200 OK\r\nLink: broken\r\n\r\n[]',
+  pageResponse([], 1),
+  pageResponse([], 2).replace('rel="next"', 'rel="last"'),
+  pageResponse([], 2).replace('state=all', 'state=open'),
+  pageResponse([], 2).replace('api.github.com', 'unrelated.example'),
+  pageResponse([], 2).replace('repos/example/repo/issues', 'repos/example/other/issues'),
+  pageResponse([], 2).replace('repos/example/repo/issues', 'repositories/not-a-number/issues'),
+  pageResponse([], 2).replace('https:', 'http:'),
+]) {
+  test('invalid pagination or HTTP response stops publication before any write', async t => {
+    const f = await pausedFixture(t);
+    const writes = [];
+    await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
+      if (!args.includes('--include')) writes.push(args);
+      cb(null, response);
+    } });
+    assert.ok(f.store.load(1).architectureDecision.publicationError);
+    assert.equal(f.store.load(1).architectureDecision.notification.status, 'pending');
+    assert.deepEqual(writes, []);
+  });
+}

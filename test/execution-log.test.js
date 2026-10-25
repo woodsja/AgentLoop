@@ -415,3 +415,19 @@ test('projection write failures preserve canonical checkpoints and cache reads; 
     }
   } finally {console.error=previous;}
 });
+
+test('GitHub resource failure keeps full captured pipes in the owner journal and precise transport cause', async () => {
+  const { runGh } = require('../src/autopilot-github');
+  const id = 't-gh-resource';
+  const stdout = Buffer.from('owner stdout\r\n'.repeat(100));
+  const stderr = Buffer.from('owner stderr\r\n');
+  await withExecution(recorder(store, id), () => assert.rejects(runGh(['api', 'synthetic'], (_file, _args, options, cb) => {
+    assert.equal(options.maxBuffer, 1024 * 1024, 'ordinary gh buffer unchanged');
+    return execFile(process.execPath, ['-e', `require('fs').writeFileSync(2, Buffer.from('${stderr.toString('base64')}', 'base64')); require('fs').writeFileSync(1, Buffer.from('${stdout.toString('base64')}', 'base64'));`], { ...options, maxBuffer: 128 }, cb);
+  }), error => error.code === 'AUTOPILOT_GITHUB_TRANSPORT'
+    && error.cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+    && error.message.includes('ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+    && error.message.includes('maxBuffer')));
+  assert.deepEqual(output(id, 'stdout'), stdout);
+  assert.deepEqual(output(id, 'stderr'), stderr);
+});

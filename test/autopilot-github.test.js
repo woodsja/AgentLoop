@@ -414,3 +414,16 @@ test('decision issues never enter admission even with a ready label or duplicate
   const adr = { ...normal, body: marked.body + ' ADR proposal\nSeparately released ADR delivery' };
   assert.equal(selectReadyIssue([adr]).number, 3);
 });
+
+test('transport errors retain actionable subprocess diagnostics, cause and HTTP status', async () => {
+  const { runGh } = require('../src/autopilot-github');
+  for (const code of ['ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'ENOMEM', 'ETIMEDOUT']) {
+    const cause = Object.assign(new Error('stdout maxBuffer length exceeded'), { code, statusCode: 503 });
+    await assert.rejects(runGh(['api', 'example'], (_file, _args, options, cb) => {
+      assert.equal(options.maxBuffer, 1024 * 1024);
+      cb(cause, 'raw stdout', 'raw stderr');
+    }), error => error.code === 'AUTOPILOT_GITHUB_TRANSPORT' && error.retryable === true
+      && error.statusCode === 503 && error.cause === cause && error.message.includes(code)
+      && error.message.includes(cause.message));
+  }
+});
