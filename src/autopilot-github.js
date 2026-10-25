@@ -12,15 +12,11 @@ function runGh(args, executeFile = execFile, operation = 'GitHub issue discovery
     try {
       executeFile('gh', args, unattendedOptions({ encoding: 'utf8', maxBuffer, shell: false }), (error, stdout, stderr) => {
         if (error) {
-          const detail = `${error.code ? ` [${error.code}]` : ''}${error.message ? `: ${error.message}` : ''}`;
-          const failure = new Error(`${operation} failed: gh exited unsuccessfully${detail}${stderr ? `: ${String(stderr).trim()}` : ''}`, { cause: error });
+          const failure = new Error(`${operation} failed: gh exited unsuccessfully${stderr ? `: ${String(stderr).trim()}` : ''}`);
           // Keep the transport result structured for callers which need to
           // decide whether an operation may safely be retried.
           failure.code = 'AUTOPILOT_GITHUB_TRANSPORT';
           failure.retryable = true;
-          failure.transportCode = error.code;
-          failure.stdout = stdout;
-          failure.stderr = stderr;
           // Adapters which expose an HTTP status (including test adapters)
           // retain it without scraping the human-oriented gh stderr text.
           if (Number.isInteger(error.statusCode)) failure.statusCode = error.statusCode;
@@ -37,7 +33,7 @@ function runGh(args, executeFile = execFile, operation = 'GitHub issue discovery
         resolve(String(stdout));
       });
     } catch (error) {
-      reject(new Error(`${operation} failed: unable to execute gh${error.code ? ` [${error.code}]` : ''}: ${error.message}`, { cause: error }));
+      reject(new Error(`${operation} failed: unable to execute gh: ${error.message}`));
     }
   });
 }

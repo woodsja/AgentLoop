@@ -91,26 +91,10 @@ async function publish(project, job, store, options = {}) {
   const save = () => store.save(job);
   try {
     // Paginated, all-state reconciliation uses exact body identity, not search indexing.
-    let remote;
-    for (let page = 1; ; page++) {
-      // Retain only one REST page at a time, rather than slurping repository
-      // history. A page of 100 issue bodies can itself exceed 1 MiB. Remove
-      // execFile's byte cap for this read only; pagination bounds retained
-      // history and the execution recorder still captures both pipes verbatim.
-      const issues = JSON.parse(await runGh(['api', `repos/${project.repo}/issues?state=all&per_page=100&page=${page}`],
-        options.execFile, 'Architecture decision publication', Infinity));
-      if (!Array.isArray(issues) || issues.length > 100 || issues.some(i => !i || !Number.isSafeInteger(i.number)
-        || i.number < 1 || !(i.body === null || typeof i.body === 'string'))) {
-        throw new Error('Decision reconciliation returned an unexpected issue page; no creation attempted');
-      }
-      for (const issue of issues) {
-        if (!issue.pull_request && typeof issue.body === 'string' && issue.body.includes(d.marker)) {
-          if (remote) throw new Error('Multiple decision issues have the same identity; owner reconciliation required');
-          remote = issue;
-        }
-      }
-      if (issues.length < 100) break;
-    }
+    const pages = JSON.parse(await gh(['api', '--paginate', '--slurp', `repos/${project.repo}/issues?state=all&per_page=100`]));
+    const matches = pages.flat().filter(i => !i.pull_request && typeof i.body === 'string' && i.body.includes(d.marker));
+    if (matches.length > 1) throw new Error('Multiple decision issues have the same identity; owner reconciliation required');
+    let remote = matches[0];
     if (!remote && d.createAttempted) throw new Error('Decision creation outcome uncertain; awaiting remote reconciliation, no duplicate creation attempted');
     if (!remote) {
       await gh(['label', 'create', 'needs-owner-decision', '--repo', project.repo, '--color', 'D876E3', '--description', 'Non-executable owner architecture decision', '--force']);
