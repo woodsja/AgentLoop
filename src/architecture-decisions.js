@@ -126,7 +126,8 @@ async function findDecision(gh, repo, marker) {
         const targetPage = Number(url.searchParams.get('page'));
         if (url.protocol !== 'https:' || !hosts.includes(url.hostname) || url.username || url.password || url.hash
           || (url.port && url.port !== '443')
-          || ![expected.pathname, `/api/v3${expected.pathname}`].includes(url.pathname)
+          || (![expected.pathname.toLowerCase(), `/api/v3${expected.pathname.toLowerCase()}`].includes(url.pathname.toLowerCase())
+            && !/^\/(?:api\/v3\/)?repositories\/[0-9]+\/issues$/.test(url.pathname))
           || [...url.searchParams].length !== [...expected.searchParams].length
           || [...expected.searchParams].some(([key, value]) => key !== 'page' && url.searchParams.get(key) !== value)
           || !Number.isSafeInteger(targetPage) || targetPage < 1
@@ -204,8 +205,8 @@ async function publish(project, job, store, options = {}) {
       statusCode: error.statusCode, retryable: error.retryable,
       cause: error.cause && { message: error.cause.message, stack: error.cause.stack,
         code: error.cause.code, statusCode: error.cause.statusCode, signal: error.cause.signal, killed: error.cause.killed } };
-    require('./execution-log').currentRecorder()?.('architecture_publication_failure', d.publicationFailure);
     save();
+    require('./execution-log').currentRecorder()?.('architecture_publication_failure', d.publicationFailure);
   }
 }
 module.exports = { captureAdmission: require('./architecture-decision-admission').capture, reconcile, FILE, context, instructions, readProposal, pause, publish, bodyFor };

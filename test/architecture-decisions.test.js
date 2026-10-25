@@ -137,7 +137,8 @@ async function pausedFixture(t) {
   f.store.save(job);
   return { ...f, job };
 }
-test('public reconciliation scans over 1 MiB across all pages before accepting a closed exact marker', async t => {
+for (const linkPath of ['repos/example/repo/issues', 'repositories/123456/issues', 'repos/EXAMPLE/Repo/issues', 'api/v3/repositories/123456/issues']) {
+test(`public reconciliation scans over 1 MiB across all pages with ${linkPath} links before accepting a closed exact marker`, async t => {
   const f = await pausedFixture(t), marker = f.job.architectureDecision.marker;
   const pages = Array.from({ length: 3 }, (_, page) => Array.from({ length: 10 }, (_, i) => historyIssue(page * 10 + i + 100, 'x'.repeat(45000))));
   pages[1][4].body = marker;
@@ -154,7 +155,8 @@ test('public reconciliation scans over 1 MiB across all pages before accepting a
       assert.match(endpoint, /state=all&sort=created&direction=asc&per_page=10&page=/);
       const page = Number(new URL('https://api.github.com/' + endpoint).searchParams.get('page'));
       reads.push(page);
-      return cb(null, pageResponse(pages[page - 1], page < 3 ? page + 1 : null));
+      return cb(null, pageResponse(pages[page - 1], page < 3 ? page + 1 : null)
+        .replace('repos/example/repo/issues?', `${linkPath}?`));
     }
     assert.equal(reads.length, 3, 'no write before complete scan');
     writes.push(args); cb(null, '');
@@ -170,6 +172,20 @@ test('public reconciliation scans over 1 MiB across all pages before accepting a
   assert.deepEqual(saved.admission, f.job.admission);
   assert.equal(saved.runs, f.job.runs);
   assert.equal(saved.status, 'paused_owner_decision');
+});
+}
+test('publication failure is durable even when the execution recorder throws', async t => {
+  const f = await pausedFixture(t);
+  const { withExecution } = require('../src/execution-log');
+  await assert.rejects(withExecution(() => { throw new Error('recorder unavailable'); }, () =>
+    decisions.publish(f.project, f.job, f.store, { execFile: (_file, _args, _options, cb) => {
+      cb(Object.assign(new Error('page read timed out'), { code: 'ETIMEDOUT' }), '', '');
+    } })), /recorder unavailable/);
+  const saved = f.store.load(1);
+  assert.match(saved.architectureDecision.publicationError, /ETIMEDOUT/);
+  assert.equal(saved.architectureDecision.publicationFailure.cause.code, 'ETIMEDOUT');
+  assert.equal(saved.architectureDecision.publication, 'pending');
+  assert.equal(saved.architectureDecision.createAttempted, undefined);
 });
 for (const scenario of ['duplicate markers', 'duplicate number', 'timeout', 'resource limit', 'garbled', 'partial', 'bad shape', 'PR and near matches', 'uncertain POST']) {
   test(`history scan fails closed: ${scenario}`, async t => {
@@ -257,6 +273,9 @@ for (const response of [
   pageResponse([], 2).replace('rel="next"', 'rel="last"'),
   pageResponse([], 2).replace('state=all', 'state=open'),
   pageResponse([], 2).replace('api.github.com', 'unrelated.example'),
+  pageResponse([], 2).replace('repos/example/repo/issues', 'repos/example/other/issues'),
+  pageResponse([], 2).replace('repos/example/repo/issues', 'repositories/not-a-number/issues'),
+  pageResponse([], 2).replace('https:', 'http:'),
 ]) {
   test('invalid pagination or HTTP response stops publication before any write', async t => {
     const f = await pausedFixture(t);
