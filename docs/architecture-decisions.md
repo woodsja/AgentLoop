@@ -45,9 +45,20 @@ issues continue through the existing admission path; there is no new daemon.
 
 Decision reconciliation reads canonical open and closed issue history in pages
 of ten, in ascending creation order, following validated HTTP pagination through
-the final page before any publication write. PRs and near-matching marker lines
-are excluded. Only issue numbers and one matching issue survive between pages;
-complete raw subprocess responses remain in the owner execution journal. The
+the final page before any publication write. Continuation requests use GitHub's
+validated `rel="next"` URL verbatim, retaining opaque cursors, query order and
+percent encoding. Destinations must use HTTPS on the configured GitHub API host,
+the same repository's issues collection and the original all-state ascending
+creation filters. Numeric repository aliases require a successful canonical
+metadata lookup binding the ID to the configured repository. Enterprise API
+prefixes are accepted only for the configured enterprise environment. Duplicate
+relations, cyclic continuations and contradictory exhaustion fail closed;
+validation never reconstructs a continuation URL. GitHub history is not an
+atomic snapshot across concurrent external writes. PRs and near-matching marker lines
+are excluded. Bounded issue-number and continuation identities plus one matching
+issue survive between pages; complete raw subprocess responses remain in the
+owner execution journal. Verbose history transport evidence also detects redirects
+that the CLI follows internally, blocking publication even after a final HTTP 200. The
 ordinary subprocess buffer and timeout stay unchanged. Malformed or partial
 pages, duplicate issue numbers or markers, transport/resource errors, or the
 10,000-page scan limit leave the original job paused. Publication diagnostics

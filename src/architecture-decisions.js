@@ -100,65 +100,124 @@ function validHistoryIssue(issue) {
     && (issue.assignees === undefined || (Array.isArray(issue.assignees)
       && issue.assignees.every(a => a && typeof a.login === 'string')));
 }
+function historyResponse(raw) {
+  const separator = /\r?\n\r?\n/.exec(raw);
+  const status = /^HTTP\/[^ ]+ (\d{3})(?: |\r?\n)/.exec(raw);
+  if (!separator || !status || status[1] !== '200') {
+    const error = new Error(`Decision history page missing successful HTTP headers${status ? ` (HTTP ${status[1]})` : ''}`);
+    if (status) error.statusCode = Number(status[1]);
+    throw error;
+  }
+  const headers = raw.slice(0, separator.index).split(/\r?\n/).slice(1);
+  if (headers.some(line => !/^[A-Za-z0-9-]+:/.test(line) || /^location:/i.test(line))) throw new Error('Unexpected decision history response headers or redirect');
+  return { headers, body: JSON.parse(raw.slice(separator.index + separator[0].length)) };
+}
 async function findDecision(gh, repo, marker) {
-  const seen = new Set();
-  let match, advertisedLastPage = 1;
+  const seen = new Set(), visited = new Set(), cursors = new Set();
+  const ghHost = String(process.env.GH_HOST || 'github.com').toLowerCase();
+  const hosts = ghHost === 'github.com' ? ['api.github.com'] : [ghHost, `api.${ghHost}`];
+  const filters = { state: 'all', sort: 'created', direction: 'asc', per_page: String(HISTORY_PAGE_SIZE) };
+  let repositoryId;
+  async function target(raw, relation, page) {
+    const invalid = () => { throw new Error('Unexpected decision history pagination target'); };
+    // Parsing is for validation only. The original string is the request argument.
+    if (!/^https:\/\//.test(raw) || /[\s\\]/.test(raw) || /%(?![a-f0-9]{2})/i.test(raw)) invalid();
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || !hosts.includes(url.hostname) || url.username || url.password || url.hash || raw.includes('#') || url.port) invalid();
+    const prefix = ghHost !== 'github.com' ? '(?:api/v3/)?' : '';
+    const named = new RegExp(`^/${prefix}repos/([^/]+)/([^/]+)/issues$`, 'i').exec(url.pathname);
+    const numeric = new RegExp(`^/${prefix}repositories/([1-9][0-9]*)/issues$`, 'i').exec(url.pathname);
+    if (named ? `${named[1]}/${named[2]}`.toLowerCase() !== repo.toLowerCase() : !numeric) invalid();
+    const params = url.searchParams;
+    const keys = [...params.keys()];
+    if (new Set(keys).size !== keys.length || keys.some(key => !Object.hasOwn(filters, key) && !['page', 'after', 'before'].includes(key))
+      || Object.entries(filters).some(([key, value]) => params.get(key) !== value)) invalid();
+    const after = params.get('after'), before = params.get('before');
+    if ((after !== null && before !== null) || (after !== null && (!after || !['next', 'last'].includes(relation)))
+      || (before !== null && (!before || !['prev', 'first'].includes(relation)))
+      || [after, before].some(value => value !== null && /[\s\x00-\x1f\x7f]/.test(value))) invalid();
+    const number = params.has('page') ? Number(params.get('page')) : null;
+    if (number !== null && (!/^[1-9][0-9]*$/.test(params.get('page')) || !Number.isSafeInteger(number))) invalid();
+    if (number === null && after === null && before === null) invalid();
+    if (number !== null && ((relation === 'next' && number !== page + 1) || (relation === 'prev' && number !== page - 1)
+      || (relation === 'first' && number !== 1) || (relation === 'last' && number < page))) invalid();
+    if (numeric) {
+      if (repositoryId === undefined) {
+        const metadata = historyResponse(await gh(['api', '--include', `repos/${repo}`])).body;
+        if (!Number.isSafeInteger(metadata?.id) || metadata.id < 1 || typeof metadata.full_name !== 'string' || metadata.full_name.toLowerCase() !== repo.toLowerCase()) invalid();
+        repositoryId = String(metadata.id);
+      }
+      if (numeric[1] !== repositoryId) invalid();
+    }
+    // Identity for integrity checks only; never used to construct a request.
+    return { raw, number, cursor: after, identity: JSON.stringify([number, after, before]) };
+  }
+  let match, advertisedLastPage = 1, lastTarget;
+  let currentTarget = { identity: JSON.stringify([1, null, null]) };
+  let endpoint = `repos/${repo}/issues?state=all&sort=created&direction=asc&per_page=${HISTORY_PAGE_SIZE}&page=1`;
   for (let page = 1; page <= MAX_HISTORY_PAGES; page++) {
-    // Ascending creation order avoids offset shifts when new issues are added.
-    const endpoint = `repos/${repo}/issues?state=all&sort=created&direction=asc&per_page=${HISTORY_PAGE_SIZE}&page=${page}`;
-    const raw = await gh(['api', '--include', endpoint]);
-    const separator = /\r?\n\r?\n/.exec(raw);
-    if (!separator || !/^HTTP\/[^ ]+ 200(?: |\r?\n)/.test(raw)) throw new Error('Decision history page missing successful HTTP headers');
-    const headers = raw.slice(0, separator.index).split(/\r?\n/).slice(1);
-    const links = headers.filter(line => /^link:/i.test(line));
-    if (links.length > 1) throw new Error('Ambiguous decision history pagination');
-    let hasNext = false, lastPage;
-    if (links.length) {
-      const relations = new Set();
-      for (const link of links[0].slice(5).trim().split(/,\s*/)) {
-        const parsed = /^<([^>]+)>;\s*rel="(next|prev|first|last)"$/.exec(link);
-        if (!parsed || relations.has(parsed[2])) throw new Error('Malformed decision history pagination');
-        relations.add(parsed[2]);
-        const url = new URL(parsed[1]);
-        const expected = new URL(`https://example.invalid/${endpoint}`);
-        const ghHost = String(process.env.GH_HOST || 'github.com').toLowerCase();
-        const hosts = ghHost === 'github.com' ? ['api.github.com'] : [ghHost, `api.${ghHost}`];
-        const targetPage = Number(url.searchParams.get('page'));
-        if (url.protocol !== 'https:' || !hosts.includes(url.hostname) || url.username || url.password || url.hash
-          || (url.port && url.port !== '443')
-          || (![expected.pathname.toLowerCase(), `/api/v3${expected.pathname.toLowerCase()}`].includes(url.pathname.toLowerCase())
-            && !/^\/(?:api\/v3\/)?repositories\/[0-9]+\/issues$/.test(url.pathname))
-          || [...url.searchParams].length !== [...expected.searchParams].length
-          || [...expected.searchParams].some(([key, value]) => key !== 'page' && url.searchParams.get(key) !== value)
-          || !Number.isSafeInteger(targetPage) || targetPage < 1
-          || (parsed[2] === 'next' && targetPage !== page + 1)
-          || (parsed[2] === 'prev' && targetPage !== page - 1)
-          || (parsed[2] === 'first' && targetPage !== 1)
-          || (parsed[2] === 'last' && targetPage < page)) {
-          throw new Error('Unexpected decision history pagination target');
+    try {
+      if (visited.has(endpoint)) throw new Error('Repeated decision history next URL');
+      visited.add(endpoint);
+      const { headers, body: issues } = historyResponse(await gh(['api', '--include', endpoint]));
+      const links = headers.filter(line => /^link:/i.test(line));
+      if (links.length > 1) throw new Error('Ambiguous decision history pagination');
+      const relations = new Map();
+      if (links.length) {
+        // Split only between link values: opaque cursors may contain commas.
+        const values = links[0].slice(5).trim().split(/,\s*(?=<)/);
+        for (const link of values) {
+          const parsed = /^<([^>]+)>;\s*rel="(next|prev|first|last)"$/.exec(link);
+          if (!parsed || relations.has(parsed[2])) throw new Error('Malformed decision history pagination');
+          relations.set(parsed[2], await target(parsed[1], parsed[2], page));
         }
-        if (parsed[2] === 'next') hasNext = true;
-        if (parsed[2] === 'last') lastPage = targetPage;
       }
-    }
-    advertisedLastPage = Math.max(advertisedLastPage, lastPage || page, hasNext ? page + 1 : page);
-    if (advertisedLastPage > page && !hasNext) throw new Error('Partial decision history pagination; next page missing');
-    const issues = JSON.parse(raw.slice(separator.index + separator[0].length));
-    if (!Array.isArray(issues) || issues.length > HISTORY_PAGE_SIZE
-      || (hasNext && issues.length !== HISTORY_PAGE_SIZE) || !issues.every(validHistoryIssue)) {
-      throw new Error('Malformed or partial decision history page');
-    }
-    for (const issue of issues) {
-      if (seen.has(issue.number)) throw new Error('Duplicate issue across decision history pages; owner reconciliation required');
-      seen.add(issue.number);
-      if (!Object.hasOwn(issue, 'pull_request') && exactMarker(issue.body, marker)) {
-        if (match) throw new Error('Multiple decision issues have the same identity; owner reconciliation required');
-        match = issue;
+      const next = relations.get('next'), last = relations.get('last');
+      if (last) {
+        if ((last.number !== null && last.number < advertisedLastPage)
+          || (lastTarget && last.identity !== lastTarget.identity)) throw new Error('Contradictory decision history last page');
+        advertisedLastPage = Math.max(advertisedLastPage, last.number || page);
+        lastTarget = last;
       }
+      const reachedLast = lastTarget && (lastTarget.cursor !== null || lastTarget.number === null
+        ? lastTarget.identity === currentTarget.identity : lastTarget.number === page);
+      if (!next && (advertisedLastPage > page || (lastTarget && !reachedLast))) throw new Error('Partial decision history pagination; next page missing');
+      if (next && (visited.has(next.raw) || (next.cursor !== null && cursors.has(next.cursor)) || reachedLast)) throw new Error('Cyclic or no-progress decision history pagination');
+      if (!Array.isArray(issues) || issues.length > HISTORY_PAGE_SIZE || (next && issues.length !== HISTORY_PAGE_SIZE) || !issues.every(validHistoryIssue)) throw new Error('Malformed or partial decision history page');
+      for (const issue of issues) {
+        if (seen.has(issue.number)) throw new Error('Duplicate issue across decision history pages; owner reconciliation required');
+        seen.add(issue.number);
+        if (!Object.hasOwn(issue, 'pull_request') && exactMarker(issue.body, marker)) {
+          if (match) throw new Error('Multiple decision issues have the same identity; owner reconciliation required');
+          match = issue;
+        }
+      }
+      if (!next) return match;
+      if (next.cursor !== null) cursors.add(next.cursor);
+      advertisedLastPage = Math.max(advertisedLastPage, page + 1);
+      endpoint = next.raw;
+      currentTarget = next;
+    } catch (error) {
+      error.message = `Decision history page ${page}: ${error.message}`;
+      throw error;
     }
-    if (!hasNext) return match;
   }
   throw new Error('Decision history page resource limit exceeded; owner reconciliation required');
+}
+// gh follows redirects internally. Include alone exposes only the final response;
+// verbose stderr retains intermediate statuses so a redirected scan cannot
+// authorize publication. The normal execution adapter journals both raw pipes.
+function historyGh(args, executeFile = require('./execution-log').execFile) {
+  return runGh([args[0], '--verbose', ...args.slice(1)], (file, argv, options, callback) => {
+    return executeFile(file, argv, options, (error, stdout, stderr) => {
+      const statuses = [...String(stderr || '').matchAll(/^< HTTP\/[^ ]+ (\d{3})(?: |\r?$)/gm)];
+      const redirect = statuses.find(status => /^3/.test(status[1]));
+      if (!error && redirect) {
+        error = Object.assign(new Error(`Unapproved decision history redirect (HTTP ${redirect[1]})`), { statusCode: Number(redirect[1]) });
+      }
+      callback(error, stdout, stderr);
+    });
+  }, 'Architecture decision history');
 }
 async function publish(project, job, store, options = {}) {
   const d = job.architectureDecision;
@@ -166,7 +225,7 @@ async function publish(project, job, store, options = {}) {
   const gh = args => runGh(args, options.execFile, 'Architecture decision publication');
   const save = () => store.save(job);
   try {
-    let remote = await findDecision(gh, project.repo, d.marker);
+    let remote = await findDecision(args => historyGh(args, options.execFile), project.repo, d.marker);
     if (!remote && d.createAttempted) throw new Error('Decision creation outcome uncertain; awaiting remote reconciliation, no duplicate creation attempted');
     if (!remote) {
       await gh(['label', 'create', 'needs-owner-decision', '--repo', project.repo, '--color', 'D876E3', '--description', 'Non-executable owner architecture decision', '--force']);
