@@ -137,42 +137,50 @@ async function pausedFixture(t) {
   f.store.save(job);
   return { ...f, job };
 }
-for (const linkPath of ['repos/example/repo/issues', 'repositories/123456/issues', 'repos/EXAMPLE/Repo/issues', 'api/v3/repositories/123456/issues']) {
-test(`public reconciliation scans over 1 MiB across all pages with ${linkPath} links before accepting a closed exact marker`, async t => {
-  const f = await pausedFixture(t), marker = f.job.architectureDecision.marker;
-  const pages = Array.from({ length: 3 }, (_, page) => Array.from({ length: 10 }, (_, i) => historyIssue(page * 10 + i + 100, 'x'.repeat(45000))));
-  pages[1][4].body = marker;
-  assert.ok(Buffer.byteLength(JSON.stringify(pages)) > 1024 * 1024);
-  const reads = [], writes = [];
-  const execFile = (file, args, options, cb) => {
-    assert.equal(options.maxBuffer, 1024 * 1024);
-    if (args.includes('--slurp')) {
-      const aggregate = JSON.stringify(pages);
-      return cb(Object.assign(new Error('stdout maxBuffer length exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }), aggregate.slice(0, options.maxBuffer), '');
+function cursorUrl(page, relation = 'next', collection = 'repos/example/repo/issues', host = 'api.github.com') {
+  // GitHub REST cursor header structure; cursor bytes are anonymized.
+  return `https://${host}/${collection}?state=all&sort=created&direction=asc&per_page=10&${relation === 'prev' ? 'before' : 'after'}=Y3Vyc29yOnYyOpHO%2B%2F${page}%3D&page=${page}`;
+}
+function cursorResponse(items, page, count, collection, host) {
+  const links = [];
+  if (page < count) links.push(`<${cursorUrl(page + 1, 'next', collection, host)}>; rel="next"`);
+  if (page > 1) links.push(`<${cursorUrl(page - 1, 'prev', collection, host)}>; rel="prev"`);
+  return 'HTTP/2.0 200 OK\r\n' + (links.length ? `Link: ${links.join(', ')}\r\n` : '') + '\r\n' + JSON.stringify(items);
+}
+for (const collection of ['repos/example/repo/issues', 'repositories/123456/issues', 'repos/EXAMPLE/Repo/issues']) {
+  test(`authentic cursor headers scan 17 pages verbatim and over 1 MiB: ${collection}`, async t => {
+    const f = await pausedFixture(t);
+    if (collection === 'repos/example/repo/issues') {
+      f.job.architectureDecision.createAttempted = true;
+      f.job.architectureDecision.notification.status = 'assigned';
+      f.store.save(f.job);
     }
-    if (args.includes('--include')) {
-      const endpoint = args.at(-1);
-      assert.match(endpoint, /state=all&sort=created&direction=asc&per_page=10&page=/);
-      const page = Number(new URL('https://api.github.com/' + endpoint).searchParams.get('page'));
-      reads.push(page);
-      return cb(null, pageResponse(pages[page - 1], page < 3 ? page + 1 : null)
-        .replace('repos/example/repo/issues?', `${linkPath}?`));
-    }
-    assert.equal(reads.length, 3, 'no write before complete scan');
-    writes.push(args); cb(null, '');
-  };
-  await decisions.reconcile(f.project, f.store, { execFile });
-  const saved = f.store.load(1);
-  assert.deepEqual(reads, [1, 2, 3]);
-  assert.equal(saved.architectureDecision.issue.number, 114);
-  assert.equal(saved.architectureDecision.publication, 'complete');
-  assert.ok(!writes.some(a => a.includes('POST')));
-  assert.deepEqual(saved.architectureDecision.pausedExecution, f.job.architectureDecision.pausedExecution);
-  assert.equal(saved.worktreePath, f.job.worktreePath);
-  assert.deepEqual(saved.admission, f.job.admission);
-  assert.equal(saved.runs, f.job.runs);
-  assert.equal(saved.status, 'paused_owner_decision');
-});
+    const pages = Array.from({ length: 17 }, (_, page) => Array.from({ length: page === 16 ? 1 : 10 }, (_, i) => historyIssue(100 + page * 10 + i, 'x'.repeat(7500))));
+    pages[1][4].body = f.job.architectureDecision.marker;
+    assert.ok(Buffer.byteLength(JSON.stringify(pages)) > 1024 * 1024);
+    let reads = 0, metadata = 0;
+    const writes = [];
+    await decisions.reconcile(f.project, f.store, { execFile: (_file, args, options, cb) => {
+      assert.equal(options.maxBuffer, 1024 * 1024);
+      if (args.at(-1) === 'repos/example/repo') { metadata++; return cb(null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: 123456, full_name: 'example/repo' })); }
+      if (args.includes('--include')) {
+        assert.equal(args.at(-1), reads === 0 ? 'repos/example/repo/issues?state=all&sort=created&direction=asc&per_page=10&page=1' : cursorUrl(reads + 1, 'next', collection));
+        reads++;
+        return cb(null, cursorResponse(pages[reads - 1], reads, 17, collection));
+      }
+      assert.equal(reads, 17);
+      writes.push(args); cb(null, '');
+    } });
+    const saved = f.store.load(1);
+    assert.equal(saved.architectureDecision.publicationError, undefined);
+    assert.equal(reads, 17);
+    assert.equal(metadata, collection.startsWith('repositories') ? 1 : 0);
+    assert.equal(saved.architectureDecision.issue.number, 114);
+    assert.ok(!writes.some(a => a.includes('POST')));
+    if (collection === 'repos/example/repo/issues') assert.ok(!writes.some(a => a.includes('--add-assignee')));
+    for (const key of ['project', 'issue', 'id', 'worktreePath', 'admission', 'runs', 'errors', 'status']) assert.deepEqual(saved[key], f.job[key]);
+    assert.deepEqual(saved.architectureDecision.pausedExecution, f.job.architectureDecision.pausedExecution);
+  });
 }
 test('publication failure is durable even when the execution recorder throws', async t => {
   const f = await pausedFixture(t);
@@ -203,7 +211,7 @@ for (const scenario of ['duplicate markers', 'duplicate number', 'timeout', 'res
       if (scenario === 'garbled') return cb(null, 'HTTP/2.0 200 OK\r\n\r\n{broken');
       if (scenario === 'partial') return cb(null, pageResponse([], 3));
       if (scenario === 'bad shape') return cb(null, pageResponse([{}]));
-      const items = scenario === 'duplicate markers' ? [historyIssue(200, marker)] : scenario === 'duplicate number' ? [historyIssue(100)] : scenario === 'PR and near matches' ? [ { ...historyIssue(200, marker), pull_request: {} }, historyIssue(201, marker + 'suffix'), historyIssue(202, marker.replace(' -->', 'x -->')) ] : [];
+      const items = scenario === 'duplicate markers' ? [historyIssue(200, marker)] : scenario === 'duplicate number' ? [historyIssue(100)] : scenario === 'PR and near matches' ? [ { ...historyIssue(200, marker), pull_request: {} }, historyIssue(201, marker + 'suffix'), historyIssue(202, marker.replace(' -->', 'x -->')), historyIssue(203, 'embedded ' + marker), historyIssue(204, marker.replace(/:[a-f0-9]/, ':z')) ] : [];
       cb(null, pageResponse(items));
     };
     await decisions.reconcile(f.project, f.store, { execFile });
@@ -289,3 +297,167 @@ for (const response of [
     assert.deepEqual(writes, []);
   });
 }
+
+const unsafeTargets = {
+  'foreign named repository': url => url.replace('example/repo', 'example/foreign'),
+  'foreign numeric repository': url => url.replace('repos/example/repo', 'repositories/654321'),
+  'unknown numeric identity': url => url.replace('repos/example/repo', 'repositories/123456'),
+  'foreign host': url => url.replace('api.github.com', 'evil.example'),
+  'HTTP': url => url.replace('https:', 'http:'),
+  'credentials': url => url.replace('https://', 'https://user:password@'),
+  'fragment': url => url + '#hidden',
+  'port': url => url.replace('api.github.com', 'api.github.com:8443'),
+  'substituted endpoint': url => url.replace('/issues?', '/pulls?'),
+  'unapproved public API prefix': url => url.replace('/repos/', '/api/v3/repos/'),
+  'state': url => url.replace('state=all', 'state=open'),
+  'sort': url => url.replace('sort=created', 'sort=updated'),
+  'direction': url => url.replace('direction=asc', 'direction=desc'),
+  'page size': url => url.replace('per_page=10', 'per_page=100'),
+  'duplicate parameter': url => url + '&state=open',
+  'duplicate cursor': url => url + '&after=other',
+  'ambiguous cursors': url => url + '&before=other',
+  'unrelated key': url => url + '&labels=ready',
+  'empty cursor': url => url.replace(/after=[^&]*/, 'after='),
+  'malformed encoding': url => url.replace(/after=[^&]*/, 'after=%XX'),
+  'cursor control': url => url.replace(/after=[^&]*/, 'after=%00'),
+  'backward page': url => url.replace('page=2', 'page=1'),
+};
+for (const [name, mutate] of Object.entries(unsafeTargets)) {
+  test(`unsafe continuation fails closed: ${name}`, async t => {
+    const f = await pausedFixture(t), calls = [];
+    await decisions.reconcile(f.project, f.store, { execFile: (_file, args, _opts, cb) => {
+      calls.push(args);
+      if (args.at(-1) === 'repos/example/repo') return cb(null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: name === 'unknown numeric identity' ? null : 123456, full_name: 'example/repo' }));
+      assert.ok(args.includes('--include'));
+      cb(null, 'HTTP/2.0 200 OK\r\nLink: <' + mutate(cursorUrl(2)) + '>; rel="next"\r\n\r\n' + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i, i ? '' : f.job.architectureDecision.marker))));
+    } });
+    const saved = f.store.load(1);
+    assert.match(saved.architectureDecision.publicationError, /page 1: Unexpected/);
+    assert.equal(saved.architectureDecision.issue, undefined);
+    assert.equal(saved.architectureDecision.createAttempted, undefined);
+    assert.ok(calls.every(args => args.includes('--include')));
+    assert.deepEqual(saved.architectureDecision.pausedExecution, f.job.architectureDecision.pausedExecution);
+    assert.equal(saved.status, 'paused_owner_decision');
+  });
+}
+for (const status of [301, 401, 403, 429, 500, 503, 206]) {
+  test(`HTTP ${status} cannot authorize publication`, async t => {
+    const f = await pausedFixture(t);
+    await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
+      assert.ok(args.includes('--include'));
+      cb(null, `HTTP/2.0 ${status} Rejected\r\nLocation: https://evil.example\r\n\r\n[]`);
+    } });
+    assert.match(f.store.load(1).architectureDecision.publicationError, new RegExp(`page 1:.*HTTP ${status}`));
+    assert.equal(f.store.load(1).architectureDecision.publicationFailure.statusCode, status);
+    assert.equal(f.store.load(1).architectureDecision.createAttempted, undefined);
+  });
+}
+for (const [name, link] of Object.entries({
+  'duplicate next': `<${cursorUrl(2)}>; rel="next", <${cursorUrl(2)}>; rel="next"`,
+  'duplicate last': `<${cursorUrl(2)}>; rel="last", <${cursorUrl(3)}>; rel="last"`,
+  'contradictory last': `<${cursorUrl(2)}>; rel="next", <${cursorUrl(1)}>; rel="last"`,
+  'wrong cursor relation': `<${cursorUrl(2, 'prev')}>; rel="next"`,
+  'malformed trailing link': `<${cursorUrl(2)}>; rel="next", broken`,
+})) {
+  test(`pagination integrity: ${name}`, async t => {
+    const f = await pausedFixture(t);
+    await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
+      assert.ok(args.includes('--include'));
+      cb(null, `HTTP/2.0 200 OK\r\nLink: ${link}\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i))));
+    } });
+    assert.ok(f.store.load(1).architectureDecision.publicationError);
+    assert.equal(f.store.load(1).architectureDecision.createAttempted, undefined);
+  });
+}
+test('cursor-only next cycle and page budget cannot authorize writes', async t => {
+  for (const budget of [false, true]) {
+    const f = await pausedFixture(t);
+    let reads = 0;
+    await decisions.reconcile(f.project, f.store, { execFile: (_file, args, options, cb) => {
+      assert.ok(args.includes('--include'));
+      assert.equal(options.timeout, 60000);
+      reads++;
+      const next = cursorUrl(budget ? reads + 1 : 2).replace(/&page=\d+/, '');
+      cb(null, `HTTP/2.0 200 OK\r\nLink: <${next}>; rel="next"\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(reads * 10 + i))));
+    } });
+    assert.equal(reads, budget ? 10000 : 2);
+    assert.match(f.store.load(1).architectureDecision.publicationError, budget ? /resource limit/ : /Cyclic/);
+    assert.equal(f.store.load(1).architectureDecision.createAttempted, undefined);
+  }
+});
+test('authorized enterprise API-prefixed numeric aliases preserve cursor URLs', async t => {
+  const previous = process.env.GH_HOST;
+  process.env.GH_HOST = 'github.enterprise.example';
+  t.after(() => { if (previous === undefined) delete process.env.GH_HOST; else process.env.GH_HOST = previous; });
+  const f = await pausedFixture(t);
+  let reads = 0, metadata = 0;
+  const next = cursorUrl(2, 'next', 'api/v3/repositories/123456/issues', process.env.GH_HOST);
+  await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
+    if (args.at(-1) === 'repos/example/repo') { metadata++; return cb(null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: 123456, full_name: 'EXAMPLE/Repo' })); }
+    if (args.includes('--include')) {
+      reads++;
+      if (reads === 1) return cb(null, `HTTP/2.0 200 OK\r\nLink: <${next}>; rel="next"\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i))));
+      assert.equal(args.at(-1), next);
+      return cb(null, pageResponse([historyIssue(200, f.job.architectureDecision.marker)]));
+    }
+    assert.equal(reads, 2); cb(null, '');
+  } });
+  assert.equal(metadata, 1);
+  assert.equal(f.store.load(1).architectureDecision.publication, 'complete');
+});
+test('empty complete history persists createAttempted and creates exactly once', async t => {
+  const f = await pausedFixture(t);
+  let posts = 0, scans = 0;
+  await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
+    if (args.includes('--include')) { scans++; return cb(null, pageResponse([])); }
+    assert.equal(scans, 1);
+    if (args.includes('POST')) {
+      posts++;
+      assert.equal(f.store.load(1).architectureDecision.createAttempted, true);
+      return cb(null, JSON.stringify(historyIssue(200, f.job.architectureDecision.marker)));
+    }
+    cb(null, '');
+  } });
+  await decisions.reconcile(f.project, createJobStore(f.store.directory), { execFile: () => { throw new Error('Completed publication must not replay'); } });
+  assert.equal(posts, 1);
+  assert.equal(f.store.load(1).architectureDecision.publication, 'complete');
+});
+
+for (const mode of ['complete', 'missing next', 'changed last', 'next past last']) {
+  test(`cursor-only last-page evidence: ${mode}`, async t => {
+    const f = await pausedFixture(t);
+    const cursor = page => cursorUrl(page).replace(/&page=\d+/, '');
+    let reads = 0;
+    const writes = [];
+    await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
+      if (!args.includes('--include')) { writes.push(args); return cb(null, ''); }
+      reads++;
+      const next = reads < 3 && !(mode === 'missing next' && reads === 2) || mode === 'next past last' && reads === 3;
+      const last = cursor(mode === 'changed last' && reads === 2 ? 4 : 3);
+      cb(null, `HTTP/2.0 200 OK\r\nLink: <${last}>; rel="last"${next ? `, <${cursor(reads + 1)}>; rel="next"` : ''}\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + reads * 10 + i, reads === 2 && i === 0 ? f.job.architectureDecision.marker : ''))));
+    } });
+    const saved = f.store.load(1);
+    assert.equal(reads, ['missing next', 'changed last'].includes(mode) ? 2 : 3);
+    if (mode === 'complete') {
+      assert.equal(saved.architectureDecision.publication, 'complete');
+      assert.ok(!writes.some(args => args.includes('POST')));
+    } else {
+      assert.ok(saved.architectureDecision.publicationError);
+      assert.deepEqual(writes, []);
+    }
+  });
+}
+
+test('a redirect hidden behind a final successful gh response still forbids publication', async t => {
+  const f = await pausedFixture(t);
+  await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
+    assert.ok(args.includes('--include'));
+    assert.ok(args.includes('--verbose'));
+    cb(null, pageResponse([]), '* Request to https://api.github.com/repos/example/repo/issues\n< HTTP/2.0 301 Moved Permanently\n< Location: https://evil.example/issues\n< HTTP/2.0 200 OK\n');
+  } });
+  const saved = f.store.load(1);
+  assert.match(saved.architectureDecision.publicationError, /page 1:.*Unapproved.*redirect/);
+  assert.equal(saved.architectureDecision.publicationFailure.statusCode, 301);
+  assert.equal(saved.architectureDecision.createAttempted, undefined);
+  assert.equal(saved.architectureDecision.issue, undefined);
+});
