@@ -28,7 +28,7 @@ function fixture(t) {
     calls.push(args);
     const original = issues.find(i => args[1] === `repos/example/repo/issues/${i.number}`);
     if (original) return cb(null, JSON.stringify({ ...original, state: 'open', html_url: `https://github.com/example/repo/issues/${original.number}`, labels: [{ name: 'ready-for-agent' }] }));
-    if (args.includes('--include')) return cb(null, pageResponse(remote));
+    if (args.includes('--include')) return historyReply(cb, null, pageResponse(remote));
     if (args.includes('--slurp')) return cb(null, JSON.stringify([remote]));
     if (args.includes('POST')) {
       const issue = { state: 'open', number: 50, html_url: 'https://github.com/example/repo/issues/50', body: args.find(a => a.startsWith('body=')).slice(5), assignees: [] };
@@ -162,11 +162,11 @@ for (const collection of ['repos/example/repo/issues', 'repositories/123456/issu
     const writes = [];
     await decisions.reconcile(f.project, f.store, { execFile: (_file, args, options, cb) => {
       assert.equal(options.maxBuffer, 1024 * 1024);
-      if (args.at(-1) === 'repos/example/repo') { metadata++; return cb(null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: 123456, full_name: 'example/repo' })); }
+      if (args.at(-1) === 'repos/example/repo') { metadata++; return historyReply(cb, null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: 123456, full_name: 'example/repo' })); }
       if (args.includes('--include')) {
         assert.equal(args.at(-1), reads === 0 ? 'repos/example/repo/issues?state=all&sort=created&direction=asc&per_page=10&page=1' : cursorUrl(reads + 1, 'next', collection));
         reads++;
-        return cb(null, cursorResponse(pages[reads - 1], reads, 17, collection));
+        return historyReply(cb, null, cursorResponse(pages[reads - 1], reads, 17, collection));
       }
       assert.equal(reads, 17);
       writes.push(args); cb(null, '');
@@ -206,13 +206,13 @@ for (const scenario of ['duplicate markers', 'duplicate number', 'timeout', 'res
     const execFile = (file, args, options, cb) => {
       if (!args.includes('--include')) { writes.push(args); return cb(new Error('Unexpected write')); }
       reads++;
-      if (reads === 1) return cb(null, pageResponse(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i, i === 0 && !['PR and near matches', 'uncertain POST'].includes(scenario) ? marker : '')), 2));
+      if (reads === 1) return historyReply(cb, null, pageResponse(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i, i === 0 && !['PR and near matches', 'uncertain POST'].includes(scenario) ? marker : '')), 2));
       if (scenario === 'timeout' || scenario === 'resource limit') return cb(Object.assign(new Error('page read failed'), { code: scenario === 'timeout' ? 'ETIMEDOUT' : 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }), '', 'raw diagnostics');
-      if (scenario === 'garbled') return cb(null, 'HTTP/2.0 200 OK\r\n\r\n{broken');
-      if (scenario === 'partial') return cb(null, pageResponse([], 3));
-      if (scenario === 'bad shape') return cb(null, pageResponse([{}]));
+      if (scenario === 'garbled') return historyReply(cb, null, 'HTTP/2.0 200 OK\r\n\r\n{broken');
+      if (scenario === 'partial') return historyReply(cb, null, pageResponse([], 3));
+      if (scenario === 'bad shape') return historyReply(cb, null, pageResponse([{}]));
       const items = scenario === 'duplicate markers' ? [historyIssue(200, marker)] : scenario === 'duplicate number' ? [historyIssue(100)] : scenario === 'PR and near matches' ? [ { ...historyIssue(200, marker), pull_request: {} }, historyIssue(201, marker + 'suffix'), historyIssue(202, marker.replace(' -->', 'x -->')), historyIssue(203, 'embedded ' + marker), historyIssue(204, marker.replace(/:[a-f0-9]/, ':z')) ] : [];
-      cb(null, pageResponse(items));
+      historyReply(cb, null, pageResponse(items));
     };
     await decisions.reconcile(f.project, f.store, { execFile });
     const saved = f.store.load(1);
@@ -236,7 +236,7 @@ test('complete marker-free scan precedes POST; ambiguous response is durable and
   const execFile = (_file, args, _options, cb) => {
     if (args.includes('--include')) {
       reads++;
-      return cb(null, pageResponse(reads % 2 ? Array.from({ length: 10 }, (_, i) => i === 0
+      return historyReply(cb, null, pageResponse(reads % 2 ? Array.from({ length: 10 }, (_, i) => i === 0
         ? { ...historyIssue(100, f.job.architectureDecision.marker), pull_request: {} }
         : historyIssue(100 + i, f.job.architectureDecision.marker + 'suffix')) : [], reads % 2 ? 2 : null));
     }
@@ -267,7 +267,7 @@ test('a later page cannot terminate before the previously advertised last page',
     reads++;
     const first = pageResponse(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i)), 2)
       .replace('; rel="next"', '; rel="next", <https://api.github.com/repos/example/repo/issues?state=all&sort=created&direction=asc&per_page=10&page=3>; rel="last"');
-    cb(null, reads === 1 ? first : pageResponse([]));
+    historyReply(cb, null, reads === 1 ? first : pageResponse([]));
   } });
   assert.equal(reads, 2);
   assert.match(f.store.load(1).architectureDecision.publicationError, /Partial decision history pagination/);
@@ -290,7 +290,7 @@ for (const response of [
     const writes = [];
     await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
       if (!args.includes('--include')) writes.push(args);
-      cb(null, response);
+      historyReply(cb, null, response);
     } });
     assert.ok(f.store.load(1).architectureDecision.publicationError);
     assert.equal(f.store.load(1).architectureDecision.notification.status, 'pending');
@@ -327,9 +327,9 @@ for (const [name, mutate] of Object.entries(unsafeTargets)) {
     const f = await pausedFixture(t), calls = [];
     await decisions.reconcile(f.project, f.store, { execFile: (_file, args, _opts, cb) => {
       calls.push(args);
-      if (args.at(-1) === 'repos/example/repo') return cb(null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: name === 'unknown numeric identity' ? null : 123456, full_name: 'example/repo' }));
+      if (args.at(-1) === 'repos/example/repo') return historyReply(cb, null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: name === 'unknown numeric identity' ? null : 123456, full_name: 'example/repo' }));
       assert.ok(args.includes('--include'));
-      cb(null, 'HTTP/2.0 200 OK\r\nLink: <' + mutate(cursorUrl(2)) + '>; rel="next"\r\n\r\n' + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i, i ? '' : f.job.architectureDecision.marker))));
+      historyReply(cb, null, 'HTTP/2.0 200 OK\r\nLink: <' + mutate(cursorUrl(2)) + '>; rel="next"\r\n\r\n' + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i, i ? '' : f.job.architectureDecision.marker))));
     } });
     const saved = f.store.load(1);
     assert.match(saved.architectureDecision.publicationError, /page 1: Unexpected/);
@@ -345,7 +345,7 @@ for (const status of [301, 401, 403, 429, 500, 503, 206]) {
     const f = await pausedFixture(t);
     await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
       assert.ok(args.includes('--include'));
-      cb(null, `HTTP/2.0 ${status} Rejected\r\nLocation: https://evil.example\r\n\r\n[]`);
+      historyReply(cb, null, `HTTP/2.0 ${status} Rejected\r\nLocation: https://evil.example\r\n\r\n[]`);
     } });
     assert.match(f.store.load(1).architectureDecision.publicationError, new RegExp(`page 1:.*HTTP ${status}`));
     assert.equal(f.store.load(1).architectureDecision.publicationFailure.statusCode, status);
@@ -363,7 +363,7 @@ for (const [name, link] of Object.entries({
     const f = await pausedFixture(t);
     await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
       assert.ok(args.includes('--include'));
-      cb(null, `HTTP/2.0 200 OK\r\nLink: ${link}\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i))));
+      historyReply(cb, null, `HTTP/2.0 200 OK\r\nLink: ${link}\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i))));
     } });
     assert.ok(f.store.load(1).architectureDecision.publicationError);
     assert.equal(f.store.load(1).architectureDecision.createAttempted, undefined);
@@ -378,7 +378,7 @@ test('cursor-only next cycle and page budget cannot authorize writes', async t =
       assert.equal(options.timeout, 60000);
       reads++;
       const next = cursorUrl(budget ? reads + 1 : 2).replace(/&page=\d+/, '');
-      cb(null, `HTTP/2.0 200 OK\r\nLink: <${next}>; rel="next"\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(reads * 10 + i))));
+      historyReply(cb, null, `HTTP/2.0 200 OK\r\nLink: <${next}>; rel="next"\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(reads * 10 + i))));
     } });
     assert.equal(reads, budget ? 10000 : 2);
     assert.match(f.store.load(1).architectureDecision.publicationError, budget ? /resource limit/ : /Cyclic/);
@@ -393,12 +393,12 @@ test('authorized enterprise API-prefixed numeric aliases preserve cursor URLs', 
   let reads = 0, metadata = 0;
   const next = cursorUrl(2, 'next', 'api/v3/repositories/123456/issues', process.env.GH_HOST);
   await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
-    if (args.at(-1) === 'repos/example/repo') { metadata++; return cb(null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: 123456, full_name: 'EXAMPLE/Repo' })); }
+    if (args.at(-1) === 'repos/example/repo') { metadata++; return historyReply(cb, null, 'HTTP/2.0 200 OK\r\n\r\n' + JSON.stringify({ id: 123456, full_name: 'EXAMPLE/Repo' })); }
     if (args.includes('--include')) {
       reads++;
-      if (reads === 1) return cb(null, `HTTP/2.0 200 OK\r\nLink: <${next}>; rel="next"\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i))));
+      if (reads === 1) return historyReply(cb, null, `HTTP/2.0 200 OK\r\nLink: <${next}>; rel="next"\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + i))));
       assert.equal(args.at(-1), next);
-      return cb(null, pageResponse([historyIssue(200, f.job.architectureDecision.marker)]));
+      return historyReply(cb, null, pageResponse([historyIssue(200, f.job.architectureDecision.marker)]));
     }
     assert.equal(reads, 2); cb(null, '');
   } });
@@ -409,7 +409,7 @@ test('empty complete history persists createAttempted and creates exactly once',
   const f = await pausedFixture(t);
   let posts = 0, scans = 0;
   await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
-    if (args.includes('--include')) { scans++; return cb(null, pageResponse([])); }
+    if (args.includes('--include')) { scans++; return historyReply(cb, null, pageResponse([])); }
     assert.equal(scans, 1);
     if (args.includes('POST')) {
       posts++;
@@ -434,7 +434,7 @@ for (const mode of ['complete', 'missing next', 'changed last', 'next past last'
       reads++;
       const next = reads < 3 && !(mode === 'missing next' && reads === 2) || mode === 'next past last' && reads === 3;
       const last = cursor(mode === 'changed last' && reads === 2 ? 4 : 3);
-      cb(null, `HTTP/2.0 200 OK\r\nLink: <${last}>; rel="last"${next ? `, <${cursor(reads + 1)}>; rel="next"` : ''}\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + reads * 10 + i, reads === 2 && i === 0 ? f.job.architectureDecision.marker : ''))));
+      historyReply(cb, null, `HTTP/2.0 200 OK\r\nLink: <${last}>; rel="last"${next ? `, <${cursor(reads + 1)}>; rel="next"` : ''}\r\n\r\n` + JSON.stringify(Array.from({ length: 10 }, (_, i) => historyIssue(100 + reads * 10 + i, reads === 2 && i === 0 ? f.job.architectureDecision.marker : ''))));
     } });
     const saved = f.store.load(1);
     assert.equal(reads, ['missing next', 'changed last'].includes(mode) ? 2 : 3);
@@ -452,12 +452,107 @@ test('a redirect hidden behind a final successful gh response still forbids publ
   const f = await pausedFixture(t);
   await decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, _opts, cb) => {
     assert.ok(args.includes('--include'));
-    assert.ok(args.includes('--verbose'));
-    cb(null, pageResponse([]), '* Request to https://api.github.com/repos/example/repo/issues\n< HTTP/2.0 301 Moved Permanently\n< Location: https://evil.example/issues\n< HTTP/2.0 200 OK\n');
+    assert.ok(!args.includes('--verbose'));
+    assert.equal(_opts.env.GH_DEBUG, 'api');
+    historyReply(cb, null, pageResponse([]), '* Request to https://api.github.com/repos/example/repo/issues\n< HTTP/2.0 301 Moved Permanently\n< Location: https://evil.example/issues\n< HTTP/2.0 200 OK\n');
   } });
   const saved = f.store.load(1);
   assert.match(saved.architectureDecision.publicationError, /page 1:.*Unapproved.*redirect/);
   assert.equal(saved.architectureDecision.publicationFailure.statusCode, 301);
   assert.equal(saved.architectureDecision.createAttempted, undefined);
   assert.equal(saved.architectureDecision.issue, undefined);
+});
+
+// Legacy history fixtures retain their original stdout headers; supply the
+// independent debug response status now required by the transport boundary.
+function historyReply(cb, error, stdout, stderr = '< ' + (/^HTTP[^\r\n]*/.exec(stdout)?.[0] || 'HTTP/2.0 200 OK') + '\n') {
+  cb(error, stdout, stderr);
+}
+
+for (const seam of ['publish', 'reconcile']) {
+  test(`real gh output split succeeds through ${seam} without verbose stdout`, async t => {
+    const f = await pausedFixture(t), calls = [];
+    const previousDebug = process.env.GH_DEBUG;
+    process.env.GH_DEBUG = 'inherited-debug-setting';
+    t.after(() => { if (previousDebug === undefined) delete process.env.GH_DEBUG; else process.env.GH_DEBUG = previousDebug; });
+    const stdout = 'HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nX-Github-Request-Id: fixture\r\n\r\n'
+      + JSON.stringify([historyIssue(200, f.job.architectureDecision.marker)]);
+    const stderr = '* Request at 2026-10-30 22:00:00 UTC\n* Request to https://api.github.com/repos/example/repo/issues\n> GET /repos/example/repo/issues HTTP/1.1\n< HTTP/2.0 200 OK\n< Content-Type: application/json; charset=utf-8\n';
+    const execFile = (_file, args, opts, cb) => {
+      calls.push({ args, env: opts.env });
+      if (args.includes('--include')) {
+        // Model CLI 2.102.0: --verbose moves debug text to stdout.
+        return args.includes('--verbose') ? cb(null, '* Request at fixture\n< HTTP/2.0 200 OK\n' + stdout, '') : cb(null, stdout, stderr);
+      }
+      cb(null, '', '');
+    };
+    if (seam === 'publish') await decisions.publish(f.project, f.job, f.store, { execFile });
+    else await decisions.reconcile(f.project, f.store, { execFile });
+    const saved = f.store.load(1);
+    assert.equal(saved.architectureDecision.publicationError, undefined);
+    assert.equal(saved.architectureDecision.publication, 'complete');
+    assert.equal(saved.architectureDecision.issue.number, 200);
+    assert.equal(calls[0].env.GH_DEBUG, 'api');
+    assert.ok(!calls[0].args.includes('--verbose'));
+    assert.ok(calls.slice(1).every(c => c.env.GH_DEBUG === 'inherited-debug-setting'));
+    assert.equal(process.env.GH_DEBUG, 'inherited-debug-setting');
+    assert.ok(!calls.some(c => c.args.includes('POST')));
+    assert.equal(saved.status, 'paused_owner_decision');
+    assert.deepEqual(saved.architectureDecision.pausedExecution, f.job.architectureDecision.pausedExecution);
+  });
+}
+for (const [name, stderr] of Object.entries({
+  missing: '', malformed: '< HTTP/2.0 twohundred OK\n', truncated: '< HTTP/2.0 20',
+  'malformed then success': '< HTTP/2.0 30x Redirect\n< HTTP/2.0 200 OK\n',
+  'no response': '> GET / HTTP/1.1\n', 'status mismatch': '< HTTP/2.0 201 Created\n',
+  redirect: '< HTTP/2.0 302 Found\n< HTTP/2.0 200 OK\n',
+  'multiple responses': '< HTTP/2.0 200 OK\n< HTTP/2.0 200 OK\n',
+})) {
+  test(`debug response integrity fails closed: ${name}`, async t => {
+    const f = await pausedFixture(t), writes = [];
+    await decisions.reconcile(f.project, f.store, { execFile: (_file, args, _opts, cb) => {
+      if (!args.includes('--include')) { writes.push(args); return cb(null, '', ''); }
+      cb(null, pageResponse([]), stderr);
+    } });
+    const saved = f.store.load(1), d = saved.architectureDecision;
+    assert.match(d.publicationError, /page 1:.*(debug|redirect)/i);
+    assert.equal(d.publicationFailure.code, 'AUTOPILOT_GITHUB_TRANSPORT');
+    assert.ok(d.publicationFailure.cause.message);
+    assert.ok(d.publicationFailure.stack);
+    if (name === 'redirect') assert.equal(d.publicationFailure.statusCode, 302);
+    assert.equal(d.publication, 'pending');
+    assert.equal(d.createAttempted, undefined);
+    assert.equal(d.issue, undefined);
+    assert.deepEqual(writes, []);
+    assert.equal(saved.status, 'paused_owner_decision');
+    assert.deepEqual(d.pausedExecution, f.job.architectureDecision.pausedExecution);
+  });
+}
+
+test('history boundary journals both raw pipes before header or subprocess failures', async t => {
+  const { execFile, withExecution } = require('../src/execution-log');
+  for (const transportFailure of [false, true]) {
+    const f = await pausedFixture(t), records = [], writes = [];
+    const stdout = 'HTTP/2.0 200 OK\r\nLocation: https://foreign.example/issues\r\n\r\n[]';
+    const stderr = '* Request at fixture\n< HTTP/2.0 200 OK\n< X-Raw-Fixture: untouched\n';
+    await withExecution((event, details) => records.push({ event, ...details }), () =>
+      decisions.publish(f.project, f.job, f.store, { execFile: (_file, args, options, cb) => {
+        if (!args.includes('--include')) { writes.push(args); return cb(null, '', ''); }
+        return execFile(process.execPath, ['-e',
+          `require("node:fs").writeFileSync(1, ${JSON.stringify(stdout)}); require("node:fs").writeFileSync(2, ${JSON.stringify(stderr)}); process.exit(${transportFailure ? 1 : 0});`], options, cb);
+      } }));
+    for (const [stream, expected] of Object.entries({ stdout, stderr })) {
+      const actual = Buffer.concat(records.filter(r => r.event === 'output' && r.stream === stream)
+        .map(r => Buffer.from(r.base64, 'base64'))).toString();
+      assert.equal(actual, expected);
+    }
+    const saved = f.store.load(1), d = saved.architectureDecision;
+    assert.match(d.publicationError, transportFailure ? /exited unsuccessfully/ : /headers or redirect/);
+    assert.ok(records.some(r => r.event === 'architecture_publication_failure'));
+    if (transportFailure) assert.equal(d.publicationFailure.cause.code, 1);
+    assert.deepEqual(writes, []);
+    assert.equal(d.createAttempted, undefined);
+    assert.equal(saved.status, 'paused_owner_decision');
+    assert.deepEqual(d.pausedExecution, f.job.architectureDecision.pausedExecution);
+  }
 });

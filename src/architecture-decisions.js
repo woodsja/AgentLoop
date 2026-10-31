@@ -205,15 +205,25 @@ async function findDecision(gh, repo, marker) {
   throw new Error('Decision history page resource limit exceeded; owner reconciliation required');
 }
 // gh follows redirects internally. Include alone exposes only the final response;
-// verbose stderr retains intermediate statuses so a redirected scan cannot
+// GH_DEBUG=api stderr retains intermediate statuses so a redirected scan cannot
 // authorize publication. The normal execution adapter journals both raw pipes.
 function historyGh(args, executeFile = require('./execution-log').execFile) {
-  return runGh([args[0], '--verbose', ...args.slice(1)], (file, argv, options, callback) => {
-    return executeFile(file, argv, options, (error, stdout, stderr) => {
-      const statuses = [...String(stderr || '').matchAll(/^< HTTP\/[^ ]+ (\d{3})(?: |\r?$)/gm)];
-      const redirect = statuses.find(status => /^3/.test(status[1]));
+  return runGh(args, (file, argv, options, callback) => {
+    // Scope debugging to these reads; --verbose changes gh's stdout format.
+    return executeFile(file, argv, { ...options, env: { ...options.env, GH_DEBUG: 'api' } }, (error, stdout, stderr) => {
+      const lines = String(stderr || '').split(/\r?\n/).filter(line => /^< HTTP/.test(line));
+      const statuses = lines.map(line => /^< HTTP\/\d+(?:\.\d+)? (\d{3})(?: [^\r\n]*)?$/.exec(line));
+      const redirect = statuses.find(status => status && /^3/.test(status[1]));
       if (!error && redirect) {
         error = Object.assign(new Error(`Unapproved decision history redirect (HTTP ${redirect[1]})`), { statusCode: Number(redirect[1]) });
+      }
+      if (!error) {
+        const included = /^HTTP\/[^ ]+ (\d{3})(?: |\r?\n)/.exec(String(stdout));
+        // Missing, malformed, additional or inconsistent debug responses cannot
+        // prove that gh did not follow a redirect. Keep both raw pipes intact.
+        if (statuses.length !== 1 || !statuses[0] || (included && statuses[0][1] !== included[1])) {
+          error = new Error('Missing, malformed or inconsistent decision history debug response status');
+        }
       }
       callback(error, stdout, stderr);
     });
