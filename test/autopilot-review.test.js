@@ -62,7 +62,7 @@ test('Claude reviewer gathers current PR diff, immutable standards, CI evidence,
   ]);
   const [commandName, args, options, child] = claude.calls[0];
   assert.equal(commandName, 'claude');
-  assert.deepEqual(args, ['-p', '--safe-mode', '--strict-mcp-config', '--permission-mode', 'plan', '--permission-prompts', 'none', '--tools', '', '--no-session-persistence', '--max-budget-usd', '2', '--output-format', 'json', '--model', 'sonnet']);
+  assert.deepEqual(args, ['-p', '--safe-mode', '--strict-mcp-config', '--restricted', '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--tools', '', '--no-session-persistence', '--max-budget-usd', '2', '--output-format', 'json', '--model', 'sonnet']);
   assert.equal(options.shell, false);
   assert.equal(options.cwd, require('node:os').tmpdir());
   assert.match(child.prompt, /Acceptance criteria/); assert.match(child.prompt, /checks passed/); assert.match(child.prompt, /safe patch/); assert.match(child.prompt, /standards for 0123456789abcdef:AGENTS\.md/);
@@ -476,4 +476,32 @@ test('later independent reviews receive unchanged original requirements and all 
   assert.deepEqual(JSON.parse(data.earlier_reviews).map(entry => entry.findings[0].summary), ['finding 1', 'finding 2', 'finding 3', 'finding 4']);
   assert.doesNotMatch(prompt, /not prompt input/);
   assert.match(prompt, /do not invent new scope/);
+});
+
+for (const tool of ['Write', 'ExitPlanMode']) {
+  test(`Opus rejects ${tool} markup containing an embedded exact-SHA PASS without retry`, async () => {
+    const output = JSON.stringify({ is_error: false, result: `<invoke name="${tool}"><parameter name="content">${JSON.stringify({ verdict: 'PASS', commit: sha, findings: '' })}</parameter></invoke>` });
+    const claude = reviewer({ output });
+    await assert.rejects(adapter(commands(), claude)({ project: { ...project, reviewModel: 'opus' }, issue, pullRequest, headCommit: sha, verification: verificationEvidence }), /malformed verdict JSON/);
+    assert.equal(claude.calls.length, 1);
+    assert.equal(claude.calls[0][1].includes('--restricted'), true);
+    assert.equal(claude.calls[0][1][claude.calls[0][1].indexOf('--tools') + 1], '');
+  });
+}
+
+test('Opus returns a strict PASS without planning or write capabilities', async () => {
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  assert.deepEqual(await adapter(commands(), claude)({ project: { ...project, reviewModel: 'opus' }, issue, pullRequest, headCommit: sha, verification: verificationEvidence }), { reviewer: 'claude:opus', commit: sha, verdict: 'PASS' });
+  assert.equal(claude.calls[0][1].includes('plan'), false);
+  assert.equal(claude.calls[0][1].includes('dontAsk'), true);
+});
+
+test('interrupting an active review terminates its child and cannot yield PASS', async () => {
+  const claude = reviewer({ hang: true });
+  const controller = new AbortController();
+  const pending = createClaudeReviewAdapter({ execFile: commands().execFile, spawn: claude.spawn, signal: controller.signal, terminationGraceMs: 5 })({ project, issue, pullRequest, headCommit: sha, verification: verificationEvidence });
+  setTimeout(() => controller.abort(), 5);
+  await assert.rejects(pending, /interrupted/);
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.deepEqual(claude.calls[0][3].signals, ['SIGTERM', 'SIGKILL']);
 });

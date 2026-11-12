@@ -92,3 +92,67 @@ A manifest cannot turn a blocked review into PASS. Merge and exact-head CI gates
 remain in force. A merged repair is not a verified deployment; #111 recovery
 requires separate authorization after the repair is reviewed, merged and
 explicitly deployed.
+
+## Direct verdicts and review-only successors (#170)
+
+R1 now invokes Claude with `--safe-mode --strict-mcp-config --restricted
+--permission-mode dontAsk --permission-prompts none --tools ''`. It retains
+fresh sessions, the temporary working directory, stripped GitHub environment
+tokens, model-specific dollar limits, output limits and the eight-minute timeout.
+There is no fallback to plan mode or broader tools. `Read,Glob,Grep`, already used
+by the loop critic, were considered but are unnecessary here: R1 supplies the
+complete bounded review material on stdin. The reviewer cannot run commands,
+edit files, use MCP or request permission expansion.
+
+The observed 2.1.310 failure is consistent with plan mode's plan-file and
+ExitPlanMode workflow competing with a direct final-answer contract. This is a
+working diagnosis, not proof of a vendor implementation defect. Installed
+`claude --help` documents `dontAsk`, empty `--tools`, and `--restricted` (which
+also ignores user/project/local settings). Anthropic's
+[permission-mode documentation](https://code.claude.com/docs/en/permission-modes)
+describes plan approval and automatic denial of unapproved calls in `dontAsk`.
+The parser still requires a successful CLI JSON envelope whose entire `result`
+string is a JSON verdict object for the delivered SHA. XML-like Write or
+ExitPlanMode markup containing PASS is invalid. No embedded verdict is extracted.
+Provider errors, malformed envelopes/verdicts and timeouts remain blocked with
+captured owner evidence; they do not automatically retry. Default adapter process
+capture now also preserves stdout/stderr when used outside the R1 dispatcher.
+
+After **separate owner authorization**, a blocked R1 result can seed one new,
+review-only successor, including the original Finance #48 / PR #83 failure:
+
+```bash
+node src/review-successor.js /absolute/owner/autopilot-projects.json \
+  finance-dashboard 48 /absolute/evidence/r1-blocked-result.json \
+  /absolute/new-evidence-directory
+```
+
+The source is the `get_r1_job_result` JSON (with `status: blocked`, `project`,
+`id`, and `evidence`), not an editable replacement for the old checkpoint. The
+command requires passing source verification for the full delivered SHA and an
+earlier failed/interrupted review. It records source bytes' SHA-256 and the
+complete parsed source, uses the configured repository/required CI workflow,
+forces Opus and `autoMerge=false` in its local context, and fetches fresh GitHub
+issue/diff/committed guidance. Both remote PR head and exact-SHA required CI must
+still match; CI is checked before and after the review.
+
+The destination directory must not exist. Its exclusive creation reserves a
+single paid invocation, bounded to $5 and eight minutes. Synchronously persisted
+`execution.ndjson` contains reservation, source identity, commands, raw pipe bytes
+(base64), CI observations and the new verdict or failure. The command never
+writes the source, job store, project files or owner configuration and has no
+worker, delivery, GitHub write or merge path. A valid NEEDS_CHANGES remains
+findings for an owner; it cannot launch a correction. A PASS is standalone review
+evidence and is never imported into an old job or used to authorize merge.
+
+SIGINT/SIGTERM aborts an active reviewer with SIGTERM followed by bounded SIGKILL.
+Reusing any existing successor directory always fails without fetching context
+or invoking Claude, including after a crash with only `review_running` recorded.
+Such a record means interrupted/unknown outcome, never approval. Inspect its
+complete journal before separately authorizing any further successor; do not
+erase the directory or rearm the original blocked job.
+
+Deployment remains separate. Require `npm run check`, independent review of the
+repair, exact-head GitHub CI, and real-host review smoke evidence before an owner
+explicitly authorizes deployment. The Finance pilot remains `autoMerge=false`.
+A merged repair or a simulated Opus verdict does not prove live review success.
