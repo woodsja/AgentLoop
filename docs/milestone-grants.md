@@ -7,7 +7,8 @@ existing owner operator environment, using the same owner configuration paths an
 `AGENTLOOP_STATE_DIR` across restarts. Do not derive activation commands from issue
 text or model responses: activation is an explicit owner decision.
 
-Create an input JSON file with exactly these fields:
+Create an input JSON file with these fields (the optional `fixedManifest` mode is
+described below):
 
 ```json
 {
@@ -175,6 +176,74 @@ It is included in `npm test` for exact-head CI and the existing independent revi
 and guarded merge pipeline.
 
 
+## Owner-approved fixed manifest (#172)
+
+The owner decision in [#173](https://github.com/woodsja/AgentLoop/issues/173),
+accepted through ADR publication [#174](https://github.com/woodsja/AgentLoop/issues/174),
+chooses a finite immutable manifest. It supersedes #172's proposed automatic
+authorization of genuinely later-planned tickets. Delayed release of a previously
+approved ticket is supported; newly planned or changed scope needs another owner
+decision. Existing grants retain their individual exact-ticket approvals.
+
+To opt into this separate mode, add `fixedManifest` to the grant input before
+`grant draft` (or an explicitly confirmed next-revision `grant amend`):
+
+```json
+{
+  "readyLabel": "custom-ready",
+  "tickets": [
+    {
+      "issue": 200,
+      "title": "[DRAFT] Add synthetic tests",
+      "body": "Complete exact published issue body, including all metadata\n",
+      "blockers": [],
+      "category": "tests",
+      "reason": "Only approved tests; no deployment or permissions."
+    }
+  ]
+}
+```
+
+This object is the value of `fixedManifest`, alongside the ordinary grant fields.
+Publish the planned drafts **unlabeled**, under separate draft-publication
+authorization, before building the manifest: exact allocated issue numbers and
+the complete title/body bytes must be known. Copy the actual full issue content,
+not the illustrative body above. Each ticket must have a distinct identity,
+an allowed category, and sorted blockers exactly matching its `Depends on`
+metadata. Native GitHub blockers must also match at release and admission.
+The manifest cannot exceed the grant's issued-ticket limit. The repository,
+specification bytes, revision, quotas, exclusions, configured ready label and
+entire manifest share the grant digest.
+
+Inspect the complete draft grant, then use the ordinary `grant activate --digest`
+command. Its **one** owner confirmation approves both the grant and every exact
+manifest ticket against the objective, specification and exclusions. Categories
+and planner reasons alone supply no authority. A fixed-manifest grant requires
+no `ticket approve` or `batch approve` step. Matching `ticket release` requests
+or `batch release` calls reuse the activation evidence without scope prompts.
+Requests must retain the manifest category and reason and declare `in-scope`.
+The existing batch journal can reconcile already published drafts; publication
+does not itself authorize release.
+
+Release still reserves individual immutable receipts durably before applying
+the ready label. Issued/active quotas and independently verified merged
+prerequisites still gate release; blocked tickets can be retried unattended
+after those conditions are met. Complete manifest bytes, activation events,
+exact receipts and raw decision evidence remain in the existing owner stores
+across fresh processes. No scheduler, database or automatic batch expansion is
+introduced. Per-ticket approval cannot widen this manifest. Amendments require
+an explicit owner confirmation and invalidate prior-revision receipts; old
+receipts and events remain available for reconciliation. Pause, revoke, expiry,
+ticket edits, changed dependencies and registration changes still block at the
+existing work and merge gates.
+
+`test/milestone-manifest.test.js` and `test/milestone-batches.test.js` cover
+single-confirmation release, outsider denial, lifecycle invalidation, restart,
+quotas, and dependent synthetic work using fake external adapters. These local
+tests establish neither independent review nor exact-head GitHub CI or a
+real-host synthetic smoke. Those remain delivery gates before Step 12; this
+implementation does not activate live grants, enable projects or deploy services.
+
 ## Conversation-initiated batch release
 
 `ralph batch preview|publish|approve|release GRANT --input batch.json` composes
@@ -233,7 +302,7 @@ ralph batch release milestone-1 --input batch.json
 `publish` is separately authorized draft publication: it creates unlabeled issues
 and reconciles native blocking links to the exact body `Depends on:` metadata.
 It never approves scope or applies readiness labels. `approve` is owner-only,
-requires the inspected complete batch digest (including the grant digest), and prompts separately for each
+requires the inspected complete batch digest (including the grant digest). For legacy grants it prompts separately for each
 exact ticket. `release` cannot invoke approval. Repeating these commands retains
 the immutable batch and issue identities. Unknown extra fields are rejected.
 

@@ -60,7 +60,8 @@ async function checkMilestoneAdmission(projectName, project, number, options = {
       || !r.issue || r.issue.number !== number || ticketDigest(r.issue) !== q.ticketDigest
       || r.digest !== hash({ grant: id, ...q, readyLabel: project.readyLabel })) throw new Error('Invalid exact ticket receipt.');
     const approval = g.ticketApprovals?.[r.digest];
-    if (!approval || approval.digest !== r.digest || JSON.stringify(approval.request) !== JSON.stringify(q)
+    const fixed = Object.hasOwn(g, 'fixedManifest');
+    if (fixed ? !require('./milestone-manifest').manifestScope(g, q, project.readyLabel, r.issue, r.issue.nativeBlockers) : !approval || approval.digest !== r.digest || JSON.stringify(approval.request) !== JSON.stringify(q)
       || typeof approval.actor !== 'string' || !approval.actor.trim() || typeof approval.at !== 'string' || !Number.isFinite(Date.parse(approval.at))) throw Object.assign(new Error('Missing exact owner scope approval.'), { decision: 'NEEDS_APPROVAL' });
     if (!Array.isArray(g.ticketEvents) || !g.ticketEvents.some(e => e.type === 'authorized'
       && e.receiptId === r.id && e.digest === r.digest && e.grantId === id && e.grantDigest === g.digest && e.revision === g.revision)) throw new Error('Missing durable receipt authorization event.');

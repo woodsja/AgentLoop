@@ -39,6 +39,7 @@ function validIssue(issue, request, readyLabel, receipt) {
 }
 function grantIntegrity(g) {
   const keys = ['project', 'repo', 'spec', 'objective', 'allowedCategories', 'exclusions', 'revision', 'ticketLimit', 'expiresAt', 'concurrencyLimit', 'registration'];
+  if (Object.hasOwn(g, 'fixedManifest')) keys.splice(keys.length - 1, 0, 'fixedManifest');
   const terms = Object.fromEntries(keys.map(k => [k, g[k]]));
   return hash(JSON.stringify(terms)) === g.digest
     && hash(Buffer.from(g.spec.contentBase64, 'base64')) === g.spec.digest;
@@ -106,7 +107,7 @@ async function ticketCommand(action, id, options) {
 
     const gh = args => withExecution(options.recordExecution || options.record || (() => {}),
       async () => JSON.parse(await runGh(args, options.execFile || execFile, 'Milestone ticket authorization')));
-    const native = options.nativeBlockers === true || Array.isArray((receipt || previousReceipt)?.issue?.nativeBlockers);
+    const native = Object.hasOwn(g, 'fixedManifest') || options.nativeBlockers === true || Array.isArray((receipt || previousReceipt)?.issue?.nativeBlockers);
     if (options.nativeBlockers === true && receipt && !Array.isArray(receipt.issue.nativeBlockers)) {
       return finish(result('NEEDS_APPROVAL', 'Existing receipt does not bind native blockers; retain it for owner reconciliation.'));
     }
@@ -124,15 +125,18 @@ async function ticketCommand(action, id, options) {
       await checkIssue();
     } catch (e) { const out = result('WAIT', e.message); record('preview', out); return finish(out); }
     const approval = g.ticketApprovals[digest];
-    const scopeApproved = approval?.digest === digest && JSON.stringify(approval.request) === JSON.stringify(request)
+    const fixed = Object.hasOwn(g, 'fixedManifest');
+    const manifestApproved = fixed && require('./milestone-manifest').manifestScope(g, request, label, issue, blockers);
+    const scopeApproved = fixed ? manifestApproved : approval?.digest === digest && JSON.stringify(approval.request) === JSON.stringify(request)
       && typeof approval.actor === 'string' && Number.isFinite(Date.parse(approval.at));
     let out;
     if (!g.allowedCategories.includes(request.category) || request.scope === 'excluded') out = result('DENY', 'Category is outside the grant or the proposal includes excluded work.');
     else if (!receipt && !previousReceipt && Object.keys(g.receipts).length >= g.ticketLimit) out = result('DENY', 'Grant ticket quota exhausted.');
     else if (request.scope === 'ambiguous') out = result('NEEDS_APPROVAL', 'Semantic scope is ambiguous. Resolve scope against the objective, specification and every exclusion with the owner; submit a new exact request.');
+    else if (fixed && !manifestApproved) out = result('DENY', 'Ticket is outside the owner-approved immutable manifest; a new owner-approved grant revision is required.');
     else if (!scopeApproved) out = result('NEEDS_APPROVAL', 'Owner must confirm this exact ticket fits the approved objective/specification, category and all exclusions. A planner category or model verdict cannot authorize scope.');
     else out = result('ALLOW', 'Owner confirmed exact semantic scope within this active grant; immutable ticket and quota checks passed.');
-    if (out.decision === 'ALLOW' && options.checkDependencies) {
+    if (out.decision === 'ALLOW' && (fixed || options.checkDependencies)) {
       try {
         const { createJobStore, resolveStateDir } = require('./autopilot-state');
         const jobs = createJobStore(resolveStateDir(g.project, project, state)).list();

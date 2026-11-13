@@ -12,7 +12,11 @@ keeps these issues out of label-based Ralph admission. The notice alone is not
 an admission control. Explicit executable release is a separate owner decision
 for the entire batch. The draft helper implements no release operation. The separate
 [exact-ticket authorization workflow](milestone-grants.md#exact-ticket-authorization)
-requires an active owner-approved grant and explicit exact-ticket scope confirmation.
+requires an active owner-approved grant and explicit exact-ticket scope authority.
+The separate [fixed-manifest mode](milestone-grants.md#owner-approved-fixed-manifest-172)
+binds all exact ticket content and dependencies into one owner grant approval;
+legacy grants still require individual scope confirmations. A fixed manifest
+never authorizes a newly added or changed ticket automatically.
 The [conversation-initiated batch workflow](milestone-grants.md#conversation-initiated-batch-release)
 adds a durable journal around draft creation, native blockers and separately
 approved receipt/label release. Use that workflow for resumable batches; retain

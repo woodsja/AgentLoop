@@ -44,6 +44,7 @@ function registration(project, repo, options) {
 function proposal(options) {
   const p = read(options.inputPath);
   const keys = ['project', 'repo', 'spec', 'objective', 'allowedCategories', 'exclusions', 'revision', 'ticketLimit', 'expiresAt', 'concurrencyLimit'];
+  if (Object.hasOwn(p || {}, 'fixedManifest')) keys.push('fixedManifest');
   if (!p || Array.isArray(p) || Object.keys(p).some(k => !keys.includes(k)) || keys.some(k => !Object.hasOwn(p, k))) throw new Error('Supply exactly the documented grant fields.');
   text(p.project, 'project', 100); text(p.repo, 'repo', 200); text(p.objective, 'objective');
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(p.repo)) throw new Error('Invalid repository.');
@@ -61,6 +62,7 @@ function proposal(options) {
   if (!Number.isSafeInteger(p.concurrencyLimit) || p.concurrencyLimit < 1 || p.concurrencyLimit > Math.min(10, p.ticketLimit)) throw new Error('Concurrency limit must be 1..10 and no greater than ticket limit.');
   const expiry = Date.parse(p.expiresAt), now = Date.now();
   if (typeof p.expiresAt !== 'string' || !Number.isFinite(expiry) || new Date(expiry).toISOString() !== p.expiresAt || expiry <= now || expiry > now + 366 * 86400000) throw new Error('Expiration must be a future ISO timestamp within 366 days.');
+  if (Object.hasOwn(p, 'fixedManifest')) require('./milestone-manifest').validateManifest(p.fixedManifest, p, read(options.projectsPath)[p.project]?.readyLabel);
   const bytes = fs.readFileSync(options.specPath);
   if (hash(bytes) !== p.spec.digest) throw new Error('Specification digest mismatch.');
   // Construct in fixed order so retries do not depend on input JSON key order.
@@ -149,6 +151,7 @@ async function grantCommand(action, id, options) {
       } catch (error) { event('action_failed', { action, message: error.message }); commit(); throw error; }
       if (terms) {
         grant.history ||= []; grant.history.push(priorRevision);
+        delete grant.fixedManifest;
         Object.assign(grant, terms, { digest: hash(JSON.stringify(terms)) });
         // Existing receipts stay immutable and fail the new digest/revision checks.
         event('activated', { approval: 'amendment', actionDigest: digest });
@@ -166,7 +169,7 @@ async function grantCommand(action, id, options) {
     if (grant.state === 'active') return grant;
     event('approval_requested'); commit();
     try {
-      if (!await options.approve(`Activate grant ${id}, revision ${grant.revision}, digest ${grant.digest}?`) || options.isCancelled?.()) throw new Error('Grant activation cancelled.');
+      if (!await options.approve(`Activate grant ${id}, revision ${grant.revision}, digest ${grant.digest}${grant.fixedManifest ? ` and approve the complete immutable manifest of ${grant.fixedManifest.tickets.length} exact tickets within its objective, specification and every exclusion` : ''}?`) || options.isCancelled?.()) throw new Error('Grant activation cancelled.');
       checkRegistration();
       if (Date.parse(grant.expiresAt) <= require('./milestone-clock').currentTime(state)) throw new Error('Grant expired during approval.');
     } catch (error) {

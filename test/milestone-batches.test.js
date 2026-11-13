@@ -8,21 +8,37 @@ const { grantCommand } = require('../src/milestone-grants');
 const { batchCommand } = require('../src/milestone-batches');
 const { checkMilestoneAdmission } = require('../src/milestone-admission');
 
-async function fixture(t, { ticketLimit = 3, concurrencyLimit = 2, blockers = [] } = {}) {
+async function fixture(t, { ticketLimit = 3, concurrencyLimit = 2, blockers = [], fixedManifest = false, synthetic = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'batches-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const options = { stateDir: root, configPath: path.join(root, 'config.json'), projectsPath: path.join(root, 'projects.json'), inputPath: path.join(root, 'input.json'), specPath: path.join(root, 'spec.md'), approve: async () => true };
+  let prompts = 0;
+  const options = { stateDir: root, configPath: path.join(root, 'config.json'), projectsPath: path.join(root, 'projects.json'), inputPath: path.join(root, 'input.json'), specPath: path.join(root, 'spec.md'), approve: async () => { prompts++; return true; } };
   const project = { repo: 'owner/demo', checkout: root, readyLabel: 'custom-ready', milestoneAuthorization: true };
   options.record = () => {};
   fs.writeFileSync(options.configPath, JSON.stringify({ allowedProjects: { demo: root } }));
   fs.writeFileSync(options.projectsPath, JSON.stringify({ demo: project }));
   fs.writeFileSync(options.specPath, 'Approved test scope');
   fs.writeFileSync(options.inputPath, JSON.stringify({ project: 'demo', repo: 'owner/demo', spec: { identity: 'owner/demo#103@1', digest: crypto.createHash('sha256').update('Approved test scope').digest('hex') }, objective: 'Test scope', allowedCategories: ['tests'], exclusions: ['deployment', 'external permissions'], revision: 1, ticketLimit, concurrencyLimit, expiresAt: new Date(Date.now() + 86400000).toISOString() }));
-  const grant = await grantCommand('draft', 'g1', options);
-  await grantCommand('activate', 'g1', { ...options, digest: grant.digest });
   const batch = { id: 'batch-one', conversation: 'chatgpt:owner-planning-message-1', tickets: ['one', 'two'].map(id => ({
     draft: { id, kind: 'ticket', repo: 'owner/demo', title: `Test ${id}`, sourceSpec: '#103', conversation: 'chatgpt:owner-planning-message-1', summary: 'Add isolated tests', acceptanceCriteria: ['Tests pass in an isolated store'], blockers },
     category: 'tests', scope: 'in-scope', reason: 'Only approved test scope; no deployment or permissions.' })) };
+  if (synthetic) {
+    batch.tickets[0].draft.title = 'Implement synthetic total calculator';
+    batch.tickets[0].draft.acceptanceCriteria = ['The calculator totals an explicit list of numbers'];
+    batch.tickets[1].draft.title = 'Build synthetic report using the calculator';
+    batch.tickets[1].draft.acceptanceCriteria = ['The report formats the calculator total'];
+    batch.tickets[1].draft.blockers = [200];
+  }
+  if (fixedManifest) {
+    const proposal = JSON.parse(fs.readFileSync(options.inputPath));
+    proposal.fixedManifest = { readyLabel: project.readyLabel, tickets: batch.tickets.map((item, index) => {
+      const preview = require('../src/planning-drafts').previewDraft(item.draft);
+      return { issue: 200 + index, title: preview.title, body: preview.body, blockers: item.draft.blockers, category: item.category, reason: item.reason };
+    }) };
+    fs.writeFileSync(options.inputPath, JSON.stringify(proposal));
+  }
+  const grant = await grantCommand('draft', 'g1', options);
+  await grantCommand('activate', 'g1', { ...options, digest: grant.digest });
   const issues = [], native = new Map(), writes = [], events = [];
   const db = () => JSON.parse(fs.readFileSync(path.join(root, 'milestone-grants.json')));
   const journal = () => JSON.parse(fs.readFileSync(path.join(root, 'milestone-batches.json')));
@@ -70,7 +86,7 @@ async function fixture(t, { ticketLimit = 3, concurrencyLimit = 2, blockers = []
     return batchCommand(action, 'g1', { ...options, ...extra });
   };
   const approve = async () => { const p = await run('preview'); return run('approve', { digest: p.digest }); };
-  return { root, options, batch, project, run, approve, issues, native, writes, events, db, journal };
+  return { root, options, batch, project, run, approve, issues, native, writes, events, db, journal, prompts: () => prompts };
 }
 
 test('two-ticket conversation batch previews, publishes unlabeled, confirms scope and releases exact receipts', async t => {
@@ -302,13 +318,10 @@ test('pause during publication reads prevents the first new issue without deleti
 });
 
 test('synthetic release completes dependent work across restart; out-of-scope ready issue never starts', async t => {
-  const f = await fixture(t);
-  f.batch.tickets[0].draft.title = 'Implement synthetic total calculator';
-  f.batch.tickets[0].draft.acceptanceCriteria = ['The calculator totals an explicit list of numbers'];
-  f.batch.tickets[1].draft.title = 'Build synthetic report using the calculator';
-  f.batch.tickets[1].draft.acceptanceCriteria = ['The report formats the calculator total'];
-  f.batch.tickets[1].draft.blockers = [200];
-  await f.run('publish'); await f.approve();
+  const f = await fixture(t, { fixedManifest: true, synthetic: true });
+  await f.run('publish');
+  assert.equal(f.prompts(), 1);
+  f.options.approve = async () => { throw new Error('Unexpected scope prompt after grant activation'); };
   const released = await f.run('release');
   assert.equal(released.tickets[0].decision, 'ALLOW');
   assert.equal(released.tickets[1].decision, 'WAIT');
@@ -425,4 +438,31 @@ test('owner summary is read-only, retains raw evidence and diagnoses damaged sto
     const result = await main(['grant', 'summary', 'g1', '--projects', f.options.projectsPath]);
     assert.equal(result.grant.id, 'g1'); assert.deepEqual(snapshot(), before);
   } finally { console.log = output; if (previous === undefined) delete process.env.AGENTLOOP_STATE_DIR; else process.env.AGENTLOOP_STATE_DIR = previous; }
+});
+
+
+test('fixed-manifest batch release uses the single activation approval without ticket prompts', async t => {
+  const f = await fixture(t, { fixedManifest: true });
+  f.options.approve = async () => { throw new Error('Unexpected per-ticket scope prompt'); };
+  await f.run('publish');
+  assert.deepEqual((await f.run('preview')).tickets.map(t => t.decision), ['ALLOW', 'ALLOW']);
+  assert.ok((await f.run('release')).tickets.every(t => t.released));
+  assert.deepEqual(f.db().grants.g1.ticketApprovals, {});
+  await checkMilestoneAdmission('demo', f.project, 200, f.options);
+  await checkMilestoneAdmission('demo', f.project, 201, f.options);
+});
+
+
+test('fixed-manifest receipts and activation survive fresh release processes without a prompt adapter', async t => {
+  const f = await fixture(t, { fixedManifest: true });
+  await f.run('publish');
+  fs.writeFileSync(path.join(f.root, 'fake-github.json'), JSON.stringify({ issues: f.issues, writes: [] }));
+  const { spawnSync } = require('node:child_process');
+  const worker = () => spawnSync(process.execPath, [path.join(__dirname, 'fixtures/milestone-batch-crash.js'), f.root, 'release'], { encoding: 'utf8' });
+  const first = worker(); assert.equal(first.status, 0, first.stderr);
+  const receipts = f.db().grants.g1.receipts;
+  const second = worker(); assert.equal(second.status, 0, second.stderr);
+  assert.deepEqual(f.db().grants.g1.receipts, receipts);
+  assert.equal(f.prompts(), 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, 'fake-github.json'))).writes, ['label', 'label']);
 });

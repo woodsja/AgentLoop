@@ -141,8 +141,8 @@ async function batchCommand(action, grantId, options) {
         const command = action === 'release' ? 'release' : 'preview';
         let result = await ticketCommand(command, grantId, { ...options, request, nativeBlockers: true, checkDependencies: true });
         if (action === 'approve') {
-          // The caller must explicitly approve the immutable complete batch,
-          // then confirm each exact scope using the existing owner-only flow.
+          // Legacy grants retain individual scope confirmations. Fixed-manifest
+          // grants already bind exact scope in their single activation approval.
           if (options.digest !== digest) result = { ...result, decision: 'NEEDS_APPROVAL', reasons: ['Batch approval requires its inspected digest.'] };
           else result = await ticketCommand('approve', grantId, { ...options, request, digest: result.digest, nativeBlockers: true, checkDependencies: true });
         }
