@@ -6,7 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { grantCommand } = require('../src/milestone-grants');
 const { ticketCommand, ticketDigest } = require('../src/milestone-tickets');
-async function fixture(t) {
+async function fixture(t, fixedManifest = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tickets-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const configPath = path.join(root, 'config.json'), projectsPath = path.join(root, 'projects.json');
@@ -18,12 +18,18 @@ async function fixture(t) {
   fs.writeFileSync(inputPath, JSON.stringify({ project: 'demo', repo: 'owner/demo', spec: { identity: '#103@1', digest: crypto.createHash('sha256').update('Approved scope').digest('hex') }, objective: 'Tests', allowedCategories: ['tests'], exclusions: ['deployment'], revision: 1, ticketLimit: 1, concurrencyLimit: 1, expiresAt: new Date(Date.now() + 86400000).toISOString() }));
   const events = [], writes = [];
   const options = { configPath, projectsPath, stateDir: root, inputPath, specPath, record: (type, details) => events.push({ type, ...details }), approve: async () => true };
+  const issue = { number: 106, title: '[DRAFT] Add tests', body: 'Draft tests\n', state: 'open', labels: [], html_url: 'https://github.com/owner/demo/issues/106' };
+  if (fixedManifest) {
+    const proposal = JSON.parse(fs.readFileSync(inputPath));
+    proposal.fixedManifest = { readyLabel: 'custom-ready', tickets: [{ issue: issue.number, title: issue.title, body: issue.body, blockers: [], category: 'tests', reason: 'Only adds tests; no deployment.' }] };
+    fs.writeFileSync(inputPath, JSON.stringify(proposal));
+  }
   const grant = await grantCommand('draft', 'g1', options);
   await grantCommand('activate', 'g1', { ...options, digest: grant.digest });
-  const issue = { number: 106, title: '[DRAFT] Add tests', body: 'Draft tests\n', state: 'open', labels: [], html_url: 'https://github.com/owner/demo/issues/106' };
   const request = { repo: 'owner/demo', issue: 106, grantDigest: grant.digest, revision: 1, spec: { identity: grant.spec.identity, digest: grant.spec.digest }, ticketDigest: ticketDigest(issue), category: 'tests', scope: 'in-scope', reason: 'Only adds tests; no deployment.' };
   const db = () => JSON.parse(fs.readFileSync(path.join(root, 'milestone-grants.json')));
   options.execFile = (file, args, opts, callback) => {
+    if (args.some(a => a.includes('/dependencies/blocked_by'))) return callback(null, '[[]]', '');
     if (args.includes('POST')) {
       assert.equal(Object.keys(db().grants.g1.receipts).length, 1, 'receipt precedes label');
       writes.push(args); if (options.failLabel) return callback(new Error('offline'), '', 'offline');
@@ -38,8 +44,8 @@ async function fixture(t) {
 
 const { createR1Jobs } = require('../src/r1-jobs');
 const { configuredProjects } = require('../src/project-registry');
-async function r1Fixture(t) {
-  const f = await fixture(t);
+async function r1Fixture(t, fixedManifest = false) {
+  const f = await fixture(t, fixedManifest);
   const project = { repo: 'owner/demo', checkout: path.join(f.root, 'repo'), readyLabel: 'custom-ready', humanLabel: 'human', enabled: true,
      baseBranch: 'main', worker: 'codex', reviewPolicy: 'always', autoMerge: true, milestoneAuthorization: true,
     worktreeRoot: path.join(f.root, 'worktrees'), stateDir: path.join(f.root, 'jobs') };
@@ -81,9 +87,9 @@ test('authorized submit progresses; queued recovery rechecks revocation without 
   assert.ok(f.events.some(e => e.event === 'recovery' || e.type === 'recovery'));
 });
 
-for (const change of ['none', 'revoked', 'expired', 'edited', 'paused']) {
-  test(`actual R1 resume and guarded merge with ${change} authorization after green CI and Claude PASS`, async t => {
-    const f = await r1Fixture(t); await f.approve(); await f.run('release');
+for (const [change, fixedManifest] of ['none', 'revoked', 'expired', 'edited', 'paused'].flatMap(change => [[change, false], [change, true]])) {
+  test(`actual R1 resume and guarded merge with ${change} ${fixedManifest ? 'fixed-manifest' : 'legacy'} authorization after green CI and Claude PASS`, async t => {
+    const f = await r1Fixture(t, fixedManifest); if (!fixedManifest) await f.approve(); await f.run('release');
     const task = await f.jobs.submit({ project: 'demo', issue: 106 });
     f.store.moveTask(task.id, 'pending', 'running');
     const { createJobStore, createJob } = require('../src/autopilot-state');
