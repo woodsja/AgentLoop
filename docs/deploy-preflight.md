@@ -21,13 +21,22 @@ with actual successful workflow-run evidence. Ralph must retain `reviewPolicy:
 "always"`, `autoMerge: true`, and `baseBranch: "ralph-dev"`.
 
 The configured checkout must be a clean repository root on `ralph-dev`, including
-no untracked files. Origin must identify the configured GitHub repository. A live
+no untracked files. Both the literal origin URL and its effective URL after
+`insteadOf` rewriting must identify the configured GitHub repository. A live
 `git ls-remote` observation of `refs/heads/ralph-dev` must equal the recorded merge
 SHA exactly; local tracking refs are insufficient. Both installed and candidate
 commits must already exist locally. The candidate must be the reviewed head itself
-or a two-parent merge whose second parent is exactly that head. Squash/rebase
-merges without that proof fail closed. Installed HEAD must be an ancestor, and
-`git diff --check <old-sha> <new-sha>` must accept the actual committed delta.
+with a sole parent equal to installed HEAD, or a two-parent merge whose first
+parent is installed HEAD and whose second parent is exactly the reviewed head.
+Intermediate base commits and longer fast-forward paths fail closed. Already
+installed candidates retain the reviewed-head identity check. Installed HEAD must
+be an ancestor, and `git diff --check <old-sha> <new-sha>` must accept the actual
+committed delta. The whitespace gate preserves owner checks and independently
+enforces baseline and stricter owner core rules in temporary, attribute-free bare
+Git metadata pointing at existing objects. Candidate and info attributes cannot
+disable that independent check; temporary metadata is removed on success or failure.
+HEAD, branch, and clean status are checked again against the initial snapshot
+immediately before returning.
 
 Success returns a frozen `{ oldSha, newSha, noOp }` object. Already installed
 candidates still pass all gates and return `noOp: true`. Missing, inconsistent,
@@ -36,8 +45,8 @@ retain their captured `stdout` and `stderr` (including whitespace diagnostics).
 
 This is a point-in-time validation, not a deployment receipt or authorization to
 apply changes. Future stages must guard against changes after validation. The
-module performs no fetch, ref/index update, checkout, config/state write, service
-action, or deployment. Git optional index refreshes and replacement objects are
+module performs no fetch, repository ref/index update, checkout, config/state
+write, service action, or deployment. Git optional index refreshes and replacement objects are
 disabled. Network access is limited to the read-only remote observation; missing
 objects require a separate owner-authorized preparation step.
 

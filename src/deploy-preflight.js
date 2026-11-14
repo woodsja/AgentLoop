@@ -1,6 +1,8 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { loadProjectConfig } = require('./autopilot-config');
@@ -36,24 +38,60 @@ async function validateDeploymentCandidate(issueNumber, { configPath } = {}) {
     env, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
   })).stdout.trim();
   requireCandidate(fs.realpathSync(await git(['rev-parse', '--show-toplevel'])) === fs.realpathSync(project.checkout), 'configured checkout must be the repository root');
+  const oldSha = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
   requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch, 'checkout is on the wrong branch');
   requireCandidate(await git(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none']) === '', 'checkout is dirty');
-  const urls = (await git(['config', '--get-all', 'remote.origin.url'])).split('\n');
-  requireCandidate(urls.length === 1 && [
+  const allowedUrls = [
     `https://github.com/${project.repo}`, `https://github.com/${project.repo}.git`,
     `git@github.com:${project.repo}`, `git@github.com:${project.repo}.git`,
     `ssh://git@github.com/${project.repo}`, `ssh://git@github.com/${project.repo}.git`,
-  ].includes(urls[0]), 'origin does not identify the configured repository');
+  ];
+  const urls = (await git(['config', '--get-all', 'remote.origin.url'])).split('\n');
+  requireCandidate(urls.length === 1 && allowedUrls.includes(urls[0])
+    && allowedUrls.includes(await git(['ls-remote', '--get-url', 'origin'])),
+    'origin does not identify the configured repository');
   const targetRef = `refs/heads/${project.baseBranch}`;
   const remote = await git(['ls-remote', '--exit-code', '--refs', 'origin', targetRef]);
   const newSha = job.merge.commit;
   requireCandidate(remote === `${newSha}\t${targetRef}`, 'approved merge is not the exact origin/ralph-dev target');
-  const oldSha = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
   requireCandidate(sha(oldSha) && await git(['rev-parse', '--verify', `${newSha}^{commit}`]) === newSha, 'candidate is not a local commit');
   const parents = (await git(['rev-list', '--parents', '-n', '1', newSha])).split(' ').slice(1);
   requireCandidate(newSha === job.delivery.commit || (parents.length === 2 && parents[1] === job.delivery.commit), 'merge does not contain the exact reviewed head');
+  requireCandidate(oldSha === newSha || (parents[0] === oldSha
+    && (newSha === job.delivery.commit ? parents.length === 1 : parents.length === 2)),
+    'candidate includes unreviewed intermediate commits');
   await git(['merge-base', '--is-ancestor', oldSha, newSha]);
-  await git(['-c', 'core.whitespace=blank-at-eol,blank-at-eof,space-before-tab', 'diff', '--no-ext-diff', '--no-textconv', '--check', oldSha, newSha, '--']);
+
+  // Keep the owner's attribute-specific checks, then independently check the
+  // delta without candidate or info attributes. Preserve stricter core rules
+  // while enforcing the baseline even if config disables those rules.
+  const diffArgs = ['diff', '--no-ext-diff', '--no-textconv', '--check', oldSha, newSha, '--'];
+  await git(diffArgs);
+  const whitespace = await git(['config', '--default', '', '--get', 'core.whitespace']);
+  const objects = await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-whitespace-'));
+  try {
+    // A config-free bare context reads existing objects (including alternates)
+    // without writing to the checkout, its index, refs, config, or object store.
+    fs.mkdirSync(path.join(scratch, 'objects'));
+    fs.mkdirSync(path.join(scratch, 'refs'));
+    fs.writeFileSync(path.join(scratch, 'HEAD'), 'ref: refs/heads/unused\n');
+    await execute('git', ['--no-replace-objects', `--git-dir=${scratch}`,
+      '-c', 'core.bare=true', '-c', 'core.attributesFile=/dev/null',
+      '-c', `core.whitespace=${whitespace ? `${whitespace},` : ''}blank-at-eol,blank-at-eof,space-before-tab`,
+      ...diffArgs], {
+      cwd: scratch, env: { ...env, GIT_OBJECT_DIRECTORY: objects, GIT_ATTR_NOSYSTEM: '1' },
+      encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+    });
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+  requireCandidate(await git(['rev-parse', '--verify', 'HEAD^{commit}']) === oldSha,
+    'checkout HEAD changed during validation');
+  requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch,
+    'checkout branch changed during validation');
+  requireCandidate(await git(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none']) === '',
+    'checkout became dirty during validation');
   return Object.freeze({ oldSha, newSha, noOp: oldSha === newSha });
 }
 

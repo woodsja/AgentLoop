@@ -9,7 +9,7 @@ const { execFileSync } = require('node:child_process');
 const state = require('../src/autopilot-state');
 const { validateDeploymentCandidate } = require('../src/deploy-preflight');
 
-function fixture(t, content = 'candidate\n') {
+function fixture(t, content = 'candidate\n', { installedAttributes, candidateAttributes } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-preflight-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const checkout = path.join(root, 'checkout');
@@ -23,10 +23,23 @@ function fixture(t, content = 'candidate\n') {
   git('config', 'user.email', 'preflight@example.invalid');
   git('config', 'commit.gpgsign', 'false');
   git('init', '--bare', remote);
-  // Git itself redirects this configured GitHub URL to a disposable bare repo.
-  // No command responses or approval predicates are mocked.
-  git('config', `url.${remote}.insteadOf`, 'https://github.com/woodsja/AgentLoop.git');
-  git('remote', 'add', 'origin', 'https://github.com/woodsja/AgentLoop.git');
+  // Exercise real Git URL resolution and upload-pack over a disposable SSH
+  // transport. The effective URL remains the configured GitHub identity; no
+  // insteadOf rewrite is needed for successful fixtures.
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  const transport = path.join(root, 'ssh-transport');
+  const beforeRemote = path.join(root, 'before-remote');
+  fs.writeFileSync(transport, `#!/bin/sh
+if test -f ${quote(beforeRemote)}; then sh ${quote(beforeRemote)} >&2 || exit; fi
+case "$*" in
+  *git-receive-pack*) exec git-receive-pack ${quote(remote)} ;;
+esac
+exec git-upload-pack ${quote(remote)}
+`, { mode: 0o700 });
+  git('config', 'core.sshCommand', quote(transport));
+  git('config', 'ssh.variant', 'simple');
+  git('remote', 'add', 'origin', 'git@github.com:woodsja/AgentLoop.git');
+  if (installedAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), installedAttributes);
   const commit = text => {
     fs.writeFileSync(path.join(checkout, 'file.txt'), text);
     git('add', '.'); git('commit', '-m', 'fixture');
@@ -34,6 +47,7 @@ function fixture(t, content = 'candidate\n') {
   };
   const oldSha = commit('installed\n');
   git('checkout', '-b', 'ralph/issue-28');
+  if (candidateAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), candidateAttributes);
   const head = commit(content);
   git('checkout', 'ralph-dev');
   git('merge', '--no-ff', 'ralph/issue-28', '-m', 'approved merge');
@@ -64,7 +78,7 @@ function fixture(t, content = 'candidate\n') {
   state.markTerminal(job, 'merged');
   const save = () => store.save(job);
   save();
-  return { root, checkout, remote, git, commit, oldSha, newSha, head, job, store, save, project, configure,
+  return { root, checkout, remote, beforeRemote, quote, git, commit, oldSha, newSha, head, job, store, save, project, configure,
     validate: () => validateDeploymentCandidate(28, { configPath }) };
 }
 
@@ -198,4 +212,104 @@ test('owner configuration must retain Ralph deployment branch and review policy'
   await assert.rejects(f.validate(), /owner Ralph policy/);
   f.project.baseBranch = 'ralph-dev'; f.project.reviewPolicy = 'none'; f.configure();
   await assert.rejects(f.validate(), /owner Ralph policy/);
+});
+
+for (const kind of ['merge', 'fast-forward']) {
+  test(`rejects an unreviewed intermediate commit before approved ${kind}`, async t => {
+    const f = fixture(t);
+    const intermediate = f.commit('unreviewed base change\n');
+    f.git('checkout', '-b', 'reviewed-after-intermediate');
+    const head = f.commit('approved change\n');
+    f.git('checkout', 'ralph-dev');
+    if (kind === 'merge') f.git('merge', '--no-ff', head, '-m', 'merge after unreviewed push');
+    else f.git('merge', '--ff-only', head);
+    const candidate = f.git('rev-parse', 'HEAD');
+    if (kind === 'merge') assert.equal(f.git('rev-parse', `${candidate}^1`), intermediate);
+    f.git('push', '--force', 'origin', 'ralph-dev');
+    f.git('reset', '--hard', f.oldSha);
+    f.job.verification.commit = head;
+    f.job.delivery.commit = head;
+    f.job.review.commit = head;
+    f.job.ci.headCommit = head;
+    f.job.merge.approvedHead = head;
+    f.job.merge.commit = candidate;
+    f.save();
+    const before = snapshot(f.root);
+    await assert.rejects(f.validate(), /unreviewed intermediate commits/);
+    assert.deepEqual(snapshot(f.root), before);
+  });
+}
+
+test('rejects an unexpected effective origin after insteadOf rewriting', async t => {
+  const f = fixture(t);
+  f.git('config', `url.${f.remote}.insteadOf`, 'git@github.com:woodsja/AgentLoop.git');
+  assert.equal(f.git('ls-remote', '--get-url', 'origin'), f.remote);
+  assert.equal(f.git('ls-remote', '--refs', 'origin', 'refs/heads/ralph-dev'), `${f.newSha}\trefs/heads/ralph-dev`);
+  const before = snapshot(f.root);
+  await assert.rejects(f.validate(), /origin does not identify/);
+  assert.deepEqual(snapshot(f.root), before);
+});
+
+for (const location of ['installed', 'candidate', 'info']) {
+  test(`attributes in ${location} cannot disable mandatory whitespace checks`, async t => {
+    const f = fixture(t, 'bad whitespace  \n', {
+      installedAttributes: location === 'installed' ? '* -whitespace\n' : undefined,
+      candidateAttributes: location === 'candidate' ? '* -whitespace\n' : undefined,
+    });
+    if (location === 'info') fs.writeFileSync(path.join(f.checkout, '.git/info/attributes'), '* -whitespace\n');
+    const before = snapshot(f.root);
+    await assert.rejects(f.validate(), error => /trailing whitespace/.test(error.stdout));
+    assert.deepEqual(snapshot(f.root), before);
+  });
+}
+
+for (const attributes of [false, true]) {
+  test(`preserves stricter owner whitespace rules${attributes ? ' despite disabling attributes' : ''}`, async t => {
+    const f = fixture(t, '\tindent\n', { installedAttributes: attributes ? '* -whitespace\n' : undefined });
+    f.git('config', 'core.whitespace', 'tab-in-indent');
+    const before = snapshot(f.root);
+    await assert.rejects(f.validate(), error => /tab in indent/.test(error.stdout));
+    assert.deepEqual(snapshot(f.root), before);
+  });
+}
+
+for (const kind of ['HEAD', 'branch', 'dirty', 'detached']) {
+  test(`rejects concurrent ${kind} change during remote observation`, async t => {
+    const f = fixture(t);
+    const commands = {
+      HEAD: `git -C ${f.quote(f.checkout)} reset --hard ${f.newSha}`,
+      branch: `git -C ${f.quote(f.checkout)} checkout -b concurrent`,
+      dirty: `echo dirty > ${f.quote(path.join(f.checkout, 'file.txt'))}`,
+      detached: `git -C ${f.quote(f.checkout)} checkout --detach`,
+    };
+    fs.writeFileSync(f.beforeRemote, commands[kind] + '\n');
+    await assert.rejects(f.validate(), kind === 'detached' ? undefined : /checkout (HEAD changed|branch changed|became dirty)/);
+  });
+}
+
+test('rejects a direct base push before merging the original reviewed head', async t => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.checkout, 'unreviewed.txt'), 'direct base push\n');
+  f.git('add', '.');
+  f.git('commit', '-m', 'unreviewed base push');
+  const intermediate = f.git('rev-parse', 'HEAD');
+  f.git('merge', '--no-ff', f.head, '-m', 'approved PR after direct push');
+  const candidate = f.git('rev-parse', 'HEAD');
+  assert.equal(f.git('rev-parse', `${candidate}^1`), intermediate);
+  assert.equal(f.git('rev-parse', `${candidate}^2`), f.head);
+  f.git('push', '--force', 'origin', 'ralph-dev');
+  f.git('reset', '--hard', f.oldSha);
+  f.job.merge.commit = candidate; f.save();
+  const before = snapshot(f.root);
+  await assert.rejects(f.validate(), /unreviewed intermediate commits/);
+  assert.deepEqual(snapshot(f.root), before);
+});
+
+
+test('preserves stricter owner info-attribute whitespace rules', async t => {
+  const f = fixture(t, '\tindent\n');
+  fs.writeFileSync(path.join(f.checkout, '.git/info/attributes'), '* whitespace=tab-in-indent\n');
+  const before = snapshot(f.root);
+  await assert.rejects(f.validate(), error => /tab in indent/.test(error.stdout));
+  assert.deepEqual(snapshot(f.root), before);
 });
