@@ -48,7 +48,7 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
   requireCandidate(fs.realpathSync(await git(['rev-parse', '--show-toplevel'])) === fs.realpathSync(project.checkout), 'configured checkout must be the repository root');
   const oldSha = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
   requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch, 'checkout is on the wrong branch');
-  requireCandidate(await git(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none']) === '', 'checkout is dirty');
+  requireCandidate(await cleanStatus(project.checkout, oldSha, git, env) === '', 'checkout is dirty');
   const allowedUrls = [
     `https://github.com/${project.repo}`, `https://github.com/${project.repo}.git`,
     `git@github.com:${project.repo}`, `git@github.com:${project.repo}.git`,
@@ -64,7 +64,7 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
     testOnlyCanonicalUrl !== undefined);
   const newSha = job.merge.commit;
   requireCandidate(remote === `${newSha}\t${targetRef}`, 'approved merge is not the exact origin/ralph-dev target');
-  requireCandidate(sha(oldSha) && await git(['rev-parse', '--verify', `${newSha}^{commit}`]) === newSha, 'candidate is not a local commit');
+  requireCandidate(sha(oldSha), 'installed HEAD is not a commit SHA');
   // Keep the owner's attribute-specific checks, then independently check the
   // delta without candidate or info attributes. Preserve stricter core rules
   // while enforcing the baseline even if config disables those rules.
@@ -79,23 +79,74 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
     fs.mkdirSync(path.join(scratch, 'objects'));
     fs.mkdirSync(path.join(scratch, 'refs'));
     fs.writeFileSync(path.join(scratch, 'HEAD'), 'ref: refs/heads/unused\n');
-    const isolatedGit = async args => (await execute('git', ['--no-replace-objects', `--git-dir=${scratch}`,
-      '-c', 'core.bare=true', '-c', 'core.attributesFile=/dev/null',
-      '-c', 'core.commitGraph=false', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
-      '-c', `core.whitespace=${whitespace ? `${whitespace},` : ''}blank-at-eol,blank-at-eof,space-before-tab`,
-      ...args], {
-      cwd: scratch, env: { ...env, GIT_OBJECT_DIRECTORY: objects, GIT_ATTR_NOSYSTEM: '1',
-        GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' },
-      encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
-    })).stdout.trim();
+    const isolatedGit = async (args, { raw = false, input } = {}) => {
+      const argsWithContext = ['--no-replace-objects', `--git-dir=${scratch}`,
+        '-c', 'core.bare=true', '-c', 'core.attributesFile=/dev/null',
+        '-c', 'core.commitGraph=false', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
+        '-c', `core.whitespace=${whitespace ? `${whitespace},` : ''}blank-at-eol,blank-at-eof,space-before-tab`,
+        ...args];
+      const options = {
+        cwd: scratch, env: { ...env, GIT_OBJECT_DIRECTORY: objects, GIT_ATTR_NOSYSTEM: '1',
+          GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' },
+        encoding: raw ? null : 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+      };
+      const { stdout } = input === undefined ? await execute('git', argsWithContext, options)
+        : await new Promise((resolve, reject) => {
+          const child = execFile('git', argsWithContext, options, (error, stdout, stderr) => {
+            if (error) { Object.assign(error, { stdout, stderr }); reject(error); }
+            else resolve({ stdout });
+          });
+          child.stdin.on('error', reject);
+          child.stdin.end(input);
+        });
+      return raw ? stdout : stdout.trim();
+    };
     // cat-file returns the raw object header, never a grafted/cached parent list.
-    const header = (await isolatedGit(['cat-file', 'commit', newSha])).split('\n\n', 1)[0];
+    const verified = new Map();
+    const readVerified = async (id, type) => {
+      if (verified.has(id)) {
+        requireCandidate(verified.get(id).type === type, 'object type mismatch');
+        return verified.get(id).bytes;
+      }
+      const bytes = await isolatedGit(['cat-file', type, id], { raw: true });
+      const actual = await isolatedGit(['hash-object', '-t', type, '--stdin'], { input: bytes });
+      requireCandidate(actual === id, `object hash mismatch for ${type} ${id}`);
+      verified.set(id, { type, bytes });
+      return bytes;
+    };
+    const header = (await readVerified(newSha, 'commit')).toString('utf8').split('\n\n', 1)[0];
     const parents = header.split('\n').filter(line => line.startsWith('parent ')).map(line => line.slice(7));
     requireCandidate(parents.every(sha), 'candidate has invalid raw parents');
     requireCandidate(newSha === job.delivery.commit || (parents.length === 2 && parents[1] === job.delivery.commit), 'merge does not contain the exact reviewed head');
     requireCandidate(oldSha === newSha || (parents[0] === oldSha
       && (newSha === job.delivery.commit ? parents.length === 1 : parents.length === 2)),
       'candidate includes unreviewed intermediate commits');
+    // Verify the installed/candidate trees and every commit/tree/blob introduced
+    // by the candidate. Read binary trees directly so filenames and blob bytes
+    // are never decoded or trimmed. Gitlinks name another repository's objects.
+    const trees = new Set();
+    const verifyTree = async id => {
+      if (trees.has(id)) return;
+      trees.add(id);
+      const bytes = await readVerified(id, 'tree');
+      for (let offset = 0; offset < bytes.length;) {
+        const space = bytes.indexOf(32, offset);
+        const nul = bytes.indexOf(0, space + 1);
+        requireCandidate(space > offset && nul > space && nul + 21 <= bytes.length, 'invalid tree object');
+        const mode = bytes.subarray(offset, space).toString('ascii');
+        const child = bytes.subarray(nul + 1, nul + 21).toString('hex');
+        if (mode === '40000') await verifyTree(child);
+        else if (mode !== '160000') await readVerified(child, 'blob');
+        offset = nul + 21;
+      }
+    };
+    const commits = new Set([oldSha, newSha, job.delivery.commit, ...(await isolatedGit(['rev-list', `${oldSha}..${newSha}`])).split('\n').filter(Boolean)]);
+    for (const id of commits) {
+      const commit = await readVerified(id, 'commit');
+      const tree = /^tree ([a-f0-9]{40})\n/.exec(commit.toString('utf8'))?.[1];
+      requireCandidate(sha(tree), 'invalid commit tree');
+      await verifyTree(tree);
+    }
     await isolatedGit(['merge-base', '--is-ancestor', oldSha, newSha]);
     await git(diffArgs);
     await isolatedGit(diffArgs);
@@ -106,9 +157,36 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
     'checkout HEAD changed during validation');
   requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch,
     'checkout branch changed during validation');
-  requireCandidate(await git(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none']) === '',
+  requireCandidate(await cleanStatus(project.checkout, oldSha, git, env) === '',
     'checkout became dirty during validation');
   return Object.freeze({ oldSha, newSha, noOp: oldSha === newSha });
+}
+
+// Status must not load checkout filter drivers or recurse into submodule Git
+// metadata. Reuse the index read-only, with a detached HEAD in config-free
+// scratch metadata. Unsupported submodule checkouts fail closed.
+async function cleanStatus(checkout, head, git, env) {
+  const index = await git(['rev-parse', '--path-format=absolute', '--git-path', 'index']);
+  const objects = await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-status-'));
+  try {
+    fs.mkdirSync(path.join(scratch, 'objects'));
+    fs.mkdirSync(path.join(scratch, 'refs'));
+    fs.writeFileSync(path.join(scratch, 'HEAD'), `${head}\n`);
+    const read = async args => (await execute('git', ['--no-replace-objects', `--git-dir=${scratch}`,
+      `--work-tree=${checkout}`, '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
+      '-c', 'core.commitGraph=false', '-c', 'core.attributesFile=/dev/null', ...args], {
+      cwd: scratch, env: { ...env, GIT_INDEX_FILE: index, GIT_OBJECT_DIRECTORY: objects,
+        GIT_ATTR_NOSYSTEM: '1', GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' },
+      encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+    })).stdout.trim();
+    requireCandidate(!/(^|\x00)160000 /.test(await read(['ls-files', '--stage', '-z'])),
+      'submodule checkouts are unsupported');
+    return await read(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all']);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 // Never observe a named remote inside the worker-writable checkout. This bare

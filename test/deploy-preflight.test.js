@@ -562,3 +562,156 @@ test('public interface fixes the production canonical URL and permits only HTTPS
   }, f.remote), error => error === stopped);
   assert.equal(fs.existsSync(scratch), false);
 });
+
+// Plant an actual loose object under somebody else's name, bypassing Git's
+// write-time hashing just as a worker with shared-object-store access can do.
+function plantObject(f, id, type, bytes) {
+  const { deflateSync } = require('node:zlib');
+  const file = path.join(f.checkout, '.git/objects', id.slice(0, 2), id.slice(2));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (fs.existsSync(file)) fs.unlinkSync(file);
+  fs.writeFileSync(file, deflateSync(Buffer.concat([
+    Buffer.from(`${type} ${bytes.length}\0`), bytes,
+  ])));
+}
+
+for (const kind of ['merge', 'reviewed commit', 'installed commit', 'tree', 'blob']) {
+  test(`rejects forged loose ${kind} bytes without changing the fixture`, async t => {
+    const f = fixture(t);
+    let id = kind === 'reviewed commit' ? f.head : kind === 'installed commit' ? f.oldSha : f.newSha;
+    let type = 'commit';
+    if (kind === 'tree') { id = f.git('rev-parse', `${f.newSha}^{tree}`); type = 'tree'; }
+    if (kind === 'blob') { id = f.git('rev-parse', `${f.newSha}:file.txt`); type = 'blob'; }
+    const bytes = execFileSync('git', ['-C', f.checkout, 'cat-file', type, id], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Change a message, filename or blob byte while preserving parseability.
+    const forged = Buffer.from(bytes);
+    forged[kind === 'tree' ? forged.indexOf(Buffer.from('file.txt')) : forged.length - 2] ^= 1;
+    plantObject(f, id, type, forged);
+    assert.deepEqual(execFileSync('git', ['-C', f.checkout, 'cat-file', type, id], { stdio: ['ignore', 'pipe', 'pipe'] }), forged);
+    const before = snapshot(f.root);
+    await assert.rejects(f.validate(), /hash mismatch/);
+    assert.deepEqual(snapshot(f.root), before);
+  });
+}
+
+test('forged raw merge parents cannot hide an unreviewed direct push', async t => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.checkout, 'unreviewed.txt'), 'unreviewed\n');
+  f.git('add', '.'); f.git('commit', '-m', 'direct push');
+  const intermediate = f.git('rev-parse', 'HEAD');
+  f.git('merge', '--no-ff', f.head, '-m', 'approved merge');
+  const candidate = f.git('rev-parse', 'HEAD');
+  f.git('push', '--force', f.remote, 'ralph-dev');
+  f.git('reset', '--hard', f.oldSha);
+  f.job.merge.commit = candidate; f.save();
+  const forged = f.git('cat-file', 'commit', candidate).replace(`parent ${intermediate}`, `parent ${f.oldSha}`) + '\n';
+  plantObject(f, candidate, 'commit', Buffer.from(forged));
+  assert.equal(f.git('rev-list', '--parents', '-n', '1', candidate), `${candidate} ${f.oldSha} ${f.head}`);
+  // Some Git paths already rehash loose commits; cat-file/rev-list above do
+  // not. The preflight must explicitly hash before trusting raw parents.
+  const before = snapshot(f.root);
+  await assert.rejects(f.validate(), /object hash mismatch/);
+  assert.deepEqual(snapshot(f.root), before);
+});
+
+test('hash verification preserves binary blob bytes and final newlines', async t => {
+  const f = fixture(t, Buffer.from([0, 255, 128, 10, 10]));
+  const before = snapshot(f.root);
+  assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+  assert.deepEqual(snapshot(f.root), before);
+});
+
+for (const driver of ['clean', 'process']) {
+  for (const phase of ['initial', 'concurrent', 'dirty']) {
+    test(`${driver} filter never executes during ${phase} status`, async t => {
+      const f = fixture(t);
+      const marker = path.join(f.root, 'filter-executed');
+      const program = path.join(f.root, 'filter');
+      fs.writeFileSync(program, `#!/bin/sh\nprintf executed > '${marker}'\n${driver === 'clean' ? 'cat' : 'exit 1'}\n`, { mode: 0o755 });
+      const arm = () => {
+        fs.writeFileSync(path.join(f.checkout, '.git/info/attributes'), 'file.txt filter=hostile\n');
+        f.git('config', `filter.hostile.${driver}`, program);
+        const file = path.join(f.checkout, 'file.txt');
+        const future = new Date(Date.now() + 10000);
+        fs.utimesSync(file, future, future);
+      };
+      arm();
+      if (driver === 'clean') assert.equal(f.git('status', '--porcelain=v1', '--untracked-files=all'), '');
+      else assert.throws(() => f.git('status', '--porcelain=v1', '--untracked-files=all'), /remote end hung up/);
+      assert.equal(fs.readFileSync(marker, 'utf8'), 'executed');
+      fs.rmSync(marker);
+      if (phase === 'concurrent') {
+        f.git('config', '--unset', `filter.hostile.${driver}`);
+        f.setBeforeRemote(arm);
+      }
+      if (phase === 'dirty') fs.writeFileSync(path.join(f.checkout, 'file.txt'), 'dirty\n');
+      if (phase === 'dirty') await assert.rejects(f.validate(), /checkout is dirty/);
+      else assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+      assert.equal(fs.existsSync(marker), false);
+      const statuses = f.commands.filter(c => c.args.includes('status'));
+      assert.ok(statuses.length > 0);
+      for (const c of statuses) {
+        assert.notEqual(c.options.cwd, f.checkout);
+        assert.equal(c.options.env.GIT_CONFIG_GLOBAL, '/dev/null');
+        assert.ok(c.args.includes('--ignore-submodules=all'));
+        assert.equal(fs.existsSync(c.options.cwd), false);
+      }
+    });
+  }
+}
+
+for (const phase of ['initial', 'concurrent']) {
+  test(`rejects ${phase} submodule without executing its configured command`, async t => {
+    const f = fixture(t);
+    f.git('-c', 'protocol.file.allow=always', 'submodule', 'add', '-b', 'ralph-dev', f.remote, 'child');
+    f.git('commit', '-am', 'installed submodule');
+    const marker = path.join(f.root, 'submodule-command-executed');
+    const program = path.join(f.root, 'submodule-fsmonitor');
+    fs.writeFileSync(program, `#!/bin/sh\nprintf executed > '${marker}'\nprintf 'token\\000/\\000'\n`, { mode: 0o755 });
+    f.git('-C', 'child', 'config', 'core.fsmonitor', program);
+    f.git('status', '--porcelain=v1', '--ignore-submodules=none');
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'executed');
+    fs.rmSync(marker);
+    if (phase === 'concurrent') {
+      // Introduce the populated submodule only after the initial clean check.
+      f.git('reset', '--mixed', f.oldSha);
+      fs.rmSync(path.join(f.checkout, '.gitmodules'));
+      const parked = path.join(f.root, 'parked-child');
+      fs.renameSync(path.join(f.checkout, 'child'), parked);
+      f.setBeforeRemote(() => {
+        fs.renameSync(parked, path.join(f.checkout, 'child'));
+        f.git('update-index', '--add', '--cacheinfo', `160000,${f.newSha},child`);
+      });
+    }
+    const before = snapshot(f.root);
+    await assert.rejects(f.validate(), /submodule checkouts are unsupported/);
+    assert.equal(fs.existsSync(marker), false);
+    if (phase === 'initial') assert.deepEqual(snapshot(f.root), before);
+  });
+}
+
+test('hash-verifies blobs supplied by an alternate object store', async t => {
+  const f = fixture(t);
+  const id = f.git('rev-parse', `${f.newSha}:file.txt`);
+  const alternate = path.join(f.root, 'alternate-objects');
+  const loose = path.join(f.checkout, '.git/objects', id.slice(0, 2), id.slice(2));
+  plantObject(f, id, 'blob', Buffer.from('forged alternate blob\n'));
+  fs.mkdirSync(path.join(alternate, id.slice(0, 2)), { recursive: true });
+  fs.renameSync(loose, path.join(alternate, id.slice(0, 2), id.slice(2)));
+  fs.mkdirSync(path.join(f.checkout, '.git/objects/info'), { recursive: true });
+  fs.writeFileSync(path.join(f.checkout, '.git/objects/info/alternates'), `${alternate}\n`);
+  assert.equal(f.git('cat-file', 'blob', id), 'forged alternate blob');
+  const before = snapshot(f.root);
+  await assert.rejects(f.validate(), /object hash mismatch/);
+  assert.deepEqual(snapshot(f.root), before);
+});
+
+test('already-installed candidate still hash-verifies the reviewed commit', async t => {
+  const f = fixture(t);
+  f.git('reset', '--hard', f.newSha);
+  const bytes = Buffer.from(f.git('cat-file', 'commit', f.head) + '\nchanged message\n');
+  plantObject(f, f.head, 'commit', bytes);
+  const before = snapshot(f.root);
+  await assert.rejects(f.validate(), /object hash mismatch/);
+  assert.deepEqual(snapshot(f.root), before);
+});
