@@ -21,12 +21,20 @@ with actual successful workflow-run evidence. Ralph must retain `reviewPolicy:
 "always"`, `autoMerge: true`, and `baseBranch: "ralph-dev"`.
 
 The configured checkout must be a clean repository root on `ralph-dev`, including
-no untracked files. Each clean check copies the checkout index into private
-scratch metadata and rejects assume-unchanged or skip-worktree entries before
-status. Flag checks and status use the same private index snapshot. Status runs
-with that snapshot and the checkout worktree in temporary config-free Git
-metadata; checkout, system and global filter definitions are not loaded. Gitlink entries fail closed as unsupported before status, which also
-ignores submodules to prevent recursion into their config and commands. Both the
+no untracked files. Before the first clean check, installed HEAD and every
+reachable tree/blob are hash-verified into a private scratch object store. The
+same verified store remains available through the final clean check, with no
+alternates. Each check snapshots the checkout index only to reject staged changes,
+assume-unchanged, skip-worktree and gitlink entries. It then discards that snapshot
+and uses `read-tree <oldSha>` to build a fresh private index with zero stat data
+from the verified objects. Status runs in config-free scratch Git metadata;
+checkout, system and global filter definitions are not loaded. It ignores
+submodules to prevent recursion into their config and commands. An independent
+comparison requires actual tracked file bytes (or symlink targets) and executable
+modes to match verified installed blobs exactly, including content Git attributes
+would normalize. Reads are bounded, refuse special files and symlink ancestors,
+and check file/directory identity and metadata around reads; missing files, read
+errors and detected concurrent changes fail closed. Both the
 literal origin URL and its effective URL after
 `insteadOf` rewriting must match an allowed URL for the configured GitHub
 repository. The live observation uses the canonical
@@ -94,5 +102,7 @@ Tests exercise real helper-alias forgery, HTTP config isolation, inherited confi
 and environment isolation, graft-hidden intermediate commits, marker-writing
 fsmonitor programs, forged loose commits/trees/blobs, binary object hashing,
 marker-writing clean/process filters and submodule commands, dirty index-flag
-attacks at both clean checks, real blob/tree swaps after verification, exact
+attacks and forged stat-cache/checksum attacks at both clean checks, shared
+installed commit/tree/blob swaps before and during status, raw-byte normalization
+checks, real blob/tree swaps after verification, exact
 remote results and failures, and scratch cleanup.
