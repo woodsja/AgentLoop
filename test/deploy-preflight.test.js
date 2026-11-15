@@ -13,11 +13,12 @@ const { validateDeploymentCandidate } = require('../src/deploy-preflight');
 
 // Load the private URL dependency only in tests. No observer/output is faked:
 // every command, including the shipping ls-remote implementation, runs real Git.
-function testValidator(remote, onObservation) {
+function testValidator(remote, onObservation, onCommand = () => {}) {
   const filename = require.resolve('../src/deploy-preflight');
   const realRequire = createRequire(filename);
   const observedExec = (...args) => execFile(...args);
   observedExec[promisify.custom] = async (...args) => {
+    onCommand(...args);
     if (args[1].includes('ls-remote') && !args[1].includes('--get-url')) onObservation(...args);
     return promisify(execFile)(...args);
   };
@@ -48,10 +49,11 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   // Writes and the real read-only observation use the disposable bare remote.
   let beforeRemote;
   const observations = [];
+  const commands = [];
   const validate = testValidator(remote, (file, args, options) => {
     observations.push({ file, args, options });
     if (beforeRemote) beforeRemote();
-  });
+  }, (file, args, options) => commands.push({ file, args, options }));
   git('remote', 'add', 'origin', 'git@github.com:woodsja/AgentLoop.git');
   if (installedAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), installedAttributes);
   const commit = text => {
@@ -94,7 +96,7 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   save();
   return { root, checkout, remote, configPath,
     setBeforeRemote: callback => { beforeRemote = callback; },
-    observationCount: () => observations.length, observations, git, commit, oldSha, newSha, head, job, store, save, project, configure,
+    observationCount: () => observations.length, observations, commands, git, commit, oldSha, newSha, head, job, store, save, project, configure,
     validate: () => validate(28, { configPath }) };
 }
 
@@ -329,6 +331,105 @@ test('preserves stricter owner info-attribute whitespace rules', async t => {
   await assert.rejects(f.validate(), error => /tab in indent/.test(error.stdout));
   assert.deepEqual(snapshot(f.root), before);
 });
+
+for (const kind of ['merge', 'fast-forward']) {
+  test(`raw parents reject graft-hidden unreviewed commits before approved ${kind}`, async t => {
+    const f = fixture(t);
+    fs.writeFileSync(path.join(f.checkout, 'unreviewed.txt'), 'direct base push\n');
+    f.git('add', '.');
+    f.git('commit', '-m', 'unreviewed base push');
+    const intermediate = f.git('rev-parse', 'HEAD');
+    let head = f.head;
+    if (kind === 'merge') f.git('merge', '--no-ff', head, '-m', 'approved PR after direct push');
+    else head = f.commit('reviewed after direct push\n');
+    const candidate = f.git('rev-parse', 'HEAD');
+    f.git('push', '--force', f.remote, 'ralph-dev');
+    f.git('reset', '--hard', f.oldSha);
+    f.job.verification.commit = head;
+    f.job.delivery.commit = head;
+    f.job.review.commit = head;
+    f.job.ci.headCommit = head;
+    f.job.merge.approvedHead = head;
+    f.job.merge.commit = candidate;
+    f.save();
+    // Populate the real shared object-store cache as well as forging the graph.
+    f.git('commit-graph', 'write', '--reachable');
+    const forgedParents = kind === 'merge' ? [f.oldSha, head] : [f.oldSha];
+    fs.writeFileSync(path.join(f.checkout, '.git/info/grafts'), `${candidate} ${forgedParents.join(' ')}\n`);
+    // Prove the former gate accepts this metadata, while the raw object does not.
+    assert.equal(f.git('rev-list', '--parents', '-n', '1', candidate), `${candidate} ${forgedParents.join(' ')}`);
+    assert.equal(f.git('merge-base', '--is-ancestor', f.oldSha, candidate), '');
+    assert.match(f.git('cat-file', 'commit', candidate), new RegExp(`\nparent ${intermediate}\n`));
+    const before = snapshot(f.root);
+    await assert.rejects(f.validate(), /unreviewed intermediate commits/);
+    assert.deepEqual(snapshot(f.root), before);
+    const raw = f.commands.find(command => command.args.includes('cat-file'));
+    assert.notEqual(raw.options.cwd, f.checkout);
+    assert.ok(raw.args.includes('core.commitGraph=false'));
+    assert.equal(fs.existsSync(raw.options.cwd), false);
+  });
+}
+
+test('ancestry uses isolated metadata without shared grafts or commit-graph reads', async t => {
+  const f = fixture(t);
+  f.git('commit-graph', 'write', '--reachable');
+  // A graft claiming the valid merge is a root must not affect either gate.
+  fs.writeFileSync(path.join(f.checkout, '.git/info/grafts'), `${f.newSha}\n`);
+  assert.equal(f.git('rev-list', '--parents', '-n', '1', f.newSha), f.newSha);
+  assert.throws(() => f.git('merge-base', '--is-ancestor', f.oldSha, f.newSha));
+  const before = snapshot(f.root);
+  assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+  assert.deepEqual(snapshot(f.root), before);
+  for (const name of ['cat-file', 'merge-base']) {
+    const command = f.commands.find(command => command.args.includes(name));
+    assert.notEqual(command.options.cwd, f.checkout);
+    assert.ok(command.args.includes(`--git-dir=${command.options.cwd}`));
+    assert.ok(command.args.includes('core.commitGraph=false'));
+    assert.equal(command.options.env.GIT_CONFIG_NOSYSTEM, '1');
+    assert.equal(command.options.env.GIT_CONFIG_GLOBAL, '/dev/null');
+    assert.equal(fs.existsSync(command.options.cwd), false);
+  }
+});
+
+for (const kind of ['clean', 'initial dirt', 'concurrent dirt', 'whitespace']) {
+  test(`configured fsmonitor never executes during ${kind} validation`, async t => {
+    const f = fixture(t, kind === 'whitespace' ? 'bad whitespace  \n' : 'candidate\n');
+    const marker = path.join(f.root, 'fsmonitor-executed');
+    const program = path.join(f.root, 'fsmonitor');
+    fs.writeFileSync(program, `#!/bin/sh\nprintf executed > '${marker}'\nprintf 'token\\000/\\000'\n`, { mode: 0o755 });
+    f.git('config', 'core.untrackedCache', 'true');
+    f.git('update-index', '--untracked-cache');
+    f.git('config', 'core.fsmonitor', program);
+    // Show that the real Git status command would execute this program.
+    f.git('status', '--porcelain=v1', '--untracked-files=all');
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'executed');
+    fs.rmSync(marker);
+    if (kind === 'initial dirt') fs.writeFileSync(path.join(f.checkout, 'dirty'), 'dirty');
+    if (kind === 'concurrent dirt') {
+      f.setBeforeRemote(() => fs.writeFileSync(path.join(f.checkout, 'dirty'), 'dirty'));
+    }
+    const before = snapshot(f.root);
+    if (kind === 'clean') {
+      assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+    } else if (kind === 'whitespace') {
+      await assert.rejects(f.validate(), error => /trailing whitespace/.test(error.stdout));
+    } else {
+      await assert.rejects(f.validate(), /checkout (is dirty|became dirty)/);
+    }
+    assert.equal(fs.existsSync(marker), false);
+    if (kind !== 'concurrent dirt') assert.deepEqual(snapshot(f.root), before);
+    else {
+      fs.rmSync(path.join(f.checkout, 'dirty'));
+      assert.deepEqual(snapshot(f.root), before);
+    }
+    const reads = f.commands.filter(command => command.args.includes('status') || command.args.includes('diff'));
+    assert.ok(reads.length > 0);
+    for (const command of reads) {
+      assert.ok(command.args.includes('core.fsmonitor=false'));
+      assert.ok(command.args.includes('core.untrackedCache=false'));
+    }
+  });
+}
 
 for (const key of ['core.sshCommand', 'ssh.variant', 'remote.origin.uploadpack']) {
   test(`ignores hostile ${key} during canonical remote observation`, async t => {

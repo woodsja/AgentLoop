@@ -39,7 +39,11 @@ with a sole parent equal to installed HEAD, or a two-parent merge whose first
 parent is installed HEAD and whose second parent is exactly the reviewed head.
 Intermediate base commits and longer fast-forward paths fail closed. Already
 installed candidates retain the reviewed-head identity check. Installed HEAD must
-be an ancestor, and `git diff --check <old-sha> <new-sha>` must accept the actual
+be an ancestor. Parent identities come from raw commit objects via `git cat-file
+commit`, and ancestry runs in temporary config-free bare metadata with commit-graph
+reads disabled. Shared checkout grafts, replacement refs, shallow metadata, and
+cached commit-graph parents cannot supply the reviewed ancestry.
+`git diff --check <old-sha> <new-sha>` must accept the actual
 committed delta. The whitespace gate preserves owner checks and independently
 enforces baseline and stricter owner core rules in temporary, attribute-free bare
 Git metadata pointing at existing objects. Candidate and info attributes cannot
@@ -55,8 +59,10 @@ retain their captured `stdout` and `stderr` (including whitespace diagnostics).
 This is a point-in-time validation, not a deployment receipt or authorization to
 apply changes. Future stages must guard against changes after validation. The
 module performs no fetch, repository ref/index update, checkout, config/state
-write, service action, or deployment. Git optional index refreshes and replacement objects are
-disabled. Network access is limited to the read-only remote observation; missing
+write, service action, or deployment. Git optional index refreshes, fsmonitor,
+untracked cache, commit-graph reads, and replacement objects are disabled on
+checkout commands, including both status checks and the owner-specific diff.
+Network access is limited to the read-only remote observation; missing
 objects require a separate owner-authorized preparation step.
 
 Run `node test/deploy-preflight.test.js` for real disposable checkout/bare-remote
@@ -66,4 +72,5 @@ observation code, enabling file transport exclusively for that dependency.
 The public module exports only `validateDeploymentCandidate`; neither its
 options nor additional arguments can choose a production URL or observer.
 Tests exercise real helper-alias forgery, HTTP config isolation, inherited config
-and environment isolation, exact remote results and failures, and scratch cleanup.
+and environment isolation, graft-hidden intermediate commits, marker-writing
+fsmonitor programs, exact remote results and failures, and scratch cleanup.
