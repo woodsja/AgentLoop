@@ -48,22 +48,7 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
   requireCandidate(fs.realpathSync(await git(['rev-parse', '--show-toplevel'])) === fs.realpathSync(project.checkout), 'configured checkout must be the repository root');
   const oldSha = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
   requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch, 'checkout is on the wrong branch');
-  requireCandidate(await cleanStatus(project.checkout, oldSha, git, env) === '', 'checkout is dirty');
-  const allowedUrls = [
-    `https://github.com/${project.repo}`, `https://github.com/${project.repo}.git`,
-    `git@github.com:${project.repo}`, `git@github.com:${project.repo}.git`,
-    `ssh://git@github.com/${project.repo}`, `ssh://git@github.com/${project.repo}.git`,
-  ];
-  const urls = (await git(['config', '--get-all', 'remote.origin.url'])).split('\n');
-  requireCandidate(urls.length === 1 && allowedUrls.includes(urls[0])
-    && allowedUrls.includes(await git(['ls-remote', '--get-url', 'origin'])),
-    'origin does not identify the configured repository');
-  const targetRef = `refs/heads/${project.baseBranch}`;
-  const canonicalUrl = `https://github.com/${project.repo}.git`;
-  const remote = await observeRemote(testOnlyCanonicalUrl ?? canonicalUrl, targetRef,
-    testOnlyCanonicalUrl !== undefined);
   const newSha = job.merge.commit;
-  requireCandidate(remote === `${newSha}\t${targetRef}`, 'approved merge is not the exact origin/ralph-dev target');
   requireCandidate(sha(oldSha), 'installed HEAD is not a commit SHA');
   // Keep the owner's attribute-specific checks, then independently check the
   // delta without candidate or info attributes. Preserve stricter core rules
@@ -115,13 +100,6 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
       verified.set(id, { type, bytes });
       return bytes;
     };
-    const header = (await readVerified(newSha, 'commit')).toString('utf8').split('\n\n', 1)[0];
-    const parents = header.split('\n').filter(line => line.startsWith('parent ')).map(line => line.slice(7));
-    requireCandidate(parents.every(sha), 'candidate has invalid raw parents');
-    requireCandidate(newSha === job.delivery.commit || (parents.length === 2 && parents[1] === job.delivery.commit), 'merge does not contain the exact reviewed head');
-    requireCandidate(oldSha === newSha || (parents[0] === oldSha
-      && (newSha === job.delivery.commit ? parents.length === 1 : parents.length === 2)),
-      'candidate includes unreviewed intermediate commits');
     // Verify the installed/candidate trees and every commit/tree/blob introduced
     // by the candidate. Read binary trees directly so filenames and blob bytes
     // are never decoded or trimmed. Gitlinks name another repository's objects.
@@ -141,6 +119,56 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
         offset = nul + 21;
       }
     };
+    // Materialize the installed graph before the first status command. No
+    // clean gate may consult worker-owned objects, even transiently.
+    const installed = await readVerified(oldSha, 'commit');
+    const installedTree = /^tree ([a-f0-9]{40})\n/.exec(installed.toString('utf8'))?.[1];
+    requireCandidate(sha(installedTree), 'invalid installed commit tree');
+    await verifyTree(installedTree);
+    const expected = [];
+    const collect = (id, prefix = Buffer.alloc(0)) => {
+      const bytes = verified.get(id).bytes;
+      for (let offset = 0; offset < bytes.length;) {
+        const space = bytes.indexOf(32, offset);
+        const nul = bytes.indexOf(0, space + 1);
+        const mode = bytes.subarray(offset, space).toString('ascii');
+        const name = bytes.subarray(space + 1, nul);
+        requireCandidate(name.length > 0 && !name.includes(47)
+          && !['.', '..', '.git'].includes(name.toString()), 'invalid tree pathname');
+        const child = bytes.subarray(nul + 1, nul + 21).toString('hex');
+        const relative = Buffer.concat([prefix, name]);
+        if (mode === '40000') collect(child, Buffer.concat([relative, Buffer.from('/')]));
+        else {
+          requireCandidate(mode !== '160000', 'submodule checkouts are unsupported');
+          requireCandidate(['100644', '100755', '120000'].includes(mode), 'unsupported tree mode');
+          expected.push({ relative, mode, bytes: verified.get(child).bytes });
+        }
+        offset = nul + 21;
+      }
+    };
+    collect(installedTree);
+    requireCandidate(await cleanStatus(project.checkout, oldSha, git, env, privateObjects, expected) === '', 'checkout is dirty');
+    const allowedUrls = [
+      `https://github.com/${project.repo}`, `https://github.com/${project.repo}.git`,
+      `git@github.com:${project.repo}`, `git@github.com:${project.repo}.git`,
+      `ssh://git@github.com/${project.repo}`, `ssh://git@github.com/${project.repo}.git`,
+    ];
+    const urls = (await git(['config', '--get-all', 'remote.origin.url'])).split('\n');
+    requireCandidate(urls.length === 1 && allowedUrls.includes(urls[0])
+      && allowedUrls.includes(await git(['ls-remote', '--get-url', 'origin'])),
+      'origin does not identify the configured repository');
+    const targetRef = `refs/heads/${project.baseBranch}`;
+    const canonicalUrl = `https://github.com/${project.repo}.git`;
+    const remote = await observeRemote(testOnlyCanonicalUrl ?? canonicalUrl, targetRef,
+      testOnlyCanonicalUrl !== undefined);
+    requireCandidate(remote === `${newSha}\t${targetRef}`, 'approved merge is not the exact origin/ralph-dev target');
+    const header = (await readVerified(newSha, 'commit')).toString('utf8').split('\n\n', 1)[0];
+    const parents = header.split('\n').filter(line => line.startsWith('parent ')).map(line => line.slice(7));
+    requireCandidate(parents.every(sha), 'candidate has invalid raw parents');
+    requireCandidate(newSha === job.delivery.commit || (parents.length === 2 && parents[1] === job.delivery.commit), 'merge does not contain the exact reviewed head');
+    requireCandidate(oldSha === newSha || (parents[0] === oldSha
+      && (newSha === job.delivery.commit ? parents.length === 1 : parents.length === 2)),
+      'candidate includes unreviewed intermediate commits');
     const commits = new Set([oldSha, newSha, job.delivery.commit, ...(await isolatedGit(['rev-list', `${oldSha}..${newSha}`], { source: true })).split('\n').filter(Boolean)]);
     for (const id of commits) {
       const commit = await readVerified(id, 'commit');
@@ -151,24 +179,23 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
     await isolatedGit(['merge-base', '--is-ancestor', oldSha, newSha]);
     await git(diffArgs, { GIT_OBJECT_DIRECTORY: privateObjects });
     await isolatedGit(diffArgs);
+    requireCandidate(await git(['rev-parse', '--verify', 'HEAD^{commit}']) === oldSha,
+      'checkout HEAD changed during validation');
+    requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch,
+      'checkout branch changed during validation');
+    requireCandidate(await cleanStatus(project.checkout, oldSha, git, env, privateObjects, expected) === '',
+      'checkout became dirty during validation');
+    return Object.freeze({ oldSha, newSha, noOp: oldSha === newSha });
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
-  requireCandidate(await git(['rev-parse', '--verify', 'HEAD^{commit}']) === oldSha,
-    'checkout HEAD changed during validation');
-  requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch,
-    'checkout branch changed during validation');
-  requireCandidate(await cleanStatus(project.checkout, oldSha, git, env) === '',
-    'checkout became dirty during validation');
-  return Object.freeze({ oldSha, newSha, noOp: oldSha === newSha });
 }
 
 // Status must not load checkout filter drivers or recurse into submodule Git
-// metadata. Snapshot the index read-only, with a detached HEAD in config-free
-// scratch metadata. Unsupported submodule checkouts fail closed.
-async function cleanStatus(checkout, head, git, env) {
+// metadata. Inspect a snapshot for staged changes and unsupported flags, then
+// discard its stat cache and build the status index from verified HEAD objects.
+async function cleanStatus(checkout, head, git, env, objects, expected) {
   const index = await git(['rev-parse', '--path-format=absolute', '--git-path', 'index']);
-  const objects = await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-status-'));
   try {
     fs.mkdirSync(path.join(scratch, 'objects'));
@@ -188,10 +215,60 @@ async function cleanStatus(checkout, head, git, env) {
       'index assume-unchanged or skip-worktree flags are unsupported');
     requireCandidate(!/(^|\x00)160000 /.test(await read(['ls-files', '--stage', '-z'])),
       'submodule checkouts are unsupported');
-    return await read(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all']);
+    if (await read(['diff-index', '--cached', '--no-ext-diff', '--no-textconv', '--raw', '-z', head, '--'])) return 'staged changes';
+    fs.unlinkSync(privateIndex);
+    await read(['read-tree', head]); // New entries have zero, uncached stat data.
+    const status = await read(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all']);
+    if (status) return status;
+    return worktreeMatches(checkout, expected) ? '' : 'tracked bytes differ';
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+// Compare raw bytes independently of Git's attribute conversions and stat
+// shortcuts. Refuse symlink ancestors, special files and changes during reads.
+function worktreeMatches(checkout, expected) {
+  try {
+    for (const { relative, mode, bytes } of expected) {
+      const file = Buffer.concat([Buffer.from(checkout + '/'), relative]);
+      const ancestors = [];
+      for (let i = 0; i < relative.length; i++) {
+        if (relative[i] !== 47) continue;
+        const directory = Buffer.concat([Buffer.from(checkout + '/'), relative.subarray(0, i)]);
+        const stat = fs.lstatSync(directory, { bigint: true });
+        if (!stat.isDirectory()) return false;
+        ancestors.push({ directory, stat });
+      }
+      const before = fs.lstatSync(file, { bigint: true });
+      const same = after => ['dev', 'ino', 'mode', 'size', 'mtimeNs', 'ctimeNs']
+        .every(key => before[key] === after[key]);
+      if (mode === '120000') {
+        if (!before.isSymbolicLink() || !fs.readlinkSync(file, { encoding: 'buffer' }).equals(bytes)) return false;
+      } else {
+        if (!before.isFile() || before.size !== BigInt(bytes.length)
+          || Boolean(before.mode & 0o111n) !== (mode === '100755')) return false;
+        const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+        try {
+          if (!same(fs.fstatSync(fd, { bigint: true }))) return false;
+          const chunk = Buffer.alloc(Math.min(65536, bytes.length + 1));
+          for (let offset = 0; offset < bytes.length;) {
+            const count = fs.readSync(fd, chunk, 0, Math.min(chunk.length, bytes.length - offset), null);
+            if (!count || !chunk.subarray(0, count).equals(bytes.subarray(offset, offset + count))) return false;
+            offset += count;
+          }
+          if (fs.readSync(fd, chunk, 0, 1, null) !== 0
+            || !same(fs.fstatSync(fd, { bigint: true }))) return false;
+        } finally { fs.closeSync(fd); }
+      }
+      if (!same(fs.lstatSync(file, { bigint: true }))) return false;
+      for (const { directory, stat } of ancestors) {
+        const after = fs.lstatSync(directory, { bigint: true });
+        if (!['dev', 'ino', 'mode', 'mtimeNs', 'ctimeNs'].every(key => stat[key] === after[key])) return false;
+      }
+    }
+    return true;
+  } catch { return false; }
 }
 
 // Never observe a named remote inside the worker-writable checkout. This bare

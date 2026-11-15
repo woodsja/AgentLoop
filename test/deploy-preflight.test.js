@@ -805,3 +805,121 @@ test('both successful whitespace diffs use private verified objects without alte
   assert.equal(diffs.length, 2);
   assert.equal(diffs[0].options.env.GIT_OBJECT_DIRECTORY, diffs[1].options.env.GIT_OBJECT_DIRECTORY);
 });
+
+// Rewrite a real v2 entry, retaining HEAD's OID and flags while forging all
+// cached stat fields and the trailing SHA-1 checksum. Ordinary status is fooled.
+function forgeStatCache(f) {
+  f.git('update-index', '--index-version=2');
+  const file = path.join(f.checkout, 'file.txt');
+  fs.writeFileSync(file, 'malicious\n'); // Same length as installed blob.
+  const stat = fs.statSync(file, { bigint: true });
+  const index = path.join(f.checkout, '.git/index');
+  const bytes = fs.readFileSync(index);
+  assert.equal(bytes.readUInt32BE(4), 2);
+  assert.equal(bytes.readUInt32BE(8), 1);
+  assert.equal(bytes.subarray(74, bytes.indexOf(0, 74)).toString(), 'file.txt');
+  const values = [stat.ctimeNs / 1000000000n, stat.ctimeNs % 1000000000n,
+    stat.mtimeNs / 1000000000n, stat.mtimeNs % 1000000000n,
+    stat.dev, stat.ino, stat.mode, stat.uid, stat.gid, stat.size];
+  values.forEach((value, i) => bytes.writeUInt32BE(Number(value & 0xffffffffn), 12 + i * 4));
+  require('node:crypto').createHash('sha1').update(bytes.subarray(0, -20)).digest().copy(bytes, bytes.length - 20);
+  fs.writeFileSync(index, bytes);
+  const future = new Date(Date.now() + 60000);
+  fs.utimesSync(index, future, future); // Ensure Git does not classify it as racy.
+  assert.equal(f.git('status', '--porcelain'), '');
+}
+
+for (const phase of ['initial', 'final']) {
+  test(`rejects forged index stat cache and checksum at ${phase} status`, async t => {
+    const f = fixture(t);
+    if (phase === 'initial') forgeStatCache(f);
+    else f.setBeforeRemote(() => forgeStatCache(f));
+    const before = snapshot(f.root);
+    await assert.rejects(f.validate(), phase === 'initial' ? /checkout is dirty/ : /checkout became dirty/);
+    if (phase === 'initial') assert.deepEqual(snapshot(f.root), before);
+  });
+
+  for (const type of ['commit', 'tree', 'blob']) {
+    test(`rejects shared installed ${type} swap immediately before ${phase} status`, async t => {
+      const f = fixture(t);
+      const tree = f.git('rev-parse', `${f.oldSha}^{tree}`);
+      const blob = f.git('rev-parse', `${f.oldSha}:file.txt`);
+      const originalCommit = Buffer.from(f.git('cat-file', 'commit', f.oldSha) + '\n');
+      let statuses = 0;
+      let attacked = false;
+      f.setOnCommand((file, args, options) => {
+        if (!args.includes('status')) return;
+        statuses++;
+        // Every status starts from a new index with zero stat data, and uses
+        // the verified store while it still exists, without shared alternates.
+        const index = fs.readFileSync(options.env.GIT_INDEX_FILE);
+        assert.deepEqual(index.subarray(12, 36), Buffer.alloc(24));
+        const store = options.env.GIT_OBJECT_DIRECTORY;
+        assert.notEqual(store, path.join(f.checkout, '.git/objects'));
+        assert.ok(fs.existsSync(store));
+        assert.equal(fs.existsSync(path.join(store, 'info/alternates')), false);
+        assert.equal(options.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, undefined);
+        if (statuses !== (phase === 'initial' ? 1 : 2)) return;
+        attacked = true;
+        const dirty = Buffer.from('malicious\n');
+        fs.writeFileSync(path.join(f.checkout, 'file.txt'), dirty);
+        if (type === 'blob') {
+          plantObject(f, blob, 'blob', dirty);
+          forgeStatCache(f);
+        }
+        else {
+          f.git('add', 'file.txt');
+          const dirtyTree = f.git('write-tree');
+          if (type === 'commit') plantObject(f, f.oldSha, 'commit',
+            Buffer.from(originalCommit.toString().replace(tree, dirtyTree)));
+          else plantObject(f, tree, 'tree', execFileSync('git', ['-C', f.checkout, 'cat-file', 'tree', dirtyTree], { stdio: ['ignore', 'pipe', 'pipe'] }));
+        }
+        // cat-file serves the forged tree bytes; some Git versions rehash
+        // trees in status itself. Commit/stat-cache variants fool real status.
+        if (type === 'tree') {
+          assert.deepEqual(execFileSync('git', ['-C', f.checkout, 'cat-file', 'tree', tree],
+            { stdio: ['ignore', 'pipe', 'pipe'] }), execFileSync('git',
+            ['-C', f.checkout, 'cat-file', 'tree', f.git('write-tree')], { stdio: ['ignore', 'pipe', 'pipe'] }));
+        } else assert.equal(f.git('status', '--porcelain'), '');
+      });
+      await assert.rejects(f.validate(), phase === 'initial' ? /checkout is dirty/ : /checkout became dirty/);
+      assert.equal(attacked, true);
+      const statusCommands = f.commands.filter(c => c.args.includes('status'));
+      const store = statusCommands[0].options.env.GIT_OBJECT_DIRECTORY;
+      for (const command of statusCommands) assert.equal(command.options.env.GIT_OBJECT_DIRECTORY, store);
+      assert.equal(fs.existsSync(store), false);
+    });
+  }
+}
+
+for (const type of ['commit', 'tree', 'blob']) {
+  test(`hash-verifies installed ${type} before the first status`, async t => {
+    const f = fixture(t);
+    const id = type === 'commit' ? f.oldSha : f.git('rev-parse', type === 'tree' ? `${f.oldSha}^{tree}` : `${f.oldSha}:file.txt`);
+    const bytes = execFileSync('git', ['-C', f.checkout, 'cat-file', type, id], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let attacked = false;
+    f.setOnCommand((file, args) => {
+      if (attacked || !args.includes('cat-file') || !args.includes(id)) return;
+      attacked = true;
+      const forged = Buffer.from(bytes);
+      forged[forged.length - 2] ^= 1;
+      plantObject(f, id, type, forged);
+    });
+    await assert.rejects(f.validate(), /object hash mismatch/);
+    assert.equal(attacked, true);
+    assert.equal(f.commands.some(c => c.args.includes('status')), false);
+  });
+}
+
+test('raw byte comparison rejects attribute-normalized worktree content', async t => {
+  const f = fixture(t, 'candidate\n', { installedAttributes: 'file.txt text\n' });
+  fs.writeFileSync(path.join(f.checkout, 'file.txt'), 'installed\r\n');
+  f.git('add', 'file.txt');
+  assert.equal(f.git('status', '--porcelain'), '');
+  f.setOnCommand((file, args, options) => {
+    if (args.includes('status')) assert.equal(execFileSync(file, args,
+      { ...options, stdio: ['ignore', 'pipe', 'pipe'] }).trim(), '');
+  });
+  await assert.rejects(f.validate(), /checkout is dirty/);
+  assert.equal(f.commands.filter(c => c.args.includes('status')).length, 1);
+});
