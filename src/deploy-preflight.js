@@ -18,13 +18,13 @@ function requireCandidate(condition, message) {
 
 // Only the issue number selects a candidate. Paths and repository identity are
 // loaded from owner configuration and the canonical durable R1 store.
-// Dependency injection is for trusted callers testing read-only observations;
-// candidate data cannot select an observer or bypass the identity/config gates.
-function createDeploymentValidator({ observeRemote } = {}) {
-  return (issueNumber, options) => validateCandidate(issueNumber, options, observeRemote);
+async function validateDeploymentCandidate(issueNumber, options) {
+  return validateCandidate(issueNumber, options);
 }
 
-async function validateCandidate(issueNumber, { configPath } = {}, observeRemote) {
+// The third argument is private and used only by the source-loaded test harness.
+// Public callers cannot override the canonical production URL or transport.
+async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanonicalUrl) {
   const project = loadProjectConfig('ralph', configPath === undefined ? {} : { configPath });
   requireCandidate(project.baseBranch === 'ralph-dev' && project.reviewPolicy === 'always'
     && project.autoMerge === true && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.repo), 'owner Ralph policy or repository is invalid');
@@ -56,16 +56,10 @@ async function validateCandidate(issueNumber, { configPath } = {}, observeRemote
   requireCandidate(urls.length === 1 && allowedUrls.includes(urls[0])
     && allowedUrls.includes(await git(['ls-remote', '--get-url', 'origin'])),
     'origin does not identify the configured repository');
-  const transportKeys = (await git(['config', '--null', '--name-only', '--list'])).split('\0');
-  requireCandidate(!transportKeys.some(key => [
-    'core.sshcommand', 'ssh.variant', 'remote.origin.uploadpack',
-  ].includes(key)), 'unsafe origin transport configuration');
   const targetRef = `refs/heads/${project.baseBranch}`;
-  const remote = observeRemote
-    ? await observeRemote(Object.freeze({ url: urls[0], ref: targetRef }))
-    : await git(['-c', 'core.sshCommand=ssh', '-c', 'ssh.variant=ssh',
-      '-c', 'remote.origin.uploadpack=git-upload-pack',
-      'ls-remote', '--exit-code', '--refs', 'origin', targetRef]);
+  const canonicalUrl = `https://github.com/${project.repo}.git`;
+  const remote = await observeRemote(testOnlyCanonicalUrl ?? canonicalUrl, targetRef,
+    testOnlyCanonicalUrl !== undefined);
   const newSha = job.merge.commit;
   requireCandidate(remote === `${newSha}\t${targetRef}`, 'approved merge is not the exact origin/ralph-dev target');
   requireCandidate(sha(oldSha) && await git(['rev-parse', '--verify', `${newSha}^{commit}`]) === newSha, 'candidate is not a local commit');
@@ -109,5 +103,32 @@ async function validateCandidate(issueNumber, { configPath } = {}, observeRemote
   return Object.freeze({ oldSha, newSha, noOp: oldSha === newSha });
 }
 
-const validateDeploymentCandidate = createDeploymentValidator();
-module.exports = { validateDeploymentCandidate, createDeploymentValidator };
+// Never observe a named remote inside the worker-writable checkout. This bare
+// gitdir has no config, and neither inherited Git settings nor proxy/TLS/helper
+// environment can affect the request. Only the trusted Git HTTPS transport is
+// enabled in production; local transport exists solely for the private tests.
+async function observeRemote(url, ref, localForTest) {
+  if (localForTest) requireCandidate(path.isAbsolute(url), 'test remote must be an absolute local path');
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-remote-'));
+  try {
+    fs.mkdirSync(path.join(scratch, 'objects'));
+    fs.mkdirSync(path.join(scratch, 'refs'));
+    fs.mkdirSync(path.join(scratch, 'home'));
+    fs.writeFileSync(path.join(scratch, 'HEAD'), 'ref: refs/heads/unused\n');
+    const env = {
+      PATH: '/usr/bin:/bin', HOME: path.join(scratch, 'home'),
+      XDG_CONFIG_HOME: path.join(scratch, 'home'), LANG: 'C', LC_ALL: 'C',
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0',
+      GIT_ALLOW_PROTOCOL: localForTest ? 'file' : 'https',
+    };
+    return (await execute('/usr/bin/git', ['--no-replace-objects', `--git-dir=${scratch}`,
+      '-c', 'core.bare=true', 'ls-remote', '--exit-code', '--refs', url, ref], {
+      cwd: scratch, env, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+    })).stdout.trim();
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+module.exports = { validateDeploymentCandidate };

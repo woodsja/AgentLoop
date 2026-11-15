@@ -5,9 +5,31 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, execFile } = require('node:child_process');
+const { createRequire } = require('node:module');
+const { promisify } = require('node:util');
 const state = require('../src/autopilot-state');
-const { validateDeploymentCandidate, createDeploymentValidator } = require('../src/deploy-preflight');
+const { validateDeploymentCandidate } = require('../src/deploy-preflight');
+
+// Load the private URL dependency only in tests. No observer/output is faked:
+// every command, including the shipping ls-remote implementation, runs real Git.
+function testValidator(remote, onObservation) {
+  const filename = require.resolve('../src/deploy-preflight');
+  const realRequire = createRequire(filename);
+  const observedExec = (...args) => execFile(...args);
+  observedExec[promisify.custom] = async (...args) => {
+    if (args[1].includes('ls-remote') && !args[1].includes('--get-url')) onObservation(...args);
+    return promisify(execFile)(...args);
+  };
+  const localRequire = name => name === 'node:child_process'
+    ? { execFile: observedExec } : realRequire(name);
+  const loaded = { exports: {} };
+  const source = fs.readFileSync(filename, 'utf8') +
+    '\nmodule.exports.validateForTest = (issue, options) => validateCandidate(issue, options, testOnlyCanonicalUrl);';
+  new Function('require', 'module', 'exports', 'testOnlyCanonicalUrl', source)(
+    localRequire, loaded, loaded.exports, remote);
+  return remote === undefined ? loaded.exports.validateDeploymentCandidate : loaded.exports.validateForTest;
+}
 
 function fixture(t, content = 'candidate\n', { installedAttributes, candidateAttributes } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-preflight-'));
@@ -23,18 +45,12 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   git('config', 'user.email', 'preflight@example.invalid');
   git('config', 'commit.gpgsign', 'false');
   git('init', '--bare', remote);
-  // All writes target the disposable bare path directly. Only the read-only
-  // observation is injected; production URL and transport gates still run.
+  // Writes and the real read-only observation use the disposable bare remote.
   let beforeRemote;
-  let observations = 0;
-  const validate = createDeploymentValidator({
-    observeRemote: async ({ url, ref }) => {
-      assert.equal(url, 'git@github.com:woodsja/AgentLoop.git');
-      assert.equal(ref, 'refs/heads/ralph-dev');
-      observations++;
-      if (beforeRemote) beforeRemote();
-      return git('ls-remote', '--exit-code', '--refs', remote, ref);
-    },
+  const observations = [];
+  const validate = testValidator(remote, (file, args, options) => {
+    observations.push({ file, args, options });
+    if (beforeRemote) beforeRemote();
   });
   git('remote', 'add', 'origin', 'git@github.com:woodsja/AgentLoop.git');
   if (installedAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), installedAttributes);
@@ -78,7 +94,7 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   save();
   return { root, checkout, remote, configPath,
     setBeforeRemote: callback => { beforeRemote = callback; },
-    observationCount: () => observations, git, commit, oldSha, newSha, head, job, store, save, project, configure,
+    observationCount: () => observations.length, observations, git, commit, oldSha, newSha, head, job, store, save, project, configure,
     validate: () => validate(28, { configPath }) };
 }
 
@@ -315,18 +331,133 @@ test('preserves stricter owner info-attribute whitespace rules', async t => {
 });
 
 for (const key of ['core.sshCommand', 'ssh.variant', 'remote.origin.uploadpack']) {
-  test(`rejects hostile ${key} before any remote observation or side effects`, async t => {
+  test(`ignores hostile ${key} during canonical remote observation`, async t => {
     const f = fixture(t);
     const marker = path.join(f.root, 'transport-executed');
     const command = `touch '${marker}'; git-upload-pack '${f.remote}'`;
     f.git('config', key, key === 'ssh.variant' ? 'simple' : command);
     const before = snapshot(f.root);
-    await assert.rejects(f.validate(), /unsafe origin transport configuration/);
-    // The production entry point also refuses without opening a connection.
-    await assert.rejects(validateDeploymentCandidate(28, { configPath: f.configPath }),
-      /unsafe origin transport configuration/);
-    assert.equal(f.observationCount(), 0);
+    assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+    assert.equal(f.observationCount(), 1);
     assert.equal(fs.existsSync(marker), false);
     assert.deepEqual(snapshot(f.root), before);
   });
 }
+
+test('vcs helper alias can forge origin, but cannot forge canonical observation', async t => {
+  const f = fixture(t);
+  const marker = path.join(f.root, 'alias-executed');
+  f.git('push', '--force', f.remote, `${f.oldSha}:refs/heads/ralph-dev`);
+  const helper = `preflight-forgery-${process.pid}`;
+  f.git('config', 'remote.origin.vcs', helper);
+  f.git('config', `alias.remote-${helper}`,
+    `!f() { touch '${marker}'; while IFS= read -r command; do case \"$command\" in capabilities) printf '\\n';; list*) printf '%s %s\\n\\n' '${f.newSha}' 'refs/heads/ralph-dev';; esac; done; }; f`);
+  // Prove this attack actually works against checkout-based observation.
+  assert.equal(f.git('ls-remote', '--exit-code', '--refs', 'origin', 'refs/heads/ralph-dev'),
+    `${f.newSha}\trefs/heads/ralph-dev`);
+  assert.equal(fs.existsSync(marker), true);
+  fs.rmSync(marker);
+  const before = snapshot(f.root);
+  await assert.rejects(f.validate(), /exact origin\/ralph-dev target/);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(f.observationCount(), 1);
+  assert.deepEqual(snapshot(f.root), before);
+});
+
+for (const [key, value] of Object.entries({
+  'http.proxy': 'http://127.0.0.1:1',
+  'http.sslVerify': 'false',
+  'http.sslCAInfo': '/untrusted/ca.pem',
+  'http.curloptResolve': 'github.com:443:127.0.0.1',
+  'http.https://github.com/.proxy': 'http://127.0.0.1:1',
+})) {
+  test(`canonical observation cannot read checkout ${key}`, async t => {
+    const f = fixture(t);
+    f.git('config', key, value);
+    f.setBeforeRemote(() => {
+      const { file, args, options } = f.observations.at(-1);
+      // Inspect the real observation's exact Git context, rather than assuming
+      // a local file transport would exercise HTTP configuration on its own.
+      const prefix = args.slice(0, args.indexOf('ls-remote'));
+      const config = execFileSync(file, [...prefix, 'config', '--list'], { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+      assert.doesNotMatch(config, /http\./i);
+      assert.equal(options.env.GIT_CONFIG_NOSYSTEM, '1');
+      assert.equal(options.env.GIT_CONFIG_GLOBAL, '/dev/null');
+      assert.equal(fs.existsSync(path.join(options.cwd, 'config')), false);
+    });
+    const before = snapshot(f.root);
+    assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+    assert.deepEqual(snapshot(f.root), before);
+    // Correct config isolation must also reject a real stale remote.
+    f.git('push', '--force', f.remote, `${f.oldSha}:refs/heads/ralph-dev`);
+    await assert.rejects(f.validate(), /exact origin\/ralph-dev target/);
+  });
+}
+
+test('observation uses config-free scratch metadata and a controlled environment', async t => {
+  const f = fixture(t);
+  const home = path.join(f.root, 'hostile-home');
+  fs.mkdirSync(home);
+  const included = path.join(home, 'included');
+  fs.writeFileSync(included, '[http]\n proxy = http://127.0.0.1:1\n sslVerify = false\n');
+  fs.writeFileSync(path.join(home, '.gitconfig'), `[include]\n path = ${included}\n`);
+  const hostile = {
+    HOME: home, XDG_CONFIG_HOME: home, GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
+    GIT_CONFIG_SYSTEM: included, GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.proxy', GIT_CONFIG_VALUE_0: 'http://127.0.0.1:1',
+    GIT_CONFIG_PARAMETERS: "'http.sslVerify=false'", GIT_EXEC_PATH: home,
+    GIT_SSH_COMMAND: 'false', GIT_PROXY_COMMAND: 'false', GIT_ALLOW_PROTOCOL: 'ext',
+    HTTPS_PROXY: 'http://127.0.0.1:1', https_proxy: 'http://127.0.0.1:1',
+    ALL_PROXY: 'http://127.0.0.1:1', HTTP_PROXY: 'http://127.0.0.1:1',
+    SSL_CERT_FILE: included, CURL_CA_BUNDLE: included, LD_PRELOAD: '/missing/preload.so',
+  };
+  const original = Object.fromEntries(Object.keys(hostile).map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, hostile);
+    f.setBeforeRemote(() => {
+      const { file, args, options } = f.observations.at(-1);
+      assert.equal(file, '/usr/bin/git');
+      assert.equal(options.env.PATH, '/usr/bin:/bin');
+      assert.notEqual(options.cwd, f.checkout);
+      assert.equal(options.env.HOME, path.join(options.cwd, 'home'));
+      assert.deepEqual(fs.readdirSync(options.env.HOME), []);
+      assert.equal(options.env.GIT_ALLOW_PROTOCOL, 'file');
+      for (const key of Object.keys(hostile)) {
+        if (!['HOME', 'XDG_CONFIG_HOME', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_ALLOW_PROTOCOL'].includes(key)) {
+          assert.equal(options.env[key], undefined, key);
+        }
+      }
+      const prefix = args.slice(0, args.indexOf('ls-remote'));
+      assert.equal(execFileSync(file, [...prefix, 'config', '--list'], { ...options, stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 'core.bare=true');
+    });
+    assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+  assert.equal(fs.existsSync(f.observations[0].options.cwd), false);
+});
+
+test('public interface fixes the production canonical URL and permits only HTTPS', async t => {
+  assert.deepEqual(Object.keys(require('../src/deploy-preflight')), ['validateDeploymentCandidate']);
+  assert.equal(validateDeploymentCandidate.length, 2);
+  const f = fixture(t);
+  const stopped = new Error('stop before contacting production');
+  let scratch;
+  const validate = testValidator(undefined, (file, args, options) => {
+    scratch = options.cwd;
+    assert.equal(file, '/usr/bin/git');
+    assert.deepEqual(args.slice(args.indexOf('ls-remote')), [
+      'ls-remote', '--exit-code', '--refs',
+      'https://github.com/woodsja/AgentLoop.git', 'refs/heads/ralph-dev',
+    ]);
+    assert.equal(options.env.GIT_ALLOW_PROTOCOL, 'https');
+    throw stopped;
+  });
+  await assert.rejects(validate(28, {
+    configPath: f.configPath, canonicalUrl: f.remote, testOnlyCanonicalUrl: f.remote,
+    observeRemote: () => `${f.newSha}\trefs/heads/ralph-dev`,
+  }, f.remote), error => error === stopped);
+  assert.equal(fs.existsSync(scratch), false);
+});

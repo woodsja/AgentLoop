@@ -23,12 +23,16 @@ with actual successful workflow-run evidence. Ralph must retain `reviewPolicy:
 The configured checkout must be a clean repository root on `ralph-dev`, including
 no untracked files. Both the literal origin URL and its effective URL after
 `insteadOf` rewriting must match an allowed URL for the configured GitHub
-repository. URL checks alone do not authenticate the transport. Configured
-`core.sshCommand`, `ssh.variant`, or `remote.origin.uploadpack` entries are
-rejected before observation (including inherited and included settings). The
-observation also pins these options to `ssh`, `ssh`, and `git-upload-pack` so
-concurrent changes to them cannot redirect that command. A live
-`git ls-remote` observation of `refs/heads/ralph-dev` must equal the recorded merge
+repository. The live observation uses the canonical
+`https://github.com/<configured-repository>.git` URL directly, never `origin`.
+It runs in temporary bare Git metadata without a repository config, with system
+and global config disabled, an empty isolated HOME/XDG directory, and a controlled
+environment. Git uses the trusted `/usr/bin/git` and `/usr/bin:/bin` executable
+paths; only HTTPS transport is permitted. Checkout aliases, includes, helpers,
+SSH commands, URL rewrites, HTTP proxy/TLS/resolve settings, and inherited Git,
+proxy, certificate, or loader environment cannot redirect this observation,
+including config changes after the identity checks. No config blocklist is used.
+A live `git ls-remote` observation of `refs/heads/ralph-dev` must equal the recorded merge
 SHA exactly; local tracking refs are insufficient. Both installed and candidate
 commits must already exist locally. The candidate must be the reviewed head itself
 with a sole parent equal to installed HEAD, or a two-parent merge whose first
@@ -56,11 +60,10 @@ disabled. Network access is limited to the read-only remote observation; missing
 objects require a separate owner-authorized preparation step.
 
 Run `node test/deploy-preflight.test.js` for real disposable checkout/bare-remote
-tests. It is also included in `npm test`. Tests write directly to local bare
-repositories, without SSH redirection. The trusted dependency factory
-`createDeploymentValidator({ observeRemote })` accepts an asynchronous read-only
-observer receiving `{ url, ref }` and returning the `ls-remote` output. The factory
-retains all configuration, URL identity, evidence, and local Git gates. Only test
-code supplies this dependency; the production `validateDeploymentCandidate`
-entry point always uses Git and accepts no observer override. Never derive a
-dependency from issue or candidate input.
+tests. It is also included in `npm test`. The source-loaded test harness supplies
+only a private test-only canonical local bare path; it runs the actual Git
+observation code, enabling file transport exclusively for that dependency.
+The public module exports only `validateDeploymentCandidate`; neither its
+options nor additional arguments can choose a production URL or observer.
+Tests exercise real helper-alias forgery, HTTP config isolation, inherited config
+and environment isolation, exact remote results and failures, and scratch cleanup.
