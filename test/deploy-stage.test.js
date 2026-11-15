@@ -1,70 +1,45 @@
 'use strict';
-
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createRequire } = require('node:module');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
-
-// Reuse the real disposable repositories and canonical approval records from
-// preflight. Only the private canonical remote transport is changed to file.
-const fixtureFile = require.resolve('./deploy-preflight.test');
-const fixtureSource = fs.readFileSync(fixtureFile, 'utf8').split('// Compare every byte,')[0];
-const stageFile = require.resolve('../src/deploy-stage');
-const stageRequire = createRequire(stageFile);
-const stageModule = { exports: {} };
-new Function('require', 'module', 'exports', '__filename', fs.readFileSync(stageFile, 'utf8') +
-  '\nmodule.exports.runLocked = runLocked;')(stageRequire, stageModule, stageModule.exports, stageFile);
-
-function fixture(t, script = 'console.log("full candidate test stdout"); console.error("candidate stderr")', candidateAttributes) {
-  const loaded = { exports: {} };
-  const injected = fixtureSource.replace("fs.writeFileSync(path.join(checkout, 'file.txt'), text);", `
-    fs.writeFileSync(path.join(checkout, 'file.txt'), text);
-    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: 'stage-fixture', version: '1.0.0', scripts: { test: 'node -e ' + JSON.stringify(npmScript) } }));
-    fs.writeFileSync(path.join(checkout, 'package-lock.json'), JSON.stringify({ name: 'stage-fixture', version: '1.0.0', lockfileVersion: 3, packages: { '': { name: 'stage-fixture', version: '1.0.0' } } }));
-  `);
-  new Function('require', 'module', 'exports', 'npmScript', injected + '\nmodule.exports = fixture;')(
-    createRequire(fixtureFile), loaded, loaded.exports, script);
-  const f = loaded.exports(t, 'candidate\n', { candidateAttributes });
-  const worker = path.join(f.root, 'stage-worker.js');
-  // Load shipping staging code with the same private local-transport validator
-  // used by preflight's tests. No Git, npm, approval or filesystem gate is faked.
-  fs.writeFileSync(worker, `
-    const fs = require('node:fs');
-    const {createRequire} = require('node:module');
-    const filename = ${JSON.stringify(require.resolve('../src/deploy-preflight'))};
-    const preflight = {exports:{}};
-    new Function('require','module','exports', fs.readFileSync(filename,'utf8') +
-      '\\nmodule.exports.validateDeploymentCandidate = (issue, options) => validateCandidate(issue, options, ' + ${JSON.stringify(JSON.stringify(f.remote))} + ');')(
-        createRequire(filename),preflight,preflight.exports);
-    const stageFile = ${JSON.stringify(stageFile)};
-    const realRequire = createRequire(stageFile);
-    const loaded = {exports:{}};
-    new Function('require','module','exports','__filename', fs.readFileSync(stageFile,'utf8') + '\\nmodule.exports.prepare = prepare;')(
-      name => name === './deploy-preflight' ? preflight.exports : realRequire(name),loaded,loaded.exports,stageFile);
-    const {issueNumber,options} = JSON.parse(process.argv[3]);
-    loaded.exports.prepare(issueNumber,options).then(result => fs.writeFileSync(1,JSON.stringify({checkpoint:result.checkpoint})))
-      .catch(error => {fs.writeFileSync(2,error.stack);process.exitCode=1;});
-  `);
-  f.stageRoot = path.join(f.project.stateDir, 'deployment-staging');
-  f.prepare = (options = {}) => stageModule.exports.runLocked(28, { configPath: f.configPath, ...options }, worker);
-  f.checkpoint = () => path.join(f.stageRoot, `${f.oldSha}-${f.newSha}`, 'checkpoint.json');
-  f.worker = worker;
-  return f;
-}
-function snapshot(directory) {
-  return Object.fromEntries(fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
-    const file = path.join(directory, entry.name);
-    return entry.isDirectory() ? Object.entries(snapshot(file)) : [[file, fs.readFileSync(file).toString('base64')]];
-  }));
-}
-const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function until(predicate) {
-  const deadline = Date.now() + 15000;
-  while (!predicate()) { assert.ok(Date.now() < deadline, 'fixture condition timed out'); await pause(30); }
-}
+const { fixture, stageFile, stageModule, snapshot, pause, until } = require('./helpers/deploy-stage-fixture');
+test('retained-size admission count tolerates concurrent atomic renames', t => {
+  const stageSource = fs.readFileSync(stageFile, 'utf8');
+  const scratch = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'stage-size-race-'));
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(scratch, 'kept'), 'abc');
+  const vanishing = path.join(scratch, 'checkpoint.json.tmp');
+  const disappearingDir = path.join(scratch, 'attempt-finished');
+  const synthetic = {
+    ...fs,
+    readdirSync(directory, options) {
+      if (directory === scratch) return [
+        { name: 'kept', isDirectory: () => false },
+        { name: 'checkpoint.json.tmp', isDirectory: () => false },
+        { name: 'attempt-finished', isDirectory: () => true }
+      ];
+      if (directory === disappearingDir) {
+        const err = new Error('atomic rename removed directory'); err.code = 'ENOENT'; throw err;
+      }
+      return fs.readdirSync(directory, options);
+    },
+    lstatSync(file, options) {
+      if (file === vanishing) {
+        const err = new Error('atomic rename removed temporary checkpoint'); err.code = 'ENOENT'; throw err;
+      }
+      return fs.lstatSync(file, options);
+    }
+  };
+  const module = { exports: {} };
+  new Function('require', 'module', 'exports', '__filename',
+    stageSource + '\nmodule.exports._countForRaceTest = retainedSize;')(
+    name => name === 'node:fs' ? synthetic : require('node:module').createRequire(stageFile)(name),
+    module, module.exports, stageFile);
+  assert.equal(module.exports._countForRaceTest(scratch), 3);
+});
 
 test('stages exact candidate, full npm test, durable evidence and transcripts; re-entry is safe', async t => {
   const f = fixture(t);
@@ -81,7 +56,7 @@ test('stages exact candidate, full npm test, durable evidence and transcripts; r
   const text = ['stdout', 'stderr'].map(stream => fs.readFileSync(path.join(result.attempt, `npm-test.${stream}`), 'utf8')).join('');
   assert.match(text, /full candidate test stdout/);
   assert.match(text, /candidate stderr/);
-  assert.ok(records.some(record => record.command?.join(' ') === '/usr/bin/npm test'));
+  assert.ok(records.some(record => record.command?.at(-1) === 'test' && record.command[0] === process.execPath));
   fs.writeFileSync(path.join(result.repo, 'file.txt'), 'tampered');
   const retried = await f.prepare();
   assert.equal(retried.state, 'PREPARED');
@@ -232,4 +207,211 @@ test('public surface only exposes prepare; preflight failure cannot stage an una
   // This shipping public-worker call fails before any Git or remote observation.
   await assert.rejects(require('../src/deploy-stage').prepareDeploymentCandidate(28, { configPath: f.configPath }), /approved MERGED evidence/);
   assert.equal(fs.existsSync(f.checkpoint()), false);
+});
+
+
+function alterWorker(f, code) {
+  const source = fs.readFileSync(f.worker, 'utf8');
+  fs.writeFileSync(f.worker, source.replace('const {issueNumber,options}', `${code}\nconst {issueNumber,options}`));
+}
+for (const fault of ['fsync', 'kill', 'failed-record']) {
+  test(`callback/storage fault ${fault} rejects and independently publishes FAILED`, async t => {
+    const f = fixture(t, fault === 'kill' ? 'setInterval(()=>{}, 1000)' : 'process.exit(7)');
+    alterWorker(f, `
+      let injected = false, killCount = 0;
+      const originalSync = fs.fsyncSync, originalKill = process.kill, originalWrite = fs.writeFileSync;
+      ${fault === 'fsync' ? `fs.fsyncSync = fd => {
+        if (!injected && fs.readlinkSync('/proc/self/fd/' + fd).endsWith('npm-test.stdout')) {
+          injected = true; throw new Error('injected output fsync failure');
+        }
+        return originalSync(fd);
+      };` : fault === 'kill' ? `process.kill = (...args) => {
+        if (++killCount === 2) { injected = true; const error = new Error('injected kill failure'); error.code='EPERM'; throw error; }
+        return originalKill(...args);
+      };` : `fs.writeFileSync = (fd, data, ...args) => {
+        if (!injected && typeof data === 'string' && data.includes('"state":"FAILED"')) {
+          injected = true; throw new Error('injected FAILED record failure');
+        }
+        return originalWrite(fd, data, ...args);
+      };`}
+    `);
+    await assert.rejects(f.prepare({ timeoutMs: 1200 }), /injected/);
+    const receipt = JSON.parse(fs.readFileSync(f.checkpoint(), 'utf8'));
+    assert.equal(receipt.state, 'FAILED');
+    if (fault !== 'failed-record') assert.match(fs.readFileSync(receipt.transcript, 'utf8'), /"state":"FAILED"/);
+  });
+}
+for (const [from, to, message] of [
+  ['objects: 100000', 'objects: 1', 'history object count budget'],
+  ['objectBytes: 512 * 1024 * 1024', 'objectBytes: 1', 'history byte budget'],
+  ['commands: 128', 'commands: 1', 'Git command/time budget'],
+  ['copyMs: 600000', 'copyMs: 1', 'Git command/time budget'],
+  ['npmOutputBytes: 64 * 1024 * 1024', 'npmOutputBytes: 1', 'npm output budget'],
+  ['gitOutputBytes: 768 * 1024 * 1024', 'gitOutputBytes: 1', 'Git output budget'],
+]) {
+  test(`resource threshold fails closed with complete retained records: ${message}`, async t => {
+    const f = fixture(t);
+    fs.writeFileSync(f.worker, fs.readFileSync(f.worker, 'utf8').replace("fs.readFileSync(stageFile,'utf8')", `fs.readFileSync(stageFile,'utf8').replace(${JSON.stringify(from)},${JSON.stringify(to)})`));
+    await assert.rejects(f.prepare(), new RegExp(message));
+    const receipt = JSON.parse(fs.readFileSync(f.checkpoint(), 'utf8'));
+    assert.equal(receipt.state, 'FAILED');
+    assert.match(fs.readFileSync(receipt.transcript, 'utf8'), /"state":"FAILED"/);
+    for (const record of fs.readFileSync(receipt.transcript, 'utf8').trim().split('\n').map(JSON.parse).filter(record => record.command)) {
+      assert.ok(fs.existsSync(record.stdout)); assert.ok(fs.existsSync(record.stderr));
+    }
+  });
+}
+
+test('retained request budget refuses new work without deleting records', async t => {
+  const f = fixture(t);
+  fs.mkdirSync(f.stageRoot, { recursive: true });
+  for (let i = 0; i < 64; i++) fs.mkdirSync(path.join(f.stageRoot, `request-${i}`));
+  await assert.rejects(f.prepare(), /retained staging budget exhausted/);
+  assert.equal(fs.readdirSync(f.stageRoot).length, 64);
+});
+
+test('API close callback fsync failure rejects without an uncaught exception', async t => {
+  const f = fixture(t);
+  const original = fs.fsyncSync;
+  let injected = false;
+  fs.fsyncSync = fd => {
+    if (!injected && fs.readlinkSync(`/proc/self/fd/${fd}`).endsWith('worker.stdout')) {
+      injected = true; throw new Error('injected API output fsync failure');
+    }
+    return original(fd);
+  };
+  try {
+    await assert.rejects(f.prepare(), /injected API output fsync failure/);
+    assert.equal(JSON.parse(fs.readFileSync(f.checkpoint(), 'utf8')).state, 'PREPARED');
+  } finally { fs.fsyncSync = original; }
+});
+
+test('real npm resolves ordinary VM uv with isolated HOME and ignores inherited PATH', { skip: process.env.RALPH_STAGE_VM_UV !== '1' && 'VM-only: opt in with RALPH_STAGE_VM_UV=1' }, async t => {
+  const f = fixture(t, `
+    const fs = require('node:fs');
+    const output = require('node:child_process').execFileSync('uv', ['--version'], {stdio:['ignore','pipe','pipe']});
+    fs.writeFileSync(1, output);
+    fs.writeFileSync(1, JSON.stringify({home:process.env.HOME,path:process.env.PATH}) + '\\n');
+  `.replaceAll('\n', ' '));
+  const previousPath = process.env.PATH;
+  let receipt;
+  try {
+    process.env.PATH = '/untrusted/inherited/path';
+    receipt = await f.prepare();
+  } finally { process.env.PATH = previousPath; }
+  assert.equal(receipt.state, 'PREPARED');
+  const output = fs.readFileSync(path.join(receipt.attempt, 'npm-test.stdout'), 'utf8');
+  assert.match(output, /uv \d+\./);
+  const actual = JSON.parse(output.trim().split('\n').at(-1));
+  assert.equal(actual.home, path.join(receipt.attempt, 'home'));
+  assert.ok(actual.path.endsWith(':' + [path.dirname(process.execPath),'/usr/bin','/bin','/usr/local/bin',path.join(require('node:os').userInfo().homedir,'.local/bin')].join(':')));
+  assert.equal(actual.path.includes('/untrusted/inherited/path'), false);
+});
+
+for (const target of ['git', 'npm']) {
+  for (const lateClose of [false, true]) {
+    const errorCode = lateClose ? 'EMFILE' : 'ENFILE';
+    test(`spawn ${target} error ${lateClose ? 'with late close' : 'without close'} releases lock and records FAILED`, { timeout: 15000 }, async t => {
+      const f = fixture(t);
+      const worker = fs.readFileSync(f.worker, 'utf8');
+      fs.writeFileSync(f.worker, worker.replace('const loaded = {exports:{}};', `
+        const cp = require('node:child_process'), originalSpawn = cp.spawn;
+        cp.spawn = (file, args, options) => {
+          if (file === ${JSON.stringify(target === 'git' ? '/usr/bin/git' : '/usr/bin/timeout')}) {
+            const child = new (require('node:events').EventEmitter)();
+            child.kill = () => false;
+            const outputs = options.stdio.slice(1,3);
+            process.nextTick(() => {
+              const error = new Error('injected ${target} ${errorCode}'); error.code = '${errorCode}';
+              child.emit('error', error);
+              for (const fd of outputs) {
+                let closed = false;
+                try { fs.fstatSync(fd); } catch (error) { closed = error.code === 'EBADF'; }
+                if (!closed) throw new Error('spawn error leaked output descriptor');
+              }
+              ${lateClose ? "child.emit('close', -1, null); child.emit('close', -1, null);" : ''}
+            });
+            return child;
+          }
+          return originalSpawn(file,args,options);
+        };
+        const loaded = {exports:{}};
+      `));
+      await assert.rejects(f.prepare(), new RegExp('injected ' + target + ' ' + errorCode));
+      const failed = JSON.parse(fs.readFileSync(f.checkpoint(), 'utf8'));
+      assert.equal(failed.state, 'FAILED');
+      const records = fs.readFileSync(failed.transcript, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(records.filter(record => record.state === 'FAILED').length, 1);
+      assert.ok(records.some(record => /EMFILE|ENFILE/.test(record.error)));
+      fs.writeFileSync(f.worker, worker);
+      assert.equal((await f.prepare()).state, 'PREPARED');
+    });
+  }
+}
+
+test('packed objects and binary blob/tree delimiters retain exact bytes', async t => {
+  const f = fixture(t);
+  f.git('gc', '--prune=now');
+  const result = await f.prepare();
+  assert.deepEqual(fs.readFileSync(path.join(result.repo, 'binary-newline\nfile')), Buffer.from([0,10,255,32,10,0,100]));
+  const records = fs.readFileSync(result.transcript, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(records.filter(record => record.command?.includes('--batch')).length, 1);
+  assert.equal(records.filter(record => record.command?.includes('--batch-check')).length, 1);
+});
+
+for (const fault of ['hash', 'length', 'type', 'duplicate', 'trailing']) {
+  test(`invalid bulk object ${fault} fails closed retaining raw output`, async t => {
+    const f = fixture(t);
+    alterWorker(f, `
+      const originalRead = fs.readFileSync;
+      fs.readFileSync = (file,...args) => {
+        const bytes = originalRead(file,...args);
+        // Commands: init, source lookup, IDs, size/type plan, binary batch.
+        if (typeof file === 'string' && file.endsWith('git-5.stdout')) {
+          const changed = Buffer.from(bytes), end = changed.indexOf(10);
+          ${fault === 'hash' ? "changed[end+1] ^= 1; return changed;" :
+            fault === 'length' ? "return changed.subarray(0,changed.length-1);" :
+            fault === 'type' ? "return Buffer.concat([Buffer.from(changed.subarray(0,end).toString().replace('commit','blob')),changed.subarray(end)]);" :
+            fault === 'duplicate' ? "return Buffer.concat([changed,changed]);" : "return Buffer.concat([changed,Buffer.from('garbage')]);"}
+        }
+        return bytes;
+      };
+    `);
+    await assert.rejects(f.prepare(), /object hash mismatch|invalid batch|trailing batch/);
+    const result = JSON.parse(fs.readFileSync(f.checkpoint(), 'utf8'));
+    assert.equal(result.state, 'FAILED');
+    assert.ok(fs.statSync(path.join(result.attempt, 'git-5.stdout')).size > 0);
+    assert.equal(fs.existsSync(path.join(result.attempt, 'npm-ci.stdout')), false);
+  });
+}
+
+test('trusted Node/npm outside system bin work without inherited PATH or npm_execpath', async t => {
+  const f = fixture(t, 'console.log(JSON.stringify({node:process.execPath,path:process.env.PATH}))');
+  const bin = path.join(f.root, 'trusted-runtime/bin');
+  fs.mkdirSync(bin, {recursive:true});
+  const node = path.join(bin, 'node');
+  fs.copyFileSync(process.execPath, node);
+  fs.chmodSync(node, 0o700);
+  fs.symlinkSync(stageModule.exports.npmCli(), path.join(bin, 'npm'));
+  const launcher = path.join(f.root, 'runtime-launcher.js');
+  fs.writeFileSync(launcher, `
+    const fs = require('node:fs'), {createRequire} = require('node:module');
+    const filename = ${JSON.stringify(stageFile)}, loaded = {exports:{}};
+    new Function('require','module','exports','__filename',fs.readFileSync(filename,'utf8') + '\\nmodule.exports.runLocked = runLocked;')(
+      createRequire(filename),loaded,loaded.exports,filename);
+    loaded.exports.runLocked(28,{configPath:${JSON.stringify(f.configPath)}},${JSON.stringify(f.worker)})
+      .then(receipt => fs.writeFileSync(1,JSON.stringify(receipt)))
+      .catch(error => {fs.writeFileSync(2,error.stack);process.exitCode=1;});
+  `);
+  const result = await promisify(execFile)(node, [launcher], {
+    env: {...process.env, PATH:'/untrusted/path', npm_execpath:'/untrusted/npm'} });
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.state, 'PREPARED');
+  const output = fs.readFileSync(path.join(receipt.attempt, 'npm-test.stdout'), 'utf8');
+  const actual = JSON.parse(output.trim().split('\n').at(-1));
+  assert.equal(actual.node, node);
+  assert.ok(actual.path.includes(':' + bin + ':'));
+  assert.equal(actual.path.includes('/untrusted'), false);
+  const records = fs.readFileSync(receipt.transcript, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(records.find(record => record.command?.at(-1) === 'test').command[0], node);
 });

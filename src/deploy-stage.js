@@ -4,13 +4,42 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { spawn, execFile } = require('node:child_process');
-const { promisify } = require('node:util');
+const { deflateSync } = require('node:zlib');
+const { spawn } = require('node:child_process');
 const { validateDeploymentCandidate } = require('./deploy-preflight');
 const { loadProjectConfig } = require('./autopilot-config');
 const { createJobStore, resolveStateDir } = require('./autopilot-state');
 
-const execute = promisify(execFile);
+// Fixed admission/attempt budgets fail closed; retained records are never pruned.
+const LIMITS = Object.freeze({ objects: 100000, objectBytes: 512 * 1024 * 1024,
+  commands: 128, copyMs: 600000, gitOutputBytes: 768 * 1024 * 1024,
+  npmOutputBytes: 64 * 1024 * 1024, retainedBytes: 2 * 1024 * 1024 * 1024, requests: 64 });
+function retainedSize(directory) {
+  let entries;
+  try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
+  catch (error) {
+    // Another same-UID staging worker can atomically rename or finish writing
+    // a temporary file while this advisory admission count is in progress.
+    if (error.code === 'ENOENT') return 0;
+    throw error;
+  }
+  return entries.reduce((size, entry) => {
+    const file = path.join(directory, entry.name);
+    try { return size + (entry.isDirectory() ? retainedSize(file) : fs.lstatSync(file).size); }
+    catch (error) {
+      if (error.code === 'ENOENT') return size;
+      throw error;
+    }
+  }, 0);
+}
+function closeOutputs(descriptors) {
+  let failure;
+  for (const fd of descriptors) {
+    try { fs.fsyncSync(fd); } catch (error) { failure ||= error; }
+    try { fs.closeSync(fd); } catch (error) { failure ||= error; }
+  }
+  if (failure) throw failure;
+}
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const inside = (root, file) => file === root || file.startsWith(`${root}${path.sep}`);
 function requireStage(ok, reason) {
@@ -69,8 +98,20 @@ function evidence(project, issueNumber) {
   return JSON.parse(JSON.stringify(Object.fromEntries(['project', 'repo', 'issue', 'terminal', 'terminalState',
     'delivery', 'pr', 'review', 'ci', 'merge', 'verification'].map(key => [key, job[key]]))));
 }
+// Resolve only from the executing runtime and explicit owner-controlled VM tool
+// locations. Never consult the caller's PATH or npm_execpath.
+function npmCli() {
+  for (const file of [path.join(path.dirname(process.execPath), 'npm'),
+    '/usr/local/bin/npm', '/usr/bin/npm', path.join(os.userInfo().homedir, '.local/bin/npm')]) {
+    try {
+      const resolved = fs.realpathSync(file);
+      if (fs.statSync(resolved).isFile()) return resolved;
+    } catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error; }
+  }
+  throw new Error('Trusted npm CLI unavailable beside Node or in VM tool directories');
+}
 function environment(home) {
-  return { PATH: '/usr/bin:/bin', HOME: home, XDG_CONFIG_HOME: home, LANG: 'C', LC_ALL: 'C',
+  return { PATH: [path.dirname(process.execPath), '/usr/bin', '/bin', '/usr/local/bin', path.join(os.userInfo().homedir, '.local/bin')].join(':'), HOME: home, XDG_CONFIG_HOME: home, LANG: 'C', LC_ALL: 'C',
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', npm_config_cache: path.join(home, 'npm-cache') };
 }
@@ -79,6 +120,8 @@ function environment(home) {
 // flock's inherited descriptor also keeps it held by a still-running test child.
 async function runLocked(issueNumber, options = {}, worker = __filename) {
   const { root } = settings(issueNumber, options);
+  requireStage(fs.readdirSync(root).filter(name => name.startsWith('request-')).length < LIMITS.requests
+    && retainedSize(root) < LIMITS.retainedBytes, 'retained staging budget exhausted; owner archival required');
   const file = path.join(root, 'prepare.lock');
   const fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW, 0o600);
   try {
@@ -93,23 +136,30 @@ async function runLocked(issueNumber, options = {}, worker = __filename) {
       const child = spawn('/bin/sh', ['-c', '/usr/bin/flock --nonblock 3 || exit 75\nexec "$@"',
         'stage-lock', process.execPath, worker, '--stage-worker', JSON.stringify({ issueNumber, options })],
       { stdio: ['ignore', ...descriptors, fd], env: { ...environment(root),
-        // Preserve canonical state resolution and the owner's preflight Git
-        // settings. Only npm children receive the attempt's isolated HOME.
+        // Preserve canonical state resolution. npm children use an isolated HOME;
+        // the fixed tool path still includes the owner's ordinary VM tools.
         HOME: os.homedir(), XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config') } });
-      child.on('error', reject);
-      child.on('close', code => {
-        for (const output of descriptors) { fs.fsyncSync(output); fs.closeSync(output); }
-        const stdout = fs.readFileSync(stdoutFile, 'utf8'), stderr = fs.readFileSync(stderrFile, 'utf8');
-        if (code !== 0) reject(new Error(`Deployment prepare worker failed (${code}); lock busy or staging refused (logs: ${request}): ${stderr}`));
-        else {
-          try {
-            const { checkpoint } = JSON.parse(stdout);
-            requireStage(inside(root, checkpoint), 'worker returned an unsafe checkpoint');
-            regular(checkpoint);
-            resolve(Object.freeze({ ...JSON.parse(fs.readFileSync(checkpoint, 'utf8')), checkpoint }));
-          } catch (error) { reject(error); }
-        }
-      });
+      let settled = false;
+      const finish = (code, failure) => {
+        if (settled) return;
+        settled = true;
+        try {
+          closeOutputs(descriptors);
+          if (failure) throw failure;
+          const stdout = fs.readFileSync(stdoutFile, 'utf8'), stderr = fs.readFileSync(stderrFile, 'utf8');
+          if (code !== 0) reject(new Error(`Deployment prepare worker failed (${code}); lock busy or staging refused (logs: ${request}): ${stderr}`));
+          else {
+            try {
+              const { checkpoint } = JSON.parse(stdout);
+              requireStage(inside(root, checkpoint), 'worker returned an unsafe checkpoint');
+              regular(checkpoint);
+              resolve(Object.freeze({ ...JSON.parse(fs.readFileSync(checkpoint, 'utf8')), checkpoint }));
+            } catch (error) { reject(error); }
+          }
+        } catch (error) { reject(error); }
+      };
+      child.on('error', error => finish(null, error));
+      child.on('close', code => finish(code));
     });
   } finally { fs.closeSync(fd); }
 }
@@ -157,65 +207,162 @@ async function prepare(issueNumber, options = {}) {
   const logFd = fs.openSync(transcript, 'wx', 0o600);
   syncDir(attempt);
   const record = event => { fs.writeFileSync(logFd, `${JSON.stringify({ time: new Date().toISOString(), ...event })}\n`); fs.fsyncSync(logFd); };
-  const git = async (args, { source, input } = {}) => {
+  let commandCount = 0, gitOutputBytes = 0;
+  const copyStarted = Date.now();
+  const git = async (args, { source, cwd = repo, input, commandTimeout = 30000, outputLimit = 64 * 1024 * 1024 } = {}) => {
+    requireStage(++commandCount <= LIMITS.commands && Date.now() - copyStarted <= LIMITS.copyMs,
+      'Git command/time budget exhausted');
     const gitEnv = source ? { ...env, GIT_OBJECT_DIRECTORY: source } : env;
-    const argv = ['--no-replace-objects', '-C', repo, '-c', 'core.hooksPath=/dev/null',
+    const argv = ['--no-replace-objects', '-C', cwd, '-c', 'core.hooksPath=/dev/null',
       '-c', 'core.fsmonitor=false', '-c', 'core.commitGraph=false', ...args];
+    const output = ['stdout', 'stderr'].map(stream => path.join(attempt, `git-${commandCount}.${stream}`));
+    const descriptors = output.map(file => fs.openSync(file, 'wx', 0o600));
+    const inputFd = input === undefined ? undefined : fs.openSync(input, 'r');
+    syncDir(attempt);
+    record({ command: ['/usr/bin/git', ...argv], cwd, input, commandTimeout, outputLimit, stdout: output[0], stderr: output[1] });
     return new Promise((resolve, reject) => {
-      const child = execFile('/usr/bin/git', argv, { env: gitEnv, encoding: null, timeout: 30000,
-        maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
-        record({ command: ['/usr/bin/git', ...argv], stdout: stdout.toString('base64'), stderr: stderr.toString('base64'), encoding: 'base64', error: error?.message });
-        if (error) reject(error); else resolve(stdout);
-      });
-      child.stdin.on('error', () => {});
-      child.stdin.end(input);
+      const child = spawn('/usr/bin/git', argv, { env: gitEnv, timeout: commandTimeout,
+        stdio: [inputFd ?? 'ignore', ...descriptors] });
+      let failure, settled = false;
+      const terminate = () => { try { child.kill('SIGKILL'); } catch (error) { failure ||= error; } };
+      const outputTimer = setInterval(() => {
+        try {
+          const bytes = output.reduce((sum, file) => sum + fs.statSync(file).size, 0);
+          if (bytes > outputLimit || gitOutputBytes + bytes > LIMITS.gitOutputBytes) {
+            failure ||= new Error('Git output budget exhausted'); terminate();
+          }
+        } catch (error) { failure ||= error; terminate(); }
+      }, 100);
+      const finish = (code, signal, error) => {
+        if (settled) return;
+        settled = true;
+        failure ||= error;
+        clearInterval(outputTimer);
+        try {
+          closeOutputs(inputFd === undefined ? descriptors : [...descriptors, inputFd]);
+          const commandBytes = output.reduce((sum, file) => sum + fs.statSync(file).size, 0);
+          gitOutputBytes += commandBytes;
+          record({ commandExit: commandCount, exitCode: code, signal, error: failure?.message });
+          requireStage(commandBytes <= outputLimit && gitOutputBytes <= LIMITS.gitOutputBytes, 'Git output budget exhausted');
+          if (failure) throw failure;
+          requireStage(code === 0, `git ${args.join(' ')} failed (${code}, ${signal}); raw output: ${output.join(', ')}`);
+          resolve(fs.readFileSync(output[0]));
+        } catch (error) { reject(error); }
+      };
+      child.on('error', error => finish(null, null, error));
+      child.on('close', finish);
     });
   };
   const runNpm = args => new Promise((resolve, reject) => {
+    const cli = npmCli();
     const output = ['stdout', 'stderr'].map(stream => path.join(attempt, `npm-${args[0]}.${stream}`));
     const descriptors = output.map(file => fs.openSync(file, 'wx', 0o600));
     syncDir(attempt);
-    record({ command: ['/usr/bin/npm', ...args], cwd: repo, timeoutMs, stdout: output[0], stderr: output[1] });
+    record({ command: [process.execPath, cli, ...args], cwd: repo, timeoutMs, stdout: output[0], stderr: output[1] });
     // GNU timeout remains alive and enforces the bound even if this worker is
     // killed. Descriptor 3 carries the kernel lock into that process group.
-    const child = spawn('/usr/bin/timeout', ['--signal=KILL', `${timeoutMs / 1000}s`, '/usr/bin/npm', ...args],
+    const child = spawn('/usr/bin/timeout', ['--signal=KILL', `${timeoutMs / 1000}s`, process.execPath, cli, ...args],
       { cwd: repo, env, detached: true, stdio: ['ignore', ...descriptors, 'inherit'] });
-    let timedOut = false;
+    let timedOut = false, failure, settled = false;
     const killGroup = () => {
       if (!Number.isInteger(child.pid)) return;
-      try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') failure ||= error; }
     };
     const timer = setTimeout(() => { timedOut = true; killGroup(); }, timeoutMs);
-    child.on('error', error => { clearTimeout(timer); reject(error); });
-    child.on('close', (code, signal) => {
+    const outputTimer = setInterval(() => {
+      try {
+        if (output.reduce((sum, file) => sum + fs.statSync(file).size, 0) > LIMITS.npmOutputBytes) {
+          failure ||= new Error('npm output budget exhausted'); killGroup();
+        }
+      } catch (error) { failure ||= error; killGroup(); }
+    }, 100);
+    const finish = (code, signal, error) => {
+      if (settled) return;
+      settled = true;
+      failure ||= error;
       clearTimeout(timer);
-      killGroup(); // no background descendants may outlive verification
-      for (const fd of descriptors) { fs.fsyncSync(fd); fs.closeSync(fd); }
-      timedOut ||= signal === 'SIGKILL'; // GNU timeout can win the timer race
-      record({ exitCode: code, signal, timedOut });
-      if (code === 0 && !timedOut) resolve(); else reject(new Error(`npm ${args.join(' ')} failed: code=${code} signal=${signal} timeout=${timedOut}`));
-    });
+      clearInterval(outputTimer);
+      try {
+        killGroup(); // no background descendants may outlive verification
+        closeOutputs(descriptors);
+        timedOut ||= signal === 'SIGKILL'; // GNU timeout can win the timer race
+        record({ exitCode: code, signal, timedOut, error: failure?.message });
+        if (failure) throw failure;
+        requireStage(output.reduce((sum, file) => sum + fs.statSync(file).size, 0) <= LIMITS.npmOutputBytes, 'npm output budget exhausted');
+        if (code === 0 && !timedOut) resolve(); else reject(new Error(`npm ${args.join(' ')} failed: code=${code} signal=${signal} timeout=${timedOut}`));
+      } catch (error) { reject(error); }
+    };
+    child.on('error', error => finish(null, null, error));
+    child.on('close', finish);
   });
   let receipt = { ...identity, state: 'PREPARING', attempt, repo, transcript };
   try {
     // PREPARED re-entry is reconciled by rerunning exact-candidate tests. This
     // avoids treating altered staging contents as still-verified bytes.
     atomicJson(checkpoint, receipt);
+    record({ environment: env, workerNode: process.execPath, npmNode: process.execPath, limits: LIMITS });
     await git(['init', '--template=', '--initial-branch=staging']);
-    const source = (await execute('/usr/bin/git', ['--no-replace-objects', '-C', live,
-      'rev-parse', '--path-format=absolute', '--git-path', 'objects'], { env, timeout: 30000 })).stdout.trim();
+    const source = (await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects'], { cwd: live })).toString().trim();
+    // Enumerate IDs only: tree names (including embedded newlines) never delimit
+    // this protocol. Read from a private empty Git directory, so source shallow
+    // files, grafts, refs and configuration cannot truncate reachable history.
+    const ids = (await git(['rev-list', '--objects', '--no-object-names', newSha], { source }))
+      .toString('utf8').trim().split('\n');
+    requireStage(ids.every(id => /^[a-f0-9]{40}$/.test(id)) && new Set(ids).size === ids.length,
+      'invalid or duplicate history object IDs');
+    requireStage(ids.length <= LIMITS.objects, 'history object count budget exhausted');
+    const input = path.join(attempt, 'object-requests.txt');
+    fs.writeFileSync(input, ids.join('\n') + '\n', { flag: 'wx', mode: 0o600 });
+    const plan = (await git(['cat-file', '--batch-check'], { source, input })).toString('utf8').trim().split('\n');
+    let plannedBytes = 0;
+    requireStage(plan.length === ids.length, 'invalid batch plan');
+    for (let i = 0; i < ids.length; i++) {
+      const match = /^([a-f0-9]{40}) (commit|tree|blob) (0|[1-9][0-9]*)$/.exec(plan[i]);
+      requireStage(match && match[1] === ids[i], 'invalid batch plan identity/type');
+      plannedBytes += Number(match[3]);
+      requireStage(Number.isSafeInteger(plannedBytes) && plannedBytes <= LIMITS.objectBytes, 'history byte budget exhausted');
+    }
+    const batch = await git(['cat-file', '--batch'], { source, input, commandTimeout: Math.max(1, LIMITS.copyMs - (Date.now() - copyStarted)),
+      outputLimit: LIMITS.objectBytes + LIMITS.objects * 128 });
     const copied = new Map();
-    const copy = async (id, type) => {
-      if (copied.has(id)) {
-        requireStage(copied.get(id).type === type, 'object type mismatch');
-        return copied.get(id).bytes;
-      }
-      const bytes = await git(['cat-file', type, id], { source });
-      const actual = (await git(['hash-object', '-w', '-t', type, '--stdin'], { input: bytes })).toString().trim();
-      requireStage(actual === id, `object hash mismatch ${id}`);
+    let objectBytes = 0, offset = 0;
+    for (const id of ids) {
+      requireStage(Date.now() - copyStarted <= LIMITS.copyMs, 'Git command/time budget exhausted');
+      const end = batch.indexOf(10, offset);
+      requireStage(end >= offset && end - offset < 128, 'invalid batch header');
+      const match = /^([a-f0-9]{40}) (commit|tree|blob) (0|[1-9][0-9]*)$/.exec(batch.subarray(offset, end).toString('utf8'));
+      requireStage(match && match[1] === id && batch.subarray(offset, end).toString('utf8') === plan[copied.size], 'invalid batch object identity/type');
+      const [, , type, length] = match, size = Number(length);
+      objectBytes += size;
+      requireStage(Number.isSafeInteger(size) && objectBytes <= LIMITS.objectBytes, 'history byte budget exhausted');
+      offset = end + 1;
+      requireStage(offset + size < batch.length && batch[offset + size] === 10, 'invalid batch object length');
+      const bytes = batch.subarray(offset, offset + size);
+      offset += size + 1;
+      const object = Buffer.concat([Buffer.from(`${type} ${size}\0`), bytes]);
+      requireStage(crypto.createHash('sha1').update(object).digest('hex') === id, `object hash mismatch ${id}`);
+      const target = path.join(repo, '.git/objects', id.slice(0, 2), id.slice(2));
+      // These are fresh private directories. Flush the complete repo once before
+      // PREPARED; a crash before that leaves PREPARING and is rebuilt on retry.
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(target, deflateSync(object), { flag: 'wx', mode: 0o600 });
       copied.set(id, { type, bytes });
-      return bytes;
+    }
+    requireStage(offset === batch.length, 'unexpected trailing batch bytes');
+    const copy = async (id, type) => {
+      const object = copied.get(id);
+      requireStage(object && object.type === type, 'missing history object or object type mismatch');
+      return object.bytes;
     };
+    // Track the *persistent* staging budget as well as per-attempt object
+    // headroom: raw batch output, loose Git objects, and older attempt logs all
+    // count against the 2-GiB admission gate.
+    const retainedBytesAtCopy = retainedSize(root);
+    record({ historyCopy: { objects: copied.size, bytes: objectBytes, elapsedMs: Date.now() - copyStarted,
+      objectHeadroom: LIMITS.objects - copied.size, byteHeadroom: LIMITS.objectBytes - objectBytes,
+      deadlineHeadroomMs: LIMITS.copyMs - (Date.now() - copyStarted),
+      retainedBytesAtCopy, retainedHeadroomBytesAtCopy: Math.max(0, LIMITS.retainedBytes - retainedBytesAtCopy),
+      retainedBudgetBytes: LIMITS.retainedBytes, verified: true } });
     const commit = await copy(newSha, 'commit');
     const tree = /^tree ([a-f0-9]{40})\n/.exec(commit.toString())?.[1];
     requireStage(tree, 'invalid candidate tree');
@@ -313,13 +460,23 @@ async function prepare(issueNumber, options = {}) {
     const again = await validateDeploymentCandidate(issueNumber, { configPath: options.configPath });
     requireStage(again.oldSha === oldSha && again.newSha === newSha
       && digest(JSON.stringify(evidence(project, issueNumber))) === evidenceHash, 'candidate or evidence changed during staging');
-    record({ state: 'PREPARED', oldSha, newSha });
+    // Report final retained space after npm outputs, checkout materialization
+    // and flushing; an admission pass is not a guarantee of future capacity.
+    const retainedBytesAfterTests = retainedSize(root);
+    record({ state: 'PREPARED', oldSha, newSha, retainedStorage: {
+      usedBytes: retainedBytesAfterTests, budgetBytes: LIMITS.retainedBytes,
+      remainingBytes: Math.max(0, LIMITS.retainedBytes - retainedBytesAfterTests),
+      note: 'measured before final checkpoint and transcript flush; future attempts require fresh admission' } });
     receipt = { ...receipt, state: 'PREPARED', preparedAt: new Date().toISOString() };
     atomicJson(checkpoint, receipt);
     return Object.freeze({ ...receipt, checkpoint });
   } catch (error) {
-    record({ state: 'FAILED', error: error.stack });
-    atomicJson(checkpoint, { ...receipt, state: 'FAILED', error: error.message });
+    // Attempt both durable failure records even if either storage operation fails.
+    const failures = [];
+    try { record({ state: 'FAILED', error: error.stack }); } catch (failure) { failures.push(failure); }
+    try { atomicJson(checkpoint, { ...receipt, state: 'FAILED', error: error.message }); } catch (failure) { failures.push(failure); }
+    if (failures.length) throw new AggregateError([error, ...failures],
+      `${error.message}; failure recording: ${failures.map(failure => failure.message).join('; ')}`, { cause: error });
     throw error;
   } finally { fs.closeSync(logFd); }
 }
