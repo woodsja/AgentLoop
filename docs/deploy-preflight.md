@@ -21,9 +21,11 @@ with actual successful workflow-run evidence. Ralph must retain `reviewPolicy:
 "always"`, `autoMerge: true`, and `baseBranch: "ralph-dev"`.
 
 The configured checkout must be a clean repository root on `ralph-dev`, including
-no untracked files. Status runs with the checkout index and worktree in temporary
-config-free Git metadata; checkout, system and global filter definitions are not
-loaded. Gitlink entries fail closed as unsupported before status, which also
+no untracked files. Each clean check copies the checkout index into private
+scratch metadata and rejects assume-unchanged or skip-worktree entries before
+status. Flag checks and status use the same private index snapshot. Status runs
+with that snapshot and the checkout worktree in temporary config-free Git
+metadata; checkout, system and global filter definitions are not loaded. Gitlink entries fail closed as unsupported before status, which also
 ignores submodules to prevent recursion into their config and commands. Both the
 literal origin URL and its effective URL after
 `insteadOf` rewriting must match an allowed URL for the configured GitHub
@@ -48,9 +50,10 @@ commit`, and ancestry runs in temporary config-free bare metadata with commit-gr
 reads disabled. Shared checkout grafts, replacement refs, shallow metadata, and
 cached commit-graph parents cannot supply the reviewed ancestry. Before parsing
 candidate parents, the module reads the raw commit as a Buffer and runs
-`git hash-object -t commit --stdin` without writing an object, requiring the result
-to equal the requested merge SHA. It similarly verifies installed HEAD, the
-reviewed head (including no-op validation), and commits in `oldSha..newSha`, and recursively verifies their trees and blobs, including
+`git hash-object -w -t commit --stdin`, requiring the result to equal the requested
+merge SHA and materializing those exact bytes in a private scratch object store.
+Hashing has no path and invokes no attribute filters. It similarly verifies
+installed HEAD, the reviewed head (including no-op validation), and commits in `oldSha..newSha`, and recursively verifies their trees and blobs, including
 unchanged tree entries. Binary bytes and final newlines are preserved. Objects
 from alternates receive the same checks; unrelated unreachable objects and history
 before installed HEAD are not audited. Gitlinks reference another repository and
@@ -58,8 +61,12 @@ are not traversed. Existing command size/time limits fail closed on large inputs
 `git diff --check <old-sha> <new-sha>` must accept the actual
 committed delta. The whitespace gate preserves owner checks and independently
 enforces baseline and stricter owner core rules in temporary, attribute-free bare
-Git metadata pointing at existing objects. Candidate and info attributes cannot
-disable that independent check; temporary metadata is removed on success or failure.
+Git metadata. Both whitespace diffs read only the private store of verified
+objects, with no alternates; later changes to shared objects cannot change the
+bytes they check. The owner diff retains checkout attributes and core.whitespace
+with external diffs and text conversion disabled. Candidate and info attributes
+cannot disable the independent check; temporary metadata is removed on success
+or failure.
 HEAD, branch, and clean status are checked again against the initial snapshot
 immediately before returning.
 
@@ -86,5 +93,6 @@ options nor additional arguments can choose a production URL or observer.
 Tests exercise real helper-alias forgery, HTTP config isolation, inherited config
 and environment isolation, graft-hidden intermediate commits, marker-writing
 fsmonitor programs, forged loose commits/trees/blobs, binary object hashing,
-marker-writing clean/process filters and submodule commands, exact remote results
-and failures, and scratch cleanup.
+marker-writing clean/process filters and submodule commands, dirty index-flag
+attacks at both clean checks, real blob/tree swaps after verification, exact
+remote results and failures, and scratch cleanup.

@@ -48,12 +48,16 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   git('init', '--bare', remote);
   // Writes and the real read-only observation use the disposable bare remote.
   let beforeRemote;
+  let onCommand;
   const observations = [];
   const commands = [];
   const validate = testValidator(remote, (file, args, options) => {
     observations.push({ file, args, options });
     if (beforeRemote) beforeRemote();
-  }, (file, args, options) => commands.push({ file, args, options }));
+  }, (file, args, options) => {
+    commands.push({ file, args, options });
+    if (onCommand) onCommand(file, args, options);
+  });
   git('remote', 'add', 'origin', 'git@github.com:woodsja/AgentLoop.git');
   if (installedAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), installedAttributes);
   const commit = text => {
@@ -96,6 +100,7 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   save();
   return { root, checkout, remote, configPath,
     setBeforeRemote: callback => { beforeRemote = callback; },
+    setOnCommand: callback => { onCommand = callback; },
     observationCount: () => observations.length, observations, commands, git, commit, oldSha, newSha, head, job, store, save, project, configure,
     validate: () => validate(28, { configPath }) };
 }
@@ -714,4 +719,89 @@ test('already-installed candidate still hash-verifies the reviewed commit', asyn
   const before = snapshot(f.root);
   await assert.rejects(f.validate(), /object hash mismatch/);
   assert.deepEqual(snapshot(f.root), before);
+});
+
+
+for (const flag of ['assume-unchanged', 'skip-worktree']) {
+  for (const phase of ['initial', 'concurrent']) {
+    test(`rejects dirty ${flag} index attack at ${phase} clean check`, async t => {
+      const f = fixture(t);
+      const attack = () => {
+        f.git('update-index', `--${flag}`, 'file.txt');
+        fs.writeFileSync(path.join(f.checkout, 'file.txt'), 'hidden dirty bytes\n');
+        // Demonstrate the actual bypass of ordinary status.
+        assert.equal(f.git('status', '--porcelain'), '');
+      };
+      if (phase === 'initial') attack();
+      else f.setBeforeRemote(attack);
+      const before = snapshot(f.root);
+      await assert.rejects(f.validate(), /index assume-unchanged or skip-worktree flags/);
+      if (phase === 'initial') assert.deepEqual(snapshot(f.root), before);
+    });
+  }
+}
+
+for (const gate of ['owner', 'independent']) {
+  for (const type of ['blob', 'tree']) {
+    test(`${gate} whitespace diff rejects ${type} swap after verification`, async t => {
+      const f = fixture(t, 'bad trailing whitespace  \n');
+      // Force the independent diff to be the rejecting gate in this variant.
+      if (gate === 'independent') {
+        fs.writeFileSync(path.join(f.checkout, '.git/info/attributes'), '* -whitespace\n');
+      }
+      const blob = f.git('rev-parse', `${f.newSha}:file.txt`);
+      const tree = f.git('rev-parse', `${f.newSha}^{tree}`);
+      const cleanBytes = Buffer.from('clean candidate\n');
+      const cleanBlob = require('node:crypto').createHash('sha1')
+        .update(Buffer.from(`blob ${cleanBytes.length}\0`)).update(cleanBytes).digest('hex');
+      plantObject(f, cleanBlob, 'blob', cleanBytes);
+      const treeBytes = execFileSync('git', ['-C', f.checkout, 'cat-file', 'tree', tree], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const offset = treeBytes.indexOf(Buffer.from(blob, 'hex'));
+      assert.ok(offset >= 0);
+      Buffer.from(cleanBlob, 'hex').copy(treeBytes, offset);
+      let swaps = 0;
+      f.setOnCommand((file, args) => {
+        if (!args.includes('diff') || swaps) return;
+        swaps++;
+        // All verification is complete. Alter real on-disk object bytes just
+        // before the first diff starts, leaving them forged for the second.
+        plantObject(f, type === 'blob' ? blob : tree, type,
+          type === 'blob' ? cleanBytes : treeBytes);
+        // Prove that rereading the shared store accepts the forged delta.
+        assert.equal(f.git('diff', '--no-ext-diff', '--no-textconv', '--check', f.oldSha, f.newSha), '');
+      });
+      await assert.rejects(f.validate(), error => /trailing whitespace/.test(error.stdout));
+      assert.equal(swaps, 1);
+      const diffs = f.commands.filter(c => c.args.includes('diff'));
+      assert.equal(diffs.length, gate === 'owner' ? 1 : 2);
+      const store = diffs[0].options.env.GIT_OBJECT_DIRECTORY;
+      assert.notEqual(store, path.join(f.checkout, '.git/objects'));
+      assert.equal(fs.existsSync(store), false);
+      for (const diff of diffs) assert.equal(diff.options.env.GIT_OBJECT_DIRECTORY, store);
+    });
+  }
+}
+
+test('both successful whitespace diffs use private verified objects without alternates', async t => {
+  const f = fixture(t);
+  const blob = f.git('rev-parse', `${f.newSha}:file.txt`);
+  let removed = false;
+  f.setOnCommand((file, args, options) => {
+    if (!args.includes('diff')) return;
+    const store = options.env.GIT_OBJECT_DIRECTORY;
+    assert.ok(store);
+    assert.equal(fs.existsSync(path.join(store, 'info/alternates')), false);
+    assert.equal(options.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, undefined);
+    if (!removed) {
+      fs.unlinkSync(path.join(f.checkout, '.git/objects', blob.slice(0, 2), blob.slice(2)));
+      removed = true;
+    }
+  });
+  assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+  assert.equal(removed, true);
+  const diffs = f.commands.filter(c => c.args.includes('diff'));
+  assert.equal(diffs.length, 2);
+  assert.equal(diffs[0].options.env.GIT_OBJECT_DIRECTORY, diffs[1].options.env.GIT_OBJECT_DIRECTORY);
 });

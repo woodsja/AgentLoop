@@ -40,10 +40,10 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
   // checkout. Optional index refresh writes are disabled as well.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   Object.assign(env, { GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' });
-  const git = async args => (await execute('git', ['--no-replace-objects',
+  const git = async (args, overrides = {}) => (await execute('git', ['--no-replace-objects',
     '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
     '-c', 'core.commitGraph=false', '-C', project.checkout, ...args], {
-    env, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
+    env: { ...env, ...overrides }, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
   })).stdout.trim();
   requireCandidate(fs.realpathSync(await git(['rev-parse', '--show-toplevel'])) === fs.realpathSync(project.checkout), 'configured checkout must be the repository root');
   const oldSha = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
@@ -74,19 +74,20 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-whitespace-'));
   try {
     // Isolate ancestry from worker-shared grafts, shallow metadata and refs.
-    // Existing objects (including alternates) are read without trusting their
-    // commit-graph cache or writing to the checkout/object store.
+    // Read shared objects (including alternates) only to verify and materialize
+    // their bytes. Every later gate consumes the private, verified copies.
     fs.mkdirSync(path.join(scratch, 'objects'));
     fs.mkdirSync(path.join(scratch, 'refs'));
     fs.writeFileSync(path.join(scratch, 'HEAD'), 'ref: refs/heads/unused\n');
-    const isolatedGit = async (args, { raw = false, input } = {}) => {
+    const privateObjects = path.join(scratch, 'objects');
+    const isolatedGit = async (args, { raw = false, input, source = false } = {}) => {
       const argsWithContext = ['--no-replace-objects', `--git-dir=${scratch}`,
         '-c', 'core.bare=true', '-c', 'core.attributesFile=/dev/null',
         '-c', 'core.commitGraph=false', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
         '-c', `core.whitespace=${whitespace ? `${whitespace},` : ''}blank-at-eol,blank-at-eof,space-before-tab`,
         ...args];
       const options = {
-        cwd: scratch, env: { ...env, GIT_OBJECT_DIRECTORY: objects, GIT_ATTR_NOSYSTEM: '1',
+        cwd: scratch, env: { ...env, GIT_OBJECT_DIRECTORY: source ? objects : privateObjects, GIT_ATTR_NOSYSTEM: '1',
           GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' },
         encoding: raw ? null : 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
       };
@@ -108,8 +109,8 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
         requireCandidate(verified.get(id).type === type, 'object type mismatch');
         return verified.get(id).bytes;
       }
-      const bytes = await isolatedGit(['cat-file', type, id], { raw: true });
-      const actual = await isolatedGit(['hash-object', '-t', type, '--stdin'], { input: bytes });
+      const bytes = await isolatedGit(['cat-file', type, id], { raw: true, source: true });
+      const actual = await isolatedGit(['hash-object', '-w', '-t', type, '--stdin'], { input: bytes });
       requireCandidate(actual === id, `object hash mismatch for ${type} ${id}`);
       verified.set(id, { type, bytes });
       return bytes;
@@ -140,7 +141,7 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
         offset = nul + 21;
       }
     };
-    const commits = new Set([oldSha, newSha, job.delivery.commit, ...(await isolatedGit(['rev-list', `${oldSha}..${newSha}`])).split('\n').filter(Boolean)]);
+    const commits = new Set([oldSha, newSha, job.delivery.commit, ...(await isolatedGit(['rev-list', `${oldSha}..${newSha}`], { source: true })).split('\n').filter(Boolean)]);
     for (const id of commits) {
       const commit = await readVerified(id, 'commit');
       const tree = /^tree ([a-f0-9]{40})\n/.exec(commit.toString('utf8'))?.[1];
@@ -148,7 +149,7 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
       await verifyTree(tree);
     }
     await isolatedGit(['merge-base', '--is-ancestor', oldSha, newSha]);
-    await git(diffArgs);
+    await git(diffArgs, { GIT_OBJECT_DIRECTORY: privateObjects });
     await isolatedGit(diffArgs);
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
@@ -163,7 +164,7 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
 }
 
 // Status must not load checkout filter drivers or recurse into submodule Git
-// metadata. Reuse the index read-only, with a detached HEAD in config-free
+// metadata. Snapshot the index read-only, with a detached HEAD in config-free
 // scratch metadata. Unsupported submodule checkouts fail closed.
 async function cleanStatus(checkout, head, git, env) {
   const index = await git(['rev-parse', '--path-format=absolute', '--git-path', 'index']);
@@ -173,14 +174,18 @@ async function cleanStatus(checkout, head, git, env) {
     fs.mkdirSync(path.join(scratch, 'objects'));
     fs.mkdirSync(path.join(scratch, 'refs'));
     fs.writeFileSync(path.join(scratch, 'HEAD'), `${head}\n`);
+    const privateIndex = path.join(scratch, 'index');
+    fs.copyFileSync(index, privateIndex);
     const read = async args => (await execute('git', ['--no-replace-objects', `--git-dir=${scratch}`,
       `--work-tree=${checkout}`, '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
       '-c', 'core.commitGraph=false', '-c', 'core.attributesFile=/dev/null', ...args], {
-      cwd: scratch, env: { ...env, GIT_INDEX_FILE: index, GIT_OBJECT_DIRECTORY: objects,
+      cwd: scratch, env: { ...env, GIT_INDEX_FILE: privateIndex, GIT_OBJECT_DIRECTORY: objects,
         GIT_ATTR_NOSYSTEM: '1', GIT_CONFIG_NOSYSTEM: '1',
         GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' },
       encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
     })).stdout.trim();
+    requireCandidate(!/(^|\x00)[a-zS] /.test(await read(['ls-files', '-v', '-z'])),
+      'index assume-unchanged or skip-worktree flags are unsupported');
     requireCandidate(!/(^|\x00)160000 /.test(await read(['ls-files', '--stage', '-z'])),
       'submodule checkouts are unsupported');
     return await read(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all']);
