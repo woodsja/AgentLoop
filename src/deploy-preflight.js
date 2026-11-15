@@ -18,7 +18,13 @@ function requireCandidate(condition, message) {
 
 // Only the issue number selects a candidate. Paths and repository identity are
 // loaded from owner configuration and the canonical durable R1 store.
-async function validateDeploymentCandidate(issueNumber, { configPath } = {}) {
+// Dependency injection is for trusted callers testing read-only observations;
+// candidate data cannot select an observer or bypass the identity/config gates.
+function createDeploymentValidator({ observeRemote } = {}) {
+  return (issueNumber, options) => validateCandidate(issueNumber, options, observeRemote);
+}
+
+async function validateCandidate(issueNumber, { configPath } = {}, observeRemote) {
   const project = loadProjectConfig('ralph', configPath === undefined ? {} : { configPath });
   requireCandidate(project.baseBranch === 'ralph-dev' && project.reviewPolicy === 'always'
     && project.autoMerge === true && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.repo), 'owner Ralph policy or repository is invalid');
@@ -50,8 +56,16 @@ async function validateDeploymentCandidate(issueNumber, { configPath } = {}) {
   requireCandidate(urls.length === 1 && allowedUrls.includes(urls[0])
     && allowedUrls.includes(await git(['ls-remote', '--get-url', 'origin'])),
     'origin does not identify the configured repository');
+  const transportKeys = (await git(['config', '--null', '--name-only', '--list'])).split('\0');
+  requireCandidate(!transportKeys.some(key => [
+    'core.sshcommand', 'ssh.variant', 'remote.origin.uploadpack',
+  ].includes(key)), 'unsafe origin transport configuration');
   const targetRef = `refs/heads/${project.baseBranch}`;
-  const remote = await git(['ls-remote', '--exit-code', '--refs', 'origin', targetRef]);
+  const remote = observeRemote
+    ? await observeRemote(Object.freeze({ url: urls[0], ref: targetRef }))
+    : await git(['-c', 'core.sshCommand=ssh', '-c', 'ssh.variant=ssh',
+      '-c', 'remote.origin.uploadpack=git-upload-pack',
+      'ls-remote', '--exit-code', '--refs', 'origin', targetRef]);
   const newSha = job.merge.commit;
   requireCandidate(remote === `${newSha}\t${targetRef}`, 'approved merge is not the exact origin/ralph-dev target');
   requireCandidate(sha(oldSha) && await git(['rev-parse', '--verify', `${newSha}^{commit}`]) === newSha, 'candidate is not a local commit');
@@ -95,4 +109,5 @@ async function validateDeploymentCandidate(issueNumber, { configPath } = {}) {
   return Object.freeze({ oldSha, newSha, noOp: oldSha === newSha });
 }
 
-module.exports = { validateDeploymentCandidate };
+const validateDeploymentCandidate = createDeploymentValidator();
+module.exports = { validateDeploymentCandidate, createDeploymentValidator };

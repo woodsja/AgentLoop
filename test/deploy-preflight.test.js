@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const state = require('../src/autopilot-state');
-const { validateDeploymentCandidate } = require('../src/deploy-preflight');
+const { validateDeploymentCandidate, createDeploymentValidator } = require('../src/deploy-preflight');
 
 function fixture(t, content = 'candidate\n', { installedAttributes, candidateAttributes } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-preflight-'));
@@ -23,21 +23,19 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   git('config', 'user.email', 'preflight@example.invalid');
   git('config', 'commit.gpgsign', 'false');
   git('init', '--bare', remote);
-  // Exercise real Git URL resolution and upload-pack over a disposable SSH
-  // transport. The effective URL remains the configured GitHub identity; no
-  // insteadOf rewrite is needed for successful fixtures.
-  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-  const transport = path.join(root, 'ssh-transport');
-  const beforeRemote = path.join(root, 'before-remote');
-  fs.writeFileSync(transport, `#!/bin/sh
-if test -f ${quote(beforeRemote)}; then sh ${quote(beforeRemote)} >&2 || exit; fi
-case "$*" in
-  *git-receive-pack*) exec git-receive-pack ${quote(remote)} ;;
-esac
-exec git-upload-pack ${quote(remote)}
-`, { mode: 0o700 });
-  git('config', 'core.sshCommand', quote(transport));
-  git('config', 'ssh.variant', 'simple');
+  // All writes target the disposable bare path directly. Only the read-only
+  // observation is injected; production URL and transport gates still run.
+  let beforeRemote;
+  let observations = 0;
+  const validate = createDeploymentValidator({
+    observeRemote: async ({ url, ref }) => {
+      assert.equal(url, 'git@github.com:woodsja/AgentLoop.git');
+      assert.equal(ref, 'refs/heads/ralph-dev');
+      observations++;
+      if (beforeRemote) beforeRemote();
+      return git('ls-remote', '--exit-code', '--refs', remote, ref);
+    },
+  });
   git('remote', 'add', 'origin', 'git@github.com:woodsja/AgentLoop.git');
   if (installedAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), installedAttributes);
   const commit = text => {
@@ -52,7 +50,7 @@ exec git-upload-pack ${quote(remote)}
   git('checkout', 'ralph-dev');
   git('merge', '--no-ff', 'ralph/issue-28', '-m', 'approved merge');
   const newSha = git('rev-parse', 'HEAD');
-  git('push', 'origin', 'ralph-dev');
+  git('push', remote, 'ralph-dev');
   git('reset', '--hard', oldSha);
   const configPath = path.join(root, 'projects.json');
   const project = {
@@ -78,8 +76,10 @@ exec git-upload-pack ${quote(remote)}
   state.markTerminal(job, 'merged');
   const save = () => store.save(job);
   save();
-  return { root, checkout, remote, beforeRemote, quote, git, commit, oldSha, newSha, head, job, store, save, project, configure,
-    validate: () => validateDeploymentCandidate(28, { configPath }) };
+  return { root, checkout, remote, configPath,
+    setBeforeRemote: callback => { beforeRemote = callback; },
+    observationCount: () => observations, git, commit, oldSha, newSha, head, job, store, save, project, configure,
+    validate: () => validate(28, { configPath }) };
 }
 
 // Compare every byte, including config, durable evidence, index, and refs.
@@ -123,9 +123,9 @@ for (const kind of ['untracked', 'unstaged', 'staged', 'branch', 'detached', 'or
     if (kind === 'branch') f.git('checkout', '-b', 'main');
     if (kind === 'detached') f.git('checkout', '--detach');
     if (kind === 'origin') f.git('remote', 'set-url', 'origin', f.remote);
-    if (kind === 'missing remote ref') f.git('push', 'origin', ':ralph-dev');
+    if (kind === 'missing remote ref') f.git('push', f.remote, ':ralph-dev');
     if (kind === 'stale remote tracking ref') {
-      f.git('push', '--force', 'origin', `${f.oldSha}:refs/heads/ralph-dev`);
+      f.git('push', '--force', f.remote, `${f.oldSha}:refs/heads/ralph-dev`);
       f.git('update-ref', 'refs/remotes/origin/ralph-dev', f.newSha);
     }
     if (kind === 'non-FF') f.commit('divergent installed commit\n');
@@ -167,7 +167,7 @@ for (const [name, change] of Object.entries(invalidEvidence)) {
 
 test('accepts a fast-forward whose target is the exact reviewed head', async t => {
   const f = fixture(t);
-  f.git('push', '--force', 'origin', `${f.head}:refs/heads/ralph-dev`);
+  f.git('push', '--force', f.remote, `${f.head}:refs/heads/ralph-dev`);
   f.job.merge.commit = f.head; f.save();
   assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.head, noOp: false });
 });
@@ -176,7 +176,7 @@ test('rejects a real remote commit unrelated to the exact approved head', async 
   const f = fixture(t);
   f.git('checkout', '--orphan', 'unrelated');
   const unrelated = f.commit('unrelated\n');
-  f.git('push', '--force', 'origin', `${unrelated}:refs/heads/ralph-dev`);
+  f.git('push', '--force', f.remote, `${unrelated}:refs/heads/ralph-dev`);
   f.git('checkout', 'ralph-dev');
   f.job.merge.commit = unrelated; f.save();
   await assert.rejects(f.validate(), /exact reviewed head/);
@@ -225,7 +225,7 @@ for (const kind of ['merge', 'fast-forward']) {
     else f.git('merge', '--ff-only', head);
     const candidate = f.git('rev-parse', 'HEAD');
     if (kind === 'merge') assert.equal(f.git('rev-parse', `${candidate}^1`), intermediate);
-    f.git('push', '--force', 'origin', 'ralph-dev');
+    f.git('push', '--force', f.remote, 'ralph-dev');
     f.git('reset', '--hard', f.oldSha);
     f.job.verification.commit = head;
     f.job.delivery.commit = head;
@@ -276,13 +276,13 @@ for (const attributes of [false, true]) {
 for (const kind of ['HEAD', 'branch', 'dirty', 'detached']) {
   test(`rejects concurrent ${kind} change during remote observation`, async t => {
     const f = fixture(t);
-    const commands = {
-      HEAD: `git -C ${f.quote(f.checkout)} reset --hard ${f.newSha}`,
-      branch: `git -C ${f.quote(f.checkout)} checkout -b concurrent`,
-      dirty: `echo dirty > ${f.quote(path.join(f.checkout, 'file.txt'))}`,
-      detached: `git -C ${f.quote(f.checkout)} checkout --detach`,
+    const changes = {
+      HEAD: () => f.git('reset', '--hard', f.newSha),
+      branch: () => f.git('checkout', '-b', 'concurrent'),
+      dirty: () => fs.writeFileSync(path.join(f.checkout, 'file.txt'), 'dirty\n'),
+      detached: () => f.git('checkout', '--detach'),
     };
-    fs.writeFileSync(f.beforeRemote, commands[kind] + '\n');
+    f.setBeforeRemote(changes[kind]);
     await assert.rejects(f.validate(), kind === 'detached' ? undefined : /checkout (HEAD changed|branch changed|became dirty)/);
   });
 }
@@ -297,7 +297,7 @@ test('rejects a direct base push before merging the original reviewed head', asy
   const candidate = f.git('rev-parse', 'HEAD');
   assert.equal(f.git('rev-parse', `${candidate}^1`), intermediate);
   assert.equal(f.git('rev-parse', `${candidate}^2`), f.head);
-  f.git('push', '--force', 'origin', 'ralph-dev');
+  f.git('push', '--force', f.remote, 'ralph-dev');
   f.git('reset', '--hard', f.oldSha);
   f.job.merge.commit = candidate; f.save();
   const before = snapshot(f.root);
@@ -313,3 +313,20 @@ test('preserves stricter owner info-attribute whitespace rules', async t => {
   await assert.rejects(f.validate(), error => /tab in indent/.test(error.stdout));
   assert.deepEqual(snapshot(f.root), before);
 });
+
+for (const key of ['core.sshCommand', 'ssh.variant', 'remote.origin.uploadpack']) {
+  test(`rejects hostile ${key} before any remote observation or side effects`, async t => {
+    const f = fixture(t);
+    const marker = path.join(f.root, 'transport-executed');
+    const command = `touch '${marker}'; git-upload-pack '${f.remote}'`;
+    f.git('config', key, key === 'ssh.variant' ? 'simple' : command);
+    const before = snapshot(f.root);
+    await assert.rejects(f.validate(), /unsafe origin transport configuration/);
+    // The production entry point also refuses without opening a connection.
+    await assert.rejects(validateDeploymentCandidate(28, { configPath: f.configPath }),
+      /unsafe origin transport configuration/);
+    assert.equal(f.observationCount(), 0);
+    assert.equal(fs.existsSync(marker), false);
+    assert.deepEqual(snapshot(f.root), before);
+  });
+}

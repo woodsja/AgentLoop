@@ -22,7 +22,12 @@ with actual successful workflow-run evidence. Ralph must retain `reviewPolicy:
 
 The configured checkout must be a clean repository root on `ralph-dev`, including
 no untracked files. Both the literal origin URL and its effective URL after
-`insteadOf` rewriting must identify the configured GitHub repository. A live
+`insteadOf` rewriting must match an allowed URL for the configured GitHub
+repository. URL checks alone do not authenticate the transport. Configured
+`core.sshCommand`, `ssh.variant`, or `remote.origin.uploadpack` entries are
+rejected before observation (including inherited and included settings). The
+observation also pins these options to `ssh`, `ssh`, and `git-upload-pack` so
+concurrent changes to them cannot redirect that command. A live
 `git ls-remote` observation of `refs/heads/ralph-dev` must equal the recorded merge
 SHA exactly; local tracking refs are insufficient. Both installed and candidate
 commits must already exist locally. The candidate must be the reviewed head itself
@@ -51,4 +56,11 @@ disabled. Network access is limited to the read-only remote observation; missing
 objects require a separate owner-authorized preparation step.
 
 Run `node test/deploy-preflight.test.js` for real disposable checkout/bare-remote
-tests. It is also included in `npm test`.
+tests. It is also included in `npm test`. Tests write directly to local bare
+repositories, without SSH redirection. The trusted dependency factory
+`createDeploymentValidator({ observeRemote })` accepts an asynchronous read-only
+observer receiving `{ url, ref }` and returning the `ls-remote` output. The factory
+retains all configuration, URL identity, evidence, and local Git gates. Only test
+code supplies this dependency; the production `validateDeploymentCandidate`
+entry point always uses Git and accepts no observer override. Never derive a
+dependency from issue or candidate input.
