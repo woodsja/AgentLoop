@@ -514,8 +514,23 @@ function createR1Jobs(store, options = {}) {
         const admitted = name === 'ralph'
           ? eligibleIssues(authorized, jobs, name, project.repo, (issueNumber, message) => {
             blockedInScan.add(issueNumber);
-            if (dependencyDiagnostics.get(issueNumber) === message) return;
-            dependencyDiagnostics.set(issueNumber, message);
+            const issue = authorized.find(issue => issue.number === issueNumber);
+            const diagnosticKey = JSON.stringify({ repo: project.repo, issue, message });
+            if (dependencyDiagnostics.get(issueNumber) === diagnosticKey) return;
+            // Persist before deduplicating: admission also runs outside systemd.
+            // Reuse the existing per-issue raw journal without inventing a job.
+            try {
+              projectStore.appendIntegrationEvent({ issue: { number: issueNumber } }, {
+                event: 'dependency_admission_blocked', project: name, repo: project.repo,
+                issue, message,
+              });
+              dependencyDiagnostics.set(issueNumber, diagnosticKey);
+            } catch (error) {
+              // The issue stays blocked; retry its evidence without starving other work.
+              dependencyDiagnostics.delete(issueNumber);
+              console.error(`R1 ${name} issue #${issueNumber}: dependency diagnostic journal write/flush failed:`,
+                error, JSON.stringify({ project: name, repo: project.repo, issue, message }));
+            }
             console.error(message); // Captured by the owner-visible systemd service journal.
           }) : authorized;
         if (name === 'ralph') {
