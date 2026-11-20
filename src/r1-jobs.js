@@ -474,7 +474,12 @@ function createR1Jobs(store, options = {}) {
       if (['pending', 'running'].some(stage => store.listTasks(stage).some(task => task.workflow === 'r1'))) return null;
       for (const name of Object.keys(store.config.allowedProjects || {}).sort()) {
         let project;
-        try { project = load(name); } catch { continue; }
+        try { project = load(name); } catch (error) {
+          // Config loads can fail before a job exists. Retain the complete reason
+          // in the service journal as well as the runtime drift audit.
+          console.error(`R1 admission configuration refused for ${name}: ${error.stack || error}`);
+          continue;
+        }
         // Keep Household issue admission exclusive to its scheduled autopilot;
         // racing this scanner would prematurely fail and unlabel blocked issues.
         if (!autonomous(project) || ownedByHouseholdAutopilot(project)) continue;

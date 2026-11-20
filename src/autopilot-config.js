@@ -2,6 +2,55 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const DEFAULT_CONFIG_PATH = path.resolve(__dirname, '..', 'autopilot-projects.json');
+const crypto = require('node:crypto');
+let runtimeIdentity;
+function projectConfigPath(explicit) {
+  return explicit ?? process.env.AGENTLOOP_PROJECTS_PATH ?? DEFAULT_CONFIG_PATH;
+}
+// An explicitly selected runtime file is owner configuration. Pin its canonical
+// identity for this process and refuse drift on every later project load.
+let lastRuntimeDiagnostic;
+function runtimeDiagnostic(event) {
+  const key = JSON.stringify({ ...event, error: event.error?.split('\n')[0] });
+  if (lastRuntimeDiagnostic === key) return;
+  const state = process.env.AGENTLOOP_STATE_DIR || path.resolve(__dirname, '..', 'state');
+  fs.mkdirSync(state, { recursive: true });
+  const fd = fs.openSync(path.join(state, 'project-config.ndjson'), 'a', 0o600);
+  try { fs.writeSync(fd, JSON.stringify({ at: new Date().toISOString(), ...event }) + '\n'); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+  const dir = fs.openSync(state, 'r');
+  try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+  lastRuntimeDiagnostic = key;
+}
+function runtimeProjectConfigIdentity() {
+  if (process.env.AGENTLOOP_PROJECTS_PATH === undefined && !runtimeIdentity) return null;
+  try {
+    const file = process.env.AGENTLOOP_PROJECTS_PATH;
+    const { canonicalAbsolute, regular } = require('./deploy-files');
+    canonicalAbsolute(file); regular(file);
+    const identity = { path: file, hash: crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') };
+    if (runtimeIdentity && (identity.path !== runtimeIdentity.path || identity.hash !== runtimeIdentity.hash)) {
+      throw new Error('Runtime project configuration changed; owner restart required');
+    }
+    runtimeIdentity ||= Object.freeze(identity);
+    if (lastRuntimeDiagnostic) runtimeDiagnostic({ code: 'PROJECT_CONFIG_RESTORED', identity });
+    return runtimeIdentity;
+  } catch (error) {
+    try { runtimeDiagnostic({ code: 'PROJECT_CONFIG_DEGRADED', expected: runtimeIdentity, error: error.stack }); }
+    catch (diagnosticError) { console.error('Project configuration diagnostic persistence failed:', diagnosticError.stack, error.stack); }
+    throw error;
+  }
+}
+function runtimeProjectConfigAttestation() {
+  const identity = runtimeProjectConfigIdentity();
+  return identity ? { pathHash: crypto.createHash('sha256').update(identity.path).digest('hex'), hash: identity.hash } : null;
+}
+// Keep the owner dashboard available, but never attest stale policy as healthy.
+function runtimeProjectConfigState() {
+  try { return runtimeProjectConfigAttestation(); }
+  catch (error) { return { degraded: true, hash: null, pathHash: null, error: error.message,
+    expected: runtimeIdentity ? { pathHash: crypto.createHash('sha256').update(runtimeIdentity.path).digest('hex'), hash: runtimeIdentity.hash } : null }; }
+}
 const STRING_FIELDS = [
   'repo',
   'checkout',
@@ -127,7 +176,8 @@ function loadProjectConfig(projectName, options = {}) {
     throw new TypeError('Autopilot project configuration options must be an object');
   }
 
-  const configPath = Object.hasOwn(options, 'configPath') ? options.configPath : DEFAULT_CONFIG_PATH;
+  const configPath = Object.hasOwn(options, 'configPath') ? options.configPath : projectConfigPath();
+  const identity = !Object.hasOwn(options, 'configPath') ? runtimeProjectConfigIdentity() : null;
 
   if (!isNonEmptyString(configPath)) {
     throw new TypeError('options.configPath must be a non-empty string when provided');
@@ -137,6 +187,9 @@ function loadProjectConfig(projectName, options = {}) {
 
   try {
     contents = fs.readFileSync(configPath, 'utf8');
+    if (identity && crypto.createHash('sha256').update(contents).digest('hex') !== identity.hash) {
+      throw new Error('Runtime project configuration changed during read');
+    }
   } catch (error) {
     throw new Error(`Unable to read autopilot project configuration at ${configPath}: ${error.message}`);
   }
@@ -169,4 +222,4 @@ function loadProjectConfig(projectName, options = {}) {
   };
 }
 
-module.exports = { loadProjectConfig };
+module.exports = { loadProjectConfig, projectConfigPath, runtimeProjectConfigIdentity, runtimeProjectConfigAttestation, runtimeProjectConfigState };

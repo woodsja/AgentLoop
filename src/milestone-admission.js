@@ -31,7 +31,7 @@ async function checkMilestoneAdmission(projectName, project, number, options = {
   if (project.milestoneAuthorization !== true) return null;
   const state = options.stateDir || process.env.AGENTLOOP_STATE_DIR || path.join(__dirname, '../state');
   const configPath = options.configPath || process.env.AGENTLOOP_CONFIG_PATH || path.join(__dirname, '../config.json');
-  const projectsPath = options.projectsPath || path.join(__dirname, '../autopilot-projects.json');
+  const projectsPath = require('./autopilot-config').projectConfigPath(options.projectsPath);
   const file = path.join(state, 'milestone-grants.json');
   try {
     const raw = fs.readFileSync(file, 'utf8'), db = JSON.parse(raw);

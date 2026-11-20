@@ -8,6 +8,7 @@ const { deflateSync } = require('node:zlib');
 const { spawn } = require('node:child_process');
 const { validateDeploymentCandidate } = require('./deploy-preflight');
 const { loadProjectConfig } = require('./autopilot-config');
+const { inventory, inventoryEntryCount, INVENTORY_MAX_ENTRIES } = require('./deploy-files');
 const { createJobStore, resolveStateDir } = require('./autopilot-state');
 
 // Fixed admission/attempt budgets fail closed; retained records are never pruned.
@@ -80,15 +81,20 @@ function atomicJson(file, value) {
 }
 function settings(issueNumber, options = {}) {
   requireStage(Number.isSafeInteger(issueNumber) && issueNumber > 0, 'invalid issue number');
-  requireStage(Object.keys(options).every(key => ['configPath', 'timeoutMs'].includes(key)), 'unknown option');
+  requireStage(Object.keys(options).every(key => ['configPath', 'timeoutMs', 'deploymentConfigPath', 'retryApprovalPath'].includes(key)), 'unknown option');
   const timeoutMs = options.timeoutMs ?? 600000;
   requireStage(Number.isInteger(timeoutMs) && timeoutMs >= 100 && timeoutMs <= 1800000, 'invalid timeout');
   const project = loadProjectConfig('ralph', options.configPath === undefined ? {} : { configPath: options.configPath });
-  const live = fs.realpathSync(project.checkout);
+  const sourceCheckout = fs.realpathSync(project.checkout);
+  const configFile = require('./autopilot-config').projectConfigPath(options.configPath);
+  if (options.deploymentConfigPath) require('./deploy-files').canonicalAbsolute(configFile);
+  const deployment = options.deploymentConfigPath ? require('./deploy-layout').layout(options.deploymentConfigPath, configFile, sourceCheckout) : null;
+  const live = deployment ? deployment.installedCheckout : sourceCheckout;
   const root = path.resolve(resolveStateDir('ralph', project), 'deployment-staging');
   requireStage(!inside(live, root) && !inside(root, live), 'staging and installed checkout overlap');
+  requireStage(!inside(sourceCheckout, root) && !inside(root, sourceCheckout), 'source/staging overlap');
   safeDirectory(root);
-  return { project, live, root, timeoutMs };
+  return { project, live, root, timeoutMs, sourceCheckout, deployment };
 }
 function evidence(project, issueNumber) {
   const job = createJobStore(resolveStateDir('ralph', project)).load(issueNumber);
@@ -119,10 +125,15 @@ function environment(home) {
 // The lock belongs to the worker process and survives loss of its API caller.
 // flock's inherited descriptor also keeps it held by a still-running test child.
 async function runLocked(issueNumber, options = {}, worker = __filename) {
+  // Carry the selected owner file across the deliberately stripped worker env.
+  if (options.configPath === undefined && process.env.AGENTLOOP_PROJECTS_PATH !== undefined) {
+    options = { ...options, configPath: require('./autopilot-config').projectConfigPath() };
+  }
   const { root } = settings(issueNumber, options);
+  requireStage(!fs.existsSync(path.join(root, 'prepare.lock')), 'legacy preparation lock present; manual migration required');
   requireStage(fs.readdirSync(root).filter(name => name.startsWith('request-')).length < LIMITS.requests
     && retainedSize(root) < LIMITS.retainedBytes, 'retained staging budget exhausted; owner archival required');
-  const file = path.join(root, 'prepare.lock');
+  const file = path.join(root, 'deployment.lock');
   const fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW, 0o600);
   try {
     regular(file);
@@ -164,12 +175,12 @@ async function runLocked(issueNumber, options = {}, worker = __filename) {
   } finally { fs.closeSync(fd); }
 }
 
-async function prepare(issueNumber, options = {}) {
-  const { project, live, root, timeoutMs } = settings(issueNumber, options);
+async function prepare(issueNumber, options = {}, validator = validateDeploymentCandidate) {
+  const { project, live, root, timeoutMs, sourceCheckout, deployment } = settings(issueNumber, options);
   // The internal worker entry point is not an unlocked alternate API. Require
   // the exact persistent lock descriptor and acquire it on this shared open
   // file description before reading evidence or publishing a checkpoint.
-  const inheritedLock = fs.fstatSync(3), namedLock = fs.lstatSync(path.join(root, 'prepare.lock'));
+  const inheritedLock = fs.fstatSync(3), namedLock = fs.lstatSync(path.join(root, 'deployment.lock'));
   requireStage(inheritedLock.isFile() && namedLock.isFile() && namedLock.nlink === 1
     && inheritedLock.dev === namedLock.dev && inheritedLock.ino === namedLock.ino, 'worker lock descriptor mismatch');
   await new Promise((resolve, reject) => {
@@ -177,17 +188,24 @@ async function prepare(issueNumber, options = {}) {
     lock.on('error', reject);
     lock.on('close', code => code === 0 ? resolve() : reject(new Error('Deployment prepare lock busy')));
   });
+  requireStage(!fs.existsSync(path.join(root, 'prepare.lock')), 'legacy preparation lock present; manual migration required');
   const approvedEvidence = evidence(project, issueNumber);
-  const candidate = await validateDeploymentCandidate(issueNumber, { configPath: options.configPath });
+  const candidate = await validator(issueNumber, { configPath: options.configPath, deploymentConfigPath: options.deploymentConfigPath });
   const { oldSha, newSha } = candidate;
   requireStage([oldSha, newSha].every(value => /^[a-f0-9]{40}$/.test(value)), 'invalid candidate SHA');
   const evidenceHash = digest(JSON.stringify(approvedEvidence));
   requireStage(evidenceHash === digest(JSON.stringify(evidence(project, issueNumber))), 'approval changed during validation');
   requireStage(approvedEvidence.merge?.commit === newSha, 'approval/candidate SHA mismatch');
-  const key = `${oldSha}-${newSha}`;
+  const retry = options.retryApprovalPath ? require('./deploy-retry').approval(options.retryApprovalPath, { root, oldSha, newSha, sourceCheckout, installedCheckout: live, evidenceHash }) : null;
+  const key = `${oldSha}-${newSha}${retry ? '-retry-' + retry.attemptId : ''}`;
   const directory = safeDirectory(path.join(root, key));
   const checkpoint = path.join(directory, 'checkpoint.json');
-  const identity = { issueNumber, oldSha, newSha, evidenceHash, approvedEvidence };
+  requireStage(!fs.existsSync(path.join(directory, 'update.json')), 'deployment journal exists; resume updater instead');
+  const configFile = require('./autopilot-config').projectConfigPath(options.configPath);
+  if (options.deploymentConfigPath) require('./deploy-files').canonicalAbsolute(configFile);
+  regular(configFile);
+  const ownerConfigHash = digest(fs.readFileSync(configFile));
+  const identity = { updaterContract: deployment ? 'step14-update-v3' : 'step14-stage-only-v1', deploymentKey: key, sourceCheckout, deployment, retry, issueNumber, oldSha, newSha, evidenceHash, approvedEvidence, configFile, ownerConfigHash, installedCheckout: live };
   let previous;
   if (fs.lstatSync(checkpoint, { throwIfNoEntry: false })) {
     regular(checkpoint);
@@ -302,7 +320,8 @@ async function prepare(issueNumber, options = {}) {
     atomicJson(checkpoint, receipt);
     record({ environment: env, workerNode: process.execPath, npmNode: process.execPath, limits: LIMITS });
     await git(['init', '--template=', '--initial-branch=staging']);
-    const source = (await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects'], { cwd: live })).toString().trim();
+    await git(['config', 'core.logallrefupdates', 'false']);
+    const source = (await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects'], { cwd: sourceCheckout })).toString().trim();
     // Enumerate IDs only: tree names (including embedded newlines) never delimit
     // this protocol. Read from a private empty Git directory, so source shallow
     // files, grafts, refs and configuration cannot truncate reachable history.
@@ -408,7 +427,8 @@ async function prepare(issueNumber, options = {}) {
       requireStage(parents.every(parent => /^[a-f0-9]{40}$/.test(parent)), 'invalid historical parent');
       pending.push(...parents);
     }
-    await git(['update-ref', 'HEAD', newSha]);
+    await git(['update-ref', 'refs/heads/ralph-dev', newSha]);
+    await git(['symbolic-ref', 'HEAD', 'refs/heads/ralph-dev']);
     await git(['read-tree', newSha]);
     // Write the verified bytes directly, avoiding even built-in attribute/EOL
     // conversions before executing the candidate's package scripts.
@@ -429,6 +449,11 @@ async function prepare(issueNumber, options = {}) {
       });
     }
     const gitMetadata = JSON.stringify(metadata(path.join(repo, '.git')));
+    // The later owner metadata copy may add deployment-only (config exists).
+    // npm/tests can still grow the tree; the final full seal remains mandatory.
+    const inventoryEntries = inventoryEntryCount(repo, 1);
+    record({ inventoryAdmission: { entries: inventoryEntries, reservedEntries: 1,
+      limit: INVENTORY_MAX_ENTRIES, remainingEntries: INVENTORY_MAX_ENTRIES - inventoryEntries - 1 } });
     await runNpm(['ci', '--no-audit', '--no-fund']);
     await runNpm(['test']);
     safeDirectory(repo);
@@ -444,6 +469,16 @@ async function prepare(issueNumber, options = {}) {
       requireStage(digest(fs.readFileSync(target)) === file.hash
         && Boolean(fs.statSync(target).mode & 0o111) === file.executable, `tracked file changed: ${file.name}`);
     }
+    // Preserve owner Git settings after tests, without exposing installed hooks
+    // or includes to npm. The next preflight retains the owner's origin policy.
+    if (fs.lstatSync(path.join(live, '.git')).isDirectory()) {
+      regular(path.join(live, '.git', 'config'));
+      fs.copyFileSync(path.join(live, '.git', 'config'), path.join(repo, '.git', 'config'));
+    }
+    if (fs.lstatSync(path.join(live, '.git/deployment-only'), { throwIfNoEntry: false })) {
+      regular(path.join(live, '.git/deployment-only'));
+      fs.copyFileSync(path.join(live, '.git/deployment-only'), path.join(repo, '.git/deployment-only'));
+    }
     // Tests can create files. Reject outgoing symlinks/hardlinks before exposing
     // the prepared directory to a later deployment stage.
     function flush(directory) {
@@ -457,30 +492,38 @@ async function prepare(issueNumber, options = {}) {
       syncDir(directory);
     }
     flush(repo);
-    const again = await validateDeploymentCandidate(issueNumber, { configPath: options.configPath });
+    const again = await validator(issueNumber, { configPath: options.configPath, deploymentConfigPath: options.deploymentConfigPath });
     requireStage(again.oldSha === oldSha && again.newSha === newSha
       && digest(JSON.stringify(evidence(project, issueNumber))) === evidenceHash, 'candidate or evidence changed during staging');
-    // Report final retained space after npm outputs, checkout materialization
-    // and flushing; an admission pass is not a guarantee of future capacity.
     const retainedBytesAfterTests = retainedSize(root);
-    record({ state: 'PREPARED', oldSha, newSha, retainedStorage: {
-      usedBytes: retainedBytesAfterTests, budgetBytes: LIMITS.retainedBytes,
-      remainingBytes: Math.max(0, LIMITS.retainedBytes - retainedBytesAfterTests),
-      note: 'measured before final checkpoint and transcript flush; future attempts require fresh admission' } });
-    receipt = { ...receipt, state: 'PREPARED', preparedAt: new Date().toISOString() };
+    record({ state: 'PREPARED', oldSha, newSha, retainedStorage: { usedBytes: retainedBytesAfterTests, budgetBytes: LIMITS.retainedBytes, remainingBytes: Math.max(0, LIMITS.retainedBytes - retainedBytesAfterTests), note: 'measured before final checkpoint and transcript flush; future attempts require fresh admission' } });
+    requireStage(digest(fs.readFileSync(configFile)) === ownerConfigHash, 'owner configuration changed');
+    if (deployment) requireStage(JSON.stringify(require('./deploy-layout').layout(options.deploymentConfigPath, configFile, sourceCheckout)) === JSON.stringify(deployment), 'deployment layout changed');
+    receipt = { ...receipt, state: 'PREPARED', preparedAt: new Date().toISOString(),
+      candidateTree: tree, installerHash: inventory(repo), ...(deployment ? { installedHash: inventory(live) } : {}) };
     atomicJson(checkpoint, receipt);
     return Object.freeze({ ...receipt, checkpoint });
   } catch (error) {
-    // Attempt both durable failure records even if either storage operation fails.
     const failures = [];
     try { record({ state: 'FAILED', error: error.stack }); } catch (failure) { failures.push(failure); }
     try { atomicJson(checkpoint, { ...receipt, state: 'FAILED', error: error.message }); } catch (failure) { failures.push(failure); }
-    if (failures.length) throw new AggregateError([error, ...failures],
-      `${error.message}; failure recording: ${failures.map(failure => failure.message).join('; ')}`, { cause: error });
+    if (failures.length) throw failureRecordingError(error, failures);
     throw error;
   } finally { fs.closeSync(logFd); }
 }
 
+function failureRecordingError(error, failures) {
+  return new AggregateError([error, ...failures],
+    `${error.message}; failure recording: ${failures.map(failure => failure.message).join('; ')}`, { cause: error });
+}
+// Error.stack alone omits AggregateError children and cause stacks. Preserve all
+// captured error records, including raw command streams, for the owner.
+function errorRecord(error) {
+  const raw = value => Buffer.isBuffer(value) ? { encoding: 'base64', bytes: value.toString('base64') } : value;
+  return { error: error.stack, stdout: raw(error.stdout), stderr: raw(error.stderr),
+    ...(error.cause ? { cause: errorRecord(error.cause) } : {}),
+    ...(error.errors ? { errors: Array.from(error.errors, errorRecord) } : {}) };
+}
 async function prepareDeploymentCandidate(issueNumber, options) {
   return runLocked(issueNumber, options);
 }
@@ -489,10 +532,9 @@ if (require.main === module && process.argv[2] === '--stage-worker') {
   const { issueNumber, options } = JSON.parse(process.argv[3]);
   prepare(issueNumber, options).then(result => fs.writeFileSync(1, JSON.stringify({ checkpoint: result.checkpoint })))
     .catch(error => {
-      const raw = value => Buffer.isBuffer(value) ? { encoding: 'base64', bytes: value.toString('base64') } : value;
-      fs.writeFileSync(2, `${JSON.stringify({ error: error.stack, stdout: raw(error.stdout), stderr: raw(error.stderr) })}\n`);
+      fs.writeFileSync(2, `${JSON.stringify(errorRecord(error))}\n`);
       process.exitCode = 1;
     });
 }
 
-module.exports = { prepareDeploymentCandidate };
+module.exports = { prepareDeploymentCandidate, testing: { runLocked, prepare, npmCli, failureRecordingError, errorRecord } };

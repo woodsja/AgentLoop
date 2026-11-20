@@ -64,7 +64,7 @@ async function validateResumeChecks(project, job, store, options = {}) {
     || ticketDigest(issue) !== ticketDigest(d.sourceIssue)) throw new Error('Original issue identity, content revision or state changed.');
   const recheck = async () => {
     if (!grantMode) return require('./architecture-decision-admission').check(project, job, d.admission, store, options);
-    const projectsPath = options.projectsPath || path.join(__dirname, '../autopilot-projects.json');
+    const projectsPath = require('./autopilot-config').projectConfigPath(options.projectsPath);
     if (JSON.parse(fs.readFileSync(projectsPath, 'utf8'))[job.project]?.milestoneAuthorization !== true) throw new Error('Original milestone grant mode changed in owner policy.');
     return require('./milestone-admission').checkMilestoneAdmission(job.project, project, job.issue.number, {
       ...options, jobs: () => store.dependencyJobs ? store.dependencyJobs() : store.list(), expectedIssue: issue, expectedAuthorization: d.authorization,

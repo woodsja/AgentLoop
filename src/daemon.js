@@ -2096,6 +2096,7 @@ function daemonState() {
       startedAt: daemonInfo.startedAt,
       ts: new Date().toISOString(),
       engine: defaultEngine,
+      projectConfig: require('./autopilot-config').runtimeProjectConfigState(),
     },
     bridge: {
       running: bridgeRunning(),
@@ -3166,8 +3167,9 @@ async function stop(exitFn = process.exit) {
   invokeExit(0);
 }
 
-function start(options = {}) {
-  r1Jobs = createR1Jobs(store, { ...options.r1, cancelChild: cancelOwnedR1Child });
+function initializeRuntime(options = {}) {
+  require('./autopilot-config').runtimeProjectConfigIdentity();
+  r1Jobs = createR1Jobs(store, { projectsPath: require('./autopilot-config').projectConfigPath(), ...options.r1, cancelChild: cancelOwnedR1Child });
   store.ensureDirs();
 
   daemonInfo = {
@@ -3175,7 +3177,10 @@ function start(options = {}) {
     port: store.config.dashboardPort,
     startedAt: new Date().toISOString(),
   };
+}
 
+function start(options = {}) {
+  initializeRuntime(options);
   if (!store.acquireHeartbeat(daemonInfo)) {
     console.error(`AgentLoop daemon is already running (state ${store.paths.state}).`);
     return;
@@ -3228,6 +3233,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  testing: { initializeRuntime },
   start,
   createHttpServer,
   stop,
