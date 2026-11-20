@@ -191,12 +191,15 @@ skip is necessary. Worker/Git/npm raw streams and checkpoints are archived under
 Other focused/benchmark runs can set `RALPH_STAGE_TEST_AUDIT_DIR` to archive the
 same records before disposable fixture cleanup.
 
-**Verification remains pending:** no successful shipping-worker PREPARED receipt
-for the complete real Ralph suite has been observed at this patch. Prior native
-attempts recorded FAILED; adapted/cancelled sandbox runs are not passes. Passing
-focused tests, the uv regression, and the copy benchmark do not satisfy this gate.
-The owner must run the native integration after independent review and retain its
-actual result before claiming preparation is verified. No deployment is implied.
+**Native staging verification completed November 20, 2026:** earlier attempts
+failed, and sandbox adaptations/skips were not counted as passes. The later
+`step14-30-native-final2.deploy-integration.stdout` and `.exit` record the real
+shipping worker staging the complete Ralph `npm test` in a disposable fixture:
+`state=PREPARED`, one integration test passed, zero failed, exit 0. The native
+`npm run test:deploy` and full `npm test` also exited 0 (the latter after fixing
+the test runner PATH for installed `uv`). All raw evidence and prior failures
+remain retained. **PREPARED is not DEPLOYED**: no production systemd restart,
+bootstrap, or real unattended rollout has occurred.
 
 
 The local #30 receipt-contract proposal (`step14-update-v3`) adds installed/candidate

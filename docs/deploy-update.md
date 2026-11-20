@@ -364,8 +364,11 @@ seconds, verify lock retention, completion/deadline release, preserved stdout an
 stderr, and guardian process reaping. A separate TERM-ignoring child tests the
 kill-after bound. These are realistic disposable **fake-systemctl** integrations,
 not real service restarts. The read-only user bus query in this sandbox was denied
-(`Failed to connect to bus: Operation not permitted`); native systemd behavior
-and the combined #29 real-suite staging gate remain unverified here.
+(`Failed to connect to bus: Operation not permitted`), so real-systemd restart
+and bootstrap behavior remains unverified. **Subsequently** the combined #29/#30
+shipping staging integration passed in the ordinary VM, with a PREPARED receipt
+and exit 0 (`step14-30-native-final2.deploy-integration.stdout` and `.exit`).
+That is staging evidence, not a production restart or a DEPLOYED outcome.
 
 
 ## sync1 combined validation status
