@@ -56,8 +56,17 @@ installed candidates retain the reviewed-head identity check. Installed HEAD mus
 be an ancestor. Parent identities come from raw commit objects via `git cat-file
 commit`, and ancestry runs in temporary config-free bare metadata with commit-graph
 reads disabled. Shared checkout grafts, replacement refs, shallow metadata, and
-cached commit-graph parents cannot supply the reviewed ancestry. Before parsing
-candidate parents, the module reads the raw commit as a Buffer and runs
+cached commit-graph parents cannot supply the reviewed ancestry. After raw parent
+and object verification, the private ancestry walk marks verified installed HEAD
+and the hash-verified boundary commits reported by `rev-list --boundary
+oldSha..newSha` as shallow. A reviewed side branch can fork before installed HEAD;
+its excluded fork point must also be materialized and bounded so Git never parses
+missing older parents through that branch. Boundary commit bytes are verified,
+but their trees and older history are unnecessary for ancestry and the delta.
+The installed-HEAD boundary also bounds identical no-op ancestry inputs. These
+boundaries only cut private walk edges after the exact raw parent checks; no
+checkout shallow metadata is copied.
+Before parsing candidate parents, the module reads the raw commit as a Buffer and runs
 `git hash-object -w -t commit --stdin`, requiring the result to equal the requested
 merge SHA and materializing those exact bytes in a private scratch object store.
 Hashing has no path and invokes no attribute filters. It similarly verifies

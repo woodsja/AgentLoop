@@ -169,13 +169,29 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
     requireCandidate(oldSha === newSha || (parents[0] === oldSha
       && (newSha === job.delivery.commit ? parents.length === 1 : parents.length === 2)),
       'candidate includes unreviewed intermediate commits');
-    const commits = new Set([oldSha, newSha, job.delivery.commit, ...(await isolatedGit(['rev-list', `${oldSha}..${newSha}`], { source: true })).split('\n').filter(Boolean)]);
+    const range = (await isolatedGit(['rev-list', '--boundary', `${oldSha}..${newSha}`],
+      { source: true })).split('\n').filter(Boolean);
+    const boundaries = new Set([oldSha]);
+    const commits = new Set([oldSha, newSha, job.delivery.commit]);
+    for (const entry of range) {
+      const boundary = entry.startsWith('-');
+      const id = boundary ? entry.slice(1) : entry;
+      requireCandidate(sha(id), 'invalid commit range');
+      if (boundary) boundaries.add(id);
+      else commits.add(id);
+    }
     for (const id of commits) {
       const commit = await readVerified(id, 'commit');
       const tree = /^tree ([a-f0-9]{40})\n/.exec(commit.toString('utf8'))?.[1];
       requireCandidate(sha(tree), 'invalid commit tree');
       await verifyTree(tree);
     }
+    // A reviewed side branch may fork before installed HEAD. Verify each
+    // excluded boundary commit too, then cut only these private walk edges.
+    // Their trees/older history are unnecessary for ancestry or the delta.
+    // Raw commit bytes and the exact parent checks above remain unchanged.
+    for (const id of boundaries) await readVerified(id, 'commit');
+    fs.writeFileSync(path.join(scratch, 'shallow'), [...boundaries].join('\n') + '\n');
     await isolatedGit(['merge-base', '--is-ancestor', oldSha, newSha]);
     await git(diffArgs, { GIT_OBJECT_DIRECTORY: privateObjects });
     await isolatedGit(diffArgs);

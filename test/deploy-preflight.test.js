@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync, execFile } = require('node:child_process');
+const { execFileSync, execFile, spawnSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 const { promisify } = require('node:util');
 const state = require('../src/autopilot-state');
@@ -20,7 +20,10 @@ function testValidator(remote, onObservation, onCommand = () => {}) {
   observedExec[promisify.custom] = async (...args) => {
     onCommand(...args);
     if (args[1].includes('ls-remote') && !args[1].includes('--get-url')) onObservation(...args);
-    return promisify(execFile)(...args);
+    const result = await promisify(execFile)(...args);
+    // Git 2.43 can succeed despite missing-parent diagnostics; never hide them.
+    if (args[1].includes('merge-base')) assert.doesNotMatch(result.stderr, /^(?:error|fatal|warning):/m);
+    return result;
   };
   const localRequire = name => name === 'node:child_process'
     ? { execFile: observedExec } : realRequire(name);
@@ -32,7 +35,7 @@ function testValidator(remote, onObservation, onCommand = () => {}) {
   return remote === undefined ? loaded.exports.validateDeploymentCandidate : loaded.exports.validateForTest;
 }
 
-function fixture(t, content = 'candidate\n', { installedAttributes, candidateAttributes } = {}) {
+function fixture(t, content = 'candidate\n', { installedAttributes, candidateAttributes, priorHistory = false, staleBase = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-preflight-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const checkout = path.join(root, 'checkout');
@@ -41,6 +44,9 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' });
   const git = (...args) => execFileSync('git', ['-C', checkout, ...args], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const rawGit = (...args) => spawnSync('git', ['-C', checkout, ...args], {
+    env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000,
+  });
   git('init', '-b', 'ralph-dev');
   git('config', 'user.name', 'Preflight Test');
   git('config', 'user.email', 'preflight@example.invalid');
@@ -65,8 +71,15 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
     git('add', '.'); git('commit', '-m', 'fixture');
     return git('rev-parse', 'HEAD');
   };
-  const oldSha = commit('installed\n');
-  git('checkout', '-b', 'ralph/issue-28');
+  if (priorHistory || staleBase) commit('earlier installed history\n');
+  const fork = staleBase ? commit('installed\n') : undefined;
+  if (staleBase) {
+    fs.writeFileSync(path.join(checkout, 'base.txt'), 'another installed change\n');
+    git('add', '.'); git('commit', '-m', 'base advanced after branch fork');
+  }
+  const oldSha = staleBase ? git('rev-parse', 'HEAD') : commit('installed\n');
+  git('checkout', '-b', 'ralph/issue-28', ...(staleBase ? [fork] : []));
+  const side = staleBase ? commit('first reviewed side commit\n') : undefined;
   if (candidateAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), candidateAttributes);
   const head = commit(content);
   git('checkout', 'ralph-dev');
@@ -101,7 +114,7 @@ function fixture(t, content = 'candidate\n', { installedAttributes, candidateAtt
   return { root, checkout, remote, configPath,
     setBeforeRemote: callback => { beforeRemote = callback; },
     setOnCommand: callback => { onCommand = callback; },
-    observationCount: () => observations.length, observations, commands, git, commit, oldSha, newSha, head, job, store, save, project, configure,
+    observationCount: () => observations.length, observations, commands, git, rawGit, commit, oldSha, newSha, head, fork, side, job, store, save, project, configure,
     validate: () => validate(28, { configPath }) };
 }
 
@@ -115,6 +128,11 @@ function snapshot(directory) {
 
 test('valid merge returns frozen SHAs without writing any fixture files; already installed is a no-op', async t => {
   const f = fixture(t);
+  const boundaries = [];
+  f.setOnCommand((file, args, options) => {
+    if (args.includes('merge-base')) boundaries.push(
+      fs.readFileSync(path.join(options.cwd, 'shallow'), 'utf8'));
+  });
   let before = snapshot(f.root);
   const result = await f.validate();
   assert.deepEqual(result, { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
@@ -124,6 +142,8 @@ test('valid merge returns frozen SHAs without writing any fixture files; already
   f.git('reset', '--hard', f.newSha);
   before = snapshot(f.root);
   assert.deepEqual(await f.validate(), { oldSha: f.newSha, newSha: f.newSha, noOp: true });
+  // Bound both real ancestry walks at installed HEAD, including merge-base A A.
+  assert.deepEqual(boundaries, [`${f.oldSha}\n`, `${f.newSha}\n`]);
   assert.deepEqual(snapshot(f.root), before);
 });
 
@@ -194,6 +214,77 @@ test('accepts a fast-forward whose target is the exact reviewed head', async t =
   f.job.merge.commit = f.head; f.save();
   assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.head, noOp: false });
 });
+
+for (const kind of ['merge', 'fast-forward', 'no-op']) {
+  test(`accepts ${kind} with non-root installed HEAD without walking older history`, async t => {
+    const f = fixture(t, 'candidate\n', { priorHistory: true });
+    if (kind === 'fast-forward') {
+      f.git('push', '--force', f.remote, `${f.head}:refs/heads/ralph-dev`);
+      f.job.merge.commit = f.head; f.save();
+    }
+    if (kind === 'no-op') f.git('reset', '--hard', f.newSha);
+    const installed = f.git('rev-parse', 'HEAD');
+    const older = f.git('rev-parse', `${installed}^1`);
+    let walked = false;
+    f.setOnCommand((file, args, options) => {
+      if (!args.includes('merge-base')) return;
+      walked = true;
+      assert.equal(fs.readFileSync(path.join(options.cwd, 'shallow'), 'utf8'), `${installed}\n`);
+      // The real private walk has no older commit or alternate to fall back on.
+      const objects = options.env.GIT_OBJECT_DIRECTORY;
+      assert.equal(fs.existsSync(path.join(objects, older.slice(0, 2), older.slice(2))), false);
+      assert.equal(fs.existsSync(path.join(objects, 'info/alternates')), false);
+    });
+    const before = snapshot(f.root);
+    assert.deepEqual(await f.validate(), {
+      oldSha: installed, newSha: f.job.merge.commit, noOp: kind === 'no-op',
+    });
+    assert.equal(walked, true);
+    assert.deepEqual(snapshot(f.root), before);
+  });
+}
+
+for (const attack of ['none', 'boundary bytes', 'side bytes', 'first parent', 'second parent']) {
+  test(`stale-base merge with two side commits: ${attack}`, async t => {
+    const f = fixture(t, 'candidate\n', { staleBase: true });
+    assert.equal(f.git('rev-parse', `${f.head}^`), f.side);
+    assert.equal(f.git('rev-parse', `${f.side}^`), f.fork);
+    assert.equal(f.git('rev-parse', `${f.oldSha}^`), f.fork);
+    const older = f.git('rev-parse', `${f.fork}^`);
+    if (attack.endsWith('bytes')) {
+      const id = attack === 'boundary bytes' ? f.fork : f.side;
+      plantObject(f, id, 'commit', Buffer.from(f.git('cat-file', 'commit', id) + '\nforged\n'));
+    }
+    if (attack.endsWith('parent')) {
+      const tree = f.git('rev-parse', `${f.newSha}^{tree}`);
+      const changed = f.git('commit-tree', tree, '-p', attack === 'first parent' ? f.fork : f.oldSha,
+        '-p', attack === 'second parent' ? f.side : f.head, '-m', 'wrong raw ancestry');
+      f.git('push', '--force', f.remote, `${changed}:refs/heads/ralph-dev`);
+      f.job.merge.commit = changed; f.save();
+    }
+    let walked = false;
+    f.setOnCommand((file, args, options) => {
+      if (!args.includes('merge-base')) return;
+      walked = true;
+      assert.deepEqual(new Set(fs.readFileSync(path.join(options.cwd, 'shallow'), 'utf8').trim().split('\n')),
+        new Set([f.oldSha, f.fork]));
+      const objects = options.env.GIT_OBJECT_DIRECTORY;
+      assert.ok(fs.existsSync(path.join(objects, f.fork.slice(0, 2), f.fork.slice(2))));
+      assert.equal(fs.existsSync(path.join(objects, older.slice(0, 2), older.slice(2))), false);
+      assert.equal(fs.existsSync(path.join(objects, 'info/alternates')), false);
+    });
+    const before = snapshot(f.root);
+    if (attack === 'none') {
+      assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
+      assert.equal(walked, true);
+    } else {
+      await assert.rejects(f.validate(), attack.endsWith('bytes') ? /object hash mismatch/
+        : attack === 'first parent' ? /unreviewed intermediate/ : /exact reviewed head/);
+      assert.equal(walked, false);
+    }
+    assert.deepEqual(snapshot(f.root), before);
+  });
+}
 
 test('rejects a real remote commit unrelated to the exact approved head', async t => {
   const f = fixture(t);
@@ -641,8 +732,18 @@ for (const driver of ['clean', 'process']) {
         fs.utimesSync(file, future, future);
       };
       arm();
-      if (driver === 'clean') assert.equal(f.git('status', '--porcelain=v1', '--untracked-files=all'), '');
-      else assert.throws(() => f.git('status', '--porcelain=v1', '--untracked-files=all'), /remote end hung up/);
+      const control = f.rawGit('status', '--porcelain=v1', '--untracked-files=all');
+      // Optional process-filter handshake failure may be fatal or fall back to
+      // the original bytes depending on Git. The marker proves execution in
+      // either case; the preflight below must never create it.
+      t.diagnostic(JSON.stringify({ control: driver, phase, status: control.status,
+        signal: control.signal, stdout: control.stdout, stderr: control.stderr }));
+      assert.ifError(control.error);
+      assert.equal(control.signal, null);
+      if (driver === 'clean') {
+        assert.equal(control.status, 0);
+        assert.equal(control.stdout, '');
+      }
       assert.equal(fs.readFileSync(marker, 'utf8'), 'executed');
       fs.rmSync(marker);
       if (phase === 'concurrent') {
