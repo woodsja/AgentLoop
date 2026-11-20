@@ -1,12 +1,14 @@
 # Local Step 14 updater (issue #30)
 
-This is local implementation work, not a deployment or authorization to activate
-it. The historical base staging candidate was `1b92ea0`; current branch HEAD is
-`c53773f74caa1698bcaeb3d6377e230d2fdd6936` after the guarded native HEAD/index advance. **The source is combined with reviewed #29 c53773f locally. Do not merge or
-deploy #30 until the combined producer/consumer variant is independently reviewed
-and the native integration gates pass.** No other worktree is modified here. No automatic daemon
-integration, unit installation, owner configuration edits or network operations
-are part of this correction.
+This describes the historical local implementation and integration of #30, not a
+deployment or authorization to activate it. The staging candidate began at
+`1b92ea0`; the guarded native HEAD/index advance reached reviewed #29 feature tip
+`c53773f74caa1698bcaeb3d6377e230d2fdd6936` before #30 was committed for
+PR #180. Verify the current PR head with GitHub rather than treating either
+historical SHA as the live branch HEAD. **Do not merge or deploy #30 without fresh
+independent exact-head PASS, exact-head CI and native integration gates.** No
+automatic daemon integration, unit installation or owner configuration changes
+were part of the local correction.
 
 ## Combined staging receipt contract
 
@@ -372,22 +374,28 @@ The file-level three-way integration retains reviewed #29 c53773f, #28's verifie
 shallow boundaries and #27's durable dependency diagnostics. The retained backup
 and original correction1–5 evidence remain unchanged. Six conflicted files and
 their complete three-way inputs are recorded in `state/verification-reports/sync1`.
-No local commit, remote write or production action was performed.
+At that sync1 integration stage, no local commit, remote write or production action was performed.
 
 At the original sync1 snapshot, HEAD was `1b92ea0` and the sandbox could not
 write the external Git metadata. The later guarded native HEAD/index advance
-succeeded: current HEAD is `c53773f74caa1698bcaeb3d6377e230d2fdd6936`, verified
-again on 2026-11-20. That operation created no commit and preserved the combined
-uncommitted files. The original sync1 manifests and test records describe their
-snapshot, not the postreview1 corrections. Consult `postreview1` for fresh hashes
-and local correction results. The independent combined review1 returned
-NEEDS_CHANGES; a new independent PASS and native green gates are still required.
+succeeded: at the November 20 native integration snapshot HEAD was
+`c53773f74caa1698bcaeb3d6377e230d2fdd6936`. That historical operation
+created no commit and preserved the then-uncommitted files; the #30 implementation
+was subsequently committed as `bbe170e0ebb25a04085505560a20cb19a5080d1e`
+and opened as PR #180, subject to further corrections and exact-head CI/review.
+The original sync1 manifests and test records describe their snapshot, not later
+postreview1 or committed changes. Consult `postreview1` for hashes and corrections.
+Independent combined review1 was NEEDS_CHANGES, followed by review2 PASS on the
+uncommitted tree; post-commit review1 identified stale documentation only.
 
 Deployment fixtures, benchmark, native uv, focused suites, the full test command
 and native staging were attempted. Consult `sync1/SUMMARY.md` and raw logs for
 exact results; sandbox EPERM failures are failures, and native listener skips
 remain unverified. The original sync1 independent review launch failed because OAuth expired;
-the later combined review1 returned NEEDS_CHANGES. Prior review8 covers only
-the original #30 tree. Native verification
-and a fresh independent Claude PASS are required before any commit. The prepared
-native scripts run only disposable fixtures and do not deploy or install units.
+the later combined review1 returned NEEDS_CHANGES. Prior review8 covered only
+the original #30 tree. A corrected full native `npm test` passed (exit 0;
+`step14-30-full-native-corrected-path1.exit`) alongside the deployment-specific
+native suites; the older failed full test remains retained as evidence.
+PR #180 requires fresh independent zero-finding review and GitHub CI on its
+exact current head before merging. These are test fixtures, not real production
+restarts or evidence of self-deployment. The prepared scripts do not install units.

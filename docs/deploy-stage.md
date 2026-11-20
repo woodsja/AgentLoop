@@ -205,8 +205,10 @@ to the PREPARED receipt. The lock is shared with the independent updater; a
 receipt with an update journal cannot be re-prepared. See
 [local updater and #31 bootstrap](deploy-update.md).
 
-The combined source includes reviewed #29 c53773f and the #30 receipt contract.
-Independent combined review and native staging gates remain required before commit.
+The combined #30 implementation incorporates reviewed #29 feature tip c53773f
+and the #30 receipt contract; the implementation was subsequently committed for
+PR #180. Native staging gates passed. Independent zero-finding review and GitHub
+CI must apply to the exact current PR head before merge.
 The updater additionally requires a dedicated disposable deployment checkout and
 external owner config/state; never commit owner configuration to satisfy a gate.
 
@@ -219,7 +221,7 @@ never changes canonical candidate/review selection: it authorizes only a fresh
 namespace after a sealed FAILED/ROLLED_BACK journal. Existing journals and all
 backup/rejected trees remain immutable and retained.
 
-This variant retains c53773f's bounded bulk copy (100,000 objects, 512 MiB raw
+This variant retains the original #29 (c53773f) bounded bulk copy (100,000 objects, 512 MiB raw
 objects, 128 Git commands, ten-minute copy deadline, 768 MiB Git output), raw
 Git/npm streams, trusted Node/npm resolution, 64 MiB npm output termination
 thresholds, 64-request/2-GiB retained admission and independent failure recording.
