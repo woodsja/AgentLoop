@@ -149,6 +149,16 @@ insufficient. Blocked labelled issues remain labelled; independent ready issues
 can proceed, and a later ordinary admission scan rechecks dependencies. The `Depends on:` syntax applies only to Ralph R1 admission. Household Purchases
 uses the separately configured `## Blocked by` format described below.
 
+Dependency blocks retain the complete discovered issue and diagnostic in the
+existing project state directory's `issue-N.execution.ndjson` raw journal,
+including before a job exists. Repeated unchanged diagnostics are suppressed
+within a scanner process; a restart records the block again without erasing
+earlier evidence. If a journal write or flush fails, that issue stays blocked and
+its diagnostic is retried on the next scan. The error and captured diagnostic
+are sent to the owner-visible service journal (stderr); any already written raw
+evidence is retained. Independent ready issues and later configured projects
+can still proceed under their existing admission rules.
+
 ## Optional autopilot prerequisite format
 
 Set `dependencyFormat: "household-blocked-by"` in the owner's project
