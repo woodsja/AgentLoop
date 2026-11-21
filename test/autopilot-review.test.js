@@ -7,7 +7,21 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile, execFileSync } = require('node:child_process');
-const { createClaudeReviewAdapter, buildReviewPrompt, repositoryStandards, reviewerEnvironment } = require('../src/autopilot-review');
+const { createClaudeReviewAdapter: createRealClaudeReviewAdapter, buildReviewPrompt, repositoryStandards, reviewerEnvironment } = require('../src/autopilot-review');
+// Fixture adapters never touch an operator's real HOME/.config credential.
+const absentTestCredential = path.join(os.tmpdir(), `ralph-review-test-no-credential-${process.pid}`);
+function createClaudeReviewAdapter(options = {}) {
+  return createRealClaudeReviewAdapter({ credentialPath: absentTestCredential, ...options });
+}
+function withoutParentOAuth(t) {
+  const previous = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    else process.env.CLAUDE_CODE_OAUTH_TOKEN = previous;
+  });
+}
+
 
 const sha = '0123456789abcdef';
 const project = { repo: 'example/repo', checkout: '/safe/checkout' };
@@ -504,4 +518,65 @@ test('interrupting an active review terminates its child and cannot yield PASS',
   await assert.rejects(pending, /interrupted/);
   await new Promise(resolve => setTimeout(resolve, 15));
   assert.deepEqual(claude.calls[0][3].signals, ['SIGTERM', 'SIGKILL']);
+});
+
+// External-project regression: the Claude reviewer needs its private owner
+// credential even when the autopilot parent was not launched inside Claude.
+test('Claude reviewer loads a private owner OAuth token only for the independent child', async t => {
+  withoutParentOAuth(t);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-review-auth-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const credentialPath = path.join(root, 'claude.env');
+  fs.writeFileSync(credentialPath, 'CLAUDE_CODE_OAUTH_TOKEN=test-review-only-credential\n', { mode: 0o600 });
+  const command = commands();
+  const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+  const result = await createClaudeReviewAdapter({
+    execFile: command.execFile,
+    spawn: claude.spawn,
+    timeoutMs: 200,
+    credentialPath,
+  })({ project, issue, pullRequest, headCommit: sha, verification: verificationEvidence, ci: { state: 'green' } });
+  assert.equal(result.verdict, 'PASS');
+  const environment = claude.calls[0][2].env;
+  assert.equal(environment.CLAUDE_CODE_OAUTH_TOKEN, 'test-review-only-credential');
+  assert.equal(environment.GH_TOKEN, undefined);
+  assert.equal(environment.GITHUB_TOKEN, undefined);
+  assert.equal(environment.CLAUDECODE, undefined);
+});
+
+test('Claude reviewer refuses non-private, symlinked and invalid credential files', async t => {
+  withoutParentOAuth(t);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-review-auth-refusal-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const original = path.join(root, 'claude.env');
+  fs.writeFileSync(original, 'CLAUDE_CODE_OAUTH_TOKEN=dummy-private-value\n', { mode: 0o600 });
+  const aliases = [
+    { name: 'world-readable', pattern: /private owner-owned regular file/, prepare: () => { fs.chmodSync(original, 0o644); return original; } },
+    { name: 'symlink', pattern: /credential file is inaccessible/, prepare: () => {
+      fs.chmodSync(original, 0o600);
+      const linked = path.join(root, 'link.env');
+      fs.symlinkSync(original, linked);
+      return linked;
+    } },
+    { name: 'unsupported content', pattern: /unsupported format/, prepare: () => {
+      fs.writeFileSync(original, 'OTHER_TOKEN=dummy\n', { mode: 0o600 });
+      return original;
+    } },
+  ];
+  for (const scenario of aliases) {
+    const claude = reviewer({ output: cliResult({ verdict: 'PASS', commit: sha, findings: '' }) });
+    await assert.rejects(createClaudeReviewAdapter({ execFile: commands().execFile, spawn: claude.spawn,
+      timeoutMs: 200, credentialPath: scenario.prepare() })({ project, issue, pullRequest,
+      headCommit: sha, verification: verificationEvidence, ci: { state: 'green' } }), scenario.pattern, scenario.name);
+    assert.equal(claude.calls.length, 0, `refused credential never reaches Claude: ${scenario.name}`);
+  }
+});
+
+
+test('missing owner reviewer credential falls back without injecting GitHub authority', () => {
+  const source = path.join(os.tmpdir(), `ralph-review-absent-${process.pid}`);
+  assert.equal(fs.existsSync(source), false);
+  const environment = reviewerEnvironment({ PATH: '/usr/bin', GH_TOKEN: 'private-github-token' }, source);
+  assert.equal(environment.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(environment.GH_TOKEN, undefined);
 });
