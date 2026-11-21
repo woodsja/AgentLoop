@@ -4,6 +4,8 @@
 const { spawn } = require('node:child_process');
 const { execFile, currentRecorder, captureProcess } = require('./execution-log');
 const os = require('node:os');
+const fs = require('node:fs');
+const path = require('node:path');
 const crypto = require('node:crypto');
 const { unattendedOptions } = require('./autopilot-subprocess');
 const { hasPassingVerification } = require('./autopilot-state');
@@ -34,7 +36,7 @@ function deliveredSha(value) {
   if (typeof value !== 'string' || !/^[0-9a-f]{7,64}$/i.test(value)) throw new TypeError('Claude review requires a hexadecimal delivered head commit');
   return value;
 }
-function reviewerEnvironment(base = process.env) {
+function reviewerEnvironment(base = process.env, credentialPath) {
   // A daemon can itself be started by Claude Code. Those markers cause the
   // CLI to reject a fresh reviewer as a nested session, so never pass them to
   // the independent process.
@@ -46,6 +48,30 @@ function reviewerEnvironment(base = process.env) {
   // that would let prompt content use the daemon's GitHub authority.
   delete environment.GH_TOKEN;
   delete environment.GITHUB_TOKEN;
+  // Only the independent reviewer gets this owner credential. Never source
+  // shell code or add it to the daemon or untrusted coding-agent environment.
+  if (!environment.CLAUDE_CODE_OAUTH_TOKEN && credentialPath) {
+    let fd;
+    try {
+      fd = fs.openSync(credentialPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw new Error('Claude reviewer credential file is inaccessible', { cause: error });
+    }
+    if (fd !== undefined) {
+      try {
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o077)) {
+          throw new Error('Claude reviewer credential file must be a private owner-owned regular file');
+        }
+        const lines = fs.readFileSync(fd, 'utf8').split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#'));
+        const prefix = 'CLAUDE_CODE_OAUTH_TOKEN=';
+        if (lines.length !== 1 || !lines[0].startsWith(prefix) || lines[0].length === prefix.length) {
+          throw new Error('Claude reviewer credential file has an unsupported format');
+        }
+        environment.CLAUDE_CODE_OAUTH_TOKEN = lines[0].slice(prefix.length);
+      } finally { fs.closeSync(fd); }
+    }
+  }
   return environment;
 }
 
@@ -231,7 +257,7 @@ function parseVerdict(output, model, headCommit) {
   if (verdict.verdict === 'NEEDS_CHANGES' && typeof verdict.findings === 'string' && verdict.findings.trim()) return { reviewer: `claude:${model}`, verdict: 'NEEDS_CHANGES', commit: headCommit, findings: verdict.findings.trim() };
   throw new Error('Claude review failed closed: reviewer findings do not match the verdict');
 }
-function runClaude(executeSpawn, model, prompt, timeoutMs, terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS, signal) {
+function runClaude(executeSpawn, model, prompt, timeoutMs, terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS, signal, credentialPath) {
   return new Promise((resolve, reject) => {
     let child; let stdout = ''; let settled = false; let timer; let killTimer; let closed = false; let terminating = false;
     const finish = error => { if (!settled) { settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(stdout); } };
@@ -250,7 +276,11 @@ function runClaude(executeSpawn, model, prompt, timeoutMs, terminationGraceMs = 
     };
     const abort = () => terminate(new Error('Claude review failed closed: reviewer interrupted'));
     if (signal?.aborted) { reject(new Error('Claude review failed closed: reviewer interrupted')); return; }
-    try { child = executeSpawn('claude', ['-p', '--safe-mode', '--strict-mcp-config', '--restricted', '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--tools', '', '--no-session-persistence', '--max-budget-usd', String(REVIEW_BUDGET_USD[model]), '--output-format', 'json', '--model', model], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, cwd: os.tmpdir(), env: reviewerEnvironment() }); } catch { reject(new Error('Claude review failed closed: reviewer process could not start')); return; }
+    // Credential validation is a separate, owner-visible failure from spawning.
+    // Never reduce file permission/format diagnostics to a generic spawn error.
+    let environment;
+    try { environment = reviewerEnvironment(process.env, credentialPath); } catch (error) { reject(error); return; }
+    try { child = executeSpawn('claude', ['-p', '--safe-mode', '--strict-mcp-config', '--restricted', '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--tools', '', '--no-session-persistence', '--max-budget-usd', String(REVIEW_BUDGET_USD[model]), '--output-format', 'json', '--model', model], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, cwd: os.tmpdir(), env: environment }); } catch { reject(new Error('Claude review failed closed: reviewer process could not start')); return; }
     signal?.addEventListener('abort', abort, { once: true });
     timer = setTimeout(() => terminate(new Error('Claude review failed closed: reviewer timed out')), timeoutMs);
     child.stdout.on('data', chunk => { stdout += String(chunk); if (byteLength(stdout) > MAX_OUTPUT_BYTES) terminate(new Error('Claude review failed closed: reviewer output exceeds its safe size limit')); });
@@ -289,7 +319,7 @@ function createClaudeReviewAdapter(options = {}) {
     if (!preparedObjects.has(prepared)) throw preparationError('review_identity_mismatch', 'prepared material belongs to another adapter');
     preparedObjects.delete(prepared); // one invocation per preparation
     const { project, pullRequest, headCommit, model, prompt } = prepared;
-    const output = await runClaude(executeSpawn, model, prompt, timeoutMs, terminationGraceMs, options.signal);
+    const output = await runClaude(executeSpawn, model, prompt, timeoutMs, terminationGraceMs, options.signal, options.credentialPath ?? path.join(os.homedir(), '.config', 'agentloop', 'claude.env'));
     await assertPrHeadUnchanged(project, pullRequest, headCommit, executeFile);
     return parseVerdict(output, model, headCommit);
   }, { reviewer: 'claude', prepare });
