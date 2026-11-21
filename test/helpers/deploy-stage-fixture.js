@@ -10,8 +10,6 @@ const { promisify } = require('node:util');
 
 // Reuse the real disposable repositories and canonical approval records from
 // preflight. Only the private canonical remote transport is changed to file.
-const fixtureFile = require.resolve('../deploy-preflight.test');
-const fixtureSource = fs.readFileSync(fixtureFile, 'utf8').split('// Compare every byte,')[0];
 const stageFile = require.resolve('../../src/deploy-stage');
 const stageRequire = createRequire(stageFile);
 const stageModule = { exports: {} };
@@ -19,17 +17,8 @@ new Function('require', 'module', 'exports', '__filename', fs.readFileSync(stage
   '\nmodule.exports.runLocked = runLocked; module.exports.npmCli = npmCli;')(stageRequire, stageModule, stageModule.exports, stageFile);
 
 function fixture(t, script = 'console.log("full candidate test stdout"); console.error("candidate stderr")', candidateAttributes) {
-  const loaded = { exports: {} };
-  const injected = fixtureSource.replace("fs.writeFileSync(path.join(checkout, 'file.txt'), text);", `
-    fs.writeFileSync(path.join(checkout, 'file.txt'), text);
-    fs.writeFileSync(path.join(checkout, 'binary-newline' + String.fromCharCode(10) + 'file'), Buffer.from([0,10,255,32,10,0,100]));
-    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: 'stage-fixture', version: '1.0.0', scripts: { test: 'node -e ' + JSON.stringify(npmScript) } }));
-    fs.writeFileSync(path.join(checkout, 'package-lock.json'), JSON.stringify({ name: 'stage-fixture', version: '1.0.0', lockfileVersion: 3, packages: { '': { name: 'stage-fixture', version: '1.0.0' } } }));
-  `);
-  new Function('require', 'module', 'exports', 'npmScript', injected + '\nmodule.exports = fixture;')(
-    createRequire(fixtureFile), loaded, loaded.exports, script);
   const cleanups = [];
-  const f = loaded.exports({ after: callback => cleanups.push(callback) }, 'candidate\n', { candidateAttributes });
+  const f = require('../deploy-preflight-fixture').fixture({ after: callback => cleanups.push(callback) }, 'candidate\n', {candidateAttributes, npmScript:script});
   t.after(() => {
     // Optional evidence capture copies every worker/Git/npm raw stream before
     // disposable fixture cleanup. Never copy the private repo or npm cache.
@@ -55,18 +44,14 @@ function fixture(t, script = 'console.log("full candidate test stdout"); console
   fs.writeFileSync(worker, `
     const fs = require('node:fs');
     const {createRequire} = require('node:module');
-    const filename = ${JSON.stringify(require.resolve('../../src/deploy-preflight'))};
-    const preflight = {exports:{}};
-    new Function('require','module','exports', fs.readFileSync(filename,'utf8') +
-      '\\nmodule.exports.validateDeploymentCandidate = (issue, options) => validateCandidate(issue, options, ' + ${JSON.stringify(JSON.stringify(f.remote))} + ');')(
-        createRequire(filename),preflight,preflight.exports);
+    const validate = require(${JSON.stringify(require.resolve('../deploy-preflight-fixture'))}).testValidator(${JSON.stringify(f.remote)});
     const stageFile = ${JSON.stringify(stageFile)};
     const realRequire = createRequire(stageFile);
     const loaded = {exports:{}};
     new Function('require','module','exports','__filename', fs.readFileSync(stageFile,'utf8') + '\\nmodule.exports.prepare = prepare;')(
-      name => name === './deploy-preflight' ? preflight.exports : realRequire(name),loaded,loaded.exports,stageFile);
+      realRequire,loaded,loaded.exports,stageFile);
     const {issueNumber,options} = JSON.parse(process.argv[3]);
-    loaded.exports.prepare(issueNumber,options).then(result => fs.writeFileSync(1,JSON.stringify({checkpoint:result.checkpoint})))
+    loaded.exports.prepare(issueNumber,options,validate).then(result => fs.writeFileSync(1,JSON.stringify({checkpoint:result.checkpoint})))
       .catch(error => {fs.writeFileSync(2,error.stack);process.exitCode=1;});
   `);
   f.stageRoot = path.join(f.project.stateDir, 'deployment-staging');

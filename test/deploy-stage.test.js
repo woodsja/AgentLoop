@@ -181,7 +181,7 @@ test('process crash retains exclusive lock for bounded tests; retry reconciles i
   // Launch an actual flock worker without the API process, then SIGKILL the
   // worker during npm test. npm/timeout inherit the lock until they exit.
   fs.mkdirSync(f.stageRoot, { recursive: true });
-  const fd = fs.openSync(path.join(f.stageRoot, 'prepare.lock'), 'a+');
+  const fd = fs.openSync(path.join(f.stageRoot, 'deployment.lock'), 'a+');
   const child = spawn('/bin/sh', ['-c', '/usr/bin/flock -n 3 || exit 75\nexec "$@"', 'stage-lock',
     process.execPath, f.worker, '--stage-worker', JSON.stringify({ issueNumber: 28, options: { configPath: f.configPath, timeoutMs: 2500 } })],
   { stdio: ['ignore', 'ignore', 'ignore', fd] });
@@ -199,7 +199,7 @@ test('process crash retains exclusive lock for bounded tests; retry reconciles i
 });
 
 test('public surface only exposes prepare; preflight failure cannot stage an unapproved candidate', async t => {
-  assert.deepEqual(Object.keys(require('../src/deploy-stage')), ['prepareDeploymentCandidate']);
+  assert.deepEqual(Object.keys(require('../src/deploy-stage')), ['prepareDeploymentCandidate', 'testing']);
   const f = fixture(t);
   f.job.review.reviewer = 'codex:invalid';
   fs.writeFileSync(path.join(f.project.stateDir, 'issue-28.json'), JSON.stringify(f.job));
@@ -366,8 +366,8 @@ for (const fault of ['hash', 'length', 'type', 'duplicate', 'trailing']) {
       const originalRead = fs.readFileSync;
       fs.readFileSync = (file,...args) => {
         const bytes = originalRead(file,...args);
-        // Commands: init, source lookup, IDs, size/type plan, binary batch.
-        if (typeof file === 'string' && file.endsWith('git-5.stdout')) {
+        // One additional config command disables reflogs for the sealed updater checkout.
+        if (typeof file === 'string' && file.endsWith('git-6.stdout')) {
           const changed = Buffer.from(bytes), end = changed.indexOf(10);
           ${fault === 'hash' ? "changed[end+1] ^= 1; return changed;" :
             fault === 'length' ? "return changed.subarray(0,changed.length-1);" :
@@ -380,7 +380,7 @@ for (const fault of ['hash', 'length', 'type', 'duplicate', 'trailing']) {
     await assert.rejects(f.prepare(), /object hash mismatch|invalid batch|trailing batch/);
     const result = JSON.parse(fs.readFileSync(f.checkpoint(), 'utf8'));
     assert.equal(result.state, 'FAILED');
-    assert.ok(fs.statSync(path.join(result.attempt, 'git-5.stdout')).size > 0);
+    assert.ok(fs.statSync(path.join(result.attempt, 'git-6.stdout')).size > 0);
     assert.equal(fs.existsSync(path.join(result.attempt, 'npm-ci.stdout')), false);
   });
 }
@@ -414,4 +414,93 @@ test('trusted Node/npm outside system bin work without inherited PATH or npm_exe
   assert.equal(actual.path.includes('/untrusted'), false);
   const records = fs.readFileSync(receipt.transcript, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(records.find(record => record.command?.at(-1) === 'test').command[0], node);
+});
+
+test('worker retains original failure and both independent recording failures verbatim', async t => {
+  const f = require('./deploy-stage-fixture').fixture(t, 'console.error("root failure diagnostic");process.exit(7)');
+  // Disposable worker faults only; shipping source and module loading are intact.
+  const faults = `const fs0=require('node:fs'),write0=fs0.writeFileSync,rename0=fs0.renameSync;
+    fs0.writeFileSync=(file,bytes,...args)=>{
+      if(typeof file==='number' && String(bytes).includes('"state":"FAILED"')) throw Error('audit record failure: complete detail');
+      return write0(file,bytes,...args);
+    };
+    fs0.renameSync=(from,to)=>{
+      if(to.endsWith('/checkpoint.json') && fs0.readFileSync(from,'utf8').includes('"state": "FAILED"')) throw Error('checkpoint record failure: complete detail');
+      return rename0(from,to);
+    };\n`;
+  fs.writeFileSync(f.worker, faults + fs.readFileSync(f.worker, 'utf8'));
+  await assert.rejects(f.prepare(), error => {
+    assert.match(error.message, /npm test failed: code=7/);
+    assert.match(error.message, /audit record failure: complete detail/);
+    assert.match(error.message, /checkpoint record failure: complete detail/);
+    return true;
+  });
+  const request = fs.readdirSync(f.stageRoot).find(name => name.startsWith('request-'));
+  const raw = JSON.parse(fs.readFileSync(path.join(f.stageRoot, request, 'worker.stderr')));
+  assert.match(raw.cause.error, /npm test failed: code=7/);
+  assert.equal(raw.errors.length, 3);
+  assert.match(raw.errors[1].error, /audit record failure: complete detail/);
+  assert.match(raw.errors[2].error, /checkpoint record failure: complete detail/);
+  const receipt = JSON.parse(fs.readFileSync(f.checkpoint()));
+  assert.equal(receipt.state, 'PREPARING');
+  assert.match(fs.readFileSync(path.join(receipt.attempt, 'npm-test.stderr'), 'utf8'), /root failure diagnostic/);
+});
+
+test('nested error records preserve binary stdout/stderr and complete cause stacks', () => {
+  const { errorRecord, failureRecordingError } = require('../src/deploy-stage').testing;
+  const root = Object.assign(Error('original root'), {stdout:Buffer.from([0,255,10]), stderr:'verbatim stderr\n'});
+  const failure = Error('recording root');
+  const combined = failureRecordingError(root, [failure]);
+  assert.equal(combined.cause, root);
+  assert.deepEqual(combined.errors, [root, failure]);
+  const raw = JSON.parse(JSON.stringify(errorRecord(combined)));
+  assert.equal(raw.cause.error, root.stack);
+  assert.equal(raw.errors[0].error, root.stack);
+  assert.deepEqual(Buffer.from(raw.cause.stdout.bytes,'base64'),root.stdout);
+  assert.equal(raw.cause.stderr,root.stderr);
+  assert.equal(raw.errors[1].error,failure.stack);
+});
+
+test('runtime-selected owner project file survives the stripped staging worker environment', async t => {
+  const f=fixture(t),launcher=path.join(f.root,'runtime-config-launcher.js');
+  fs.writeFileSync(launcher, `require(${JSON.stringify(stageFile)}).testing.runLocked(28,{},${JSON.stringify(f.worker)}).then(result=>require('fs').writeSync(1,JSON.stringify(result))).catch(e=>{require('fs').writeSync(2,e.stack);process.exitCode=1;});`);
+  const {stdout}=await promisify(execFile)(process.execPath,[launcher],{env:{...process.env,AGENTLOOP_PROJECTS_PATH:f.configPath}});
+  const receipt=JSON.parse(stdout);assert.equal(receipt.state,'PREPARED');assert.equal(receipt.configFile,f.configPath);
+  assert.equal(receipt.ownerConfigHash,require('../src/deploy-files').hash(fs.readFileSync(f.configPath)));
+});
+
+test('private inventory entry threshold is shared and reserves final metadata', () => {
+  const { inventoryCapacity, INVENTORY_MAX_ENTRIES, inventoryEntryCount } = require('../src/deploy-files');
+  assert.equal(INVENTORY_MAX_ENTRIES, 50000);
+  assert.doesNotThrow(() => inventoryCapacity(49999, 1));
+  assert.throws(() => inventoryCapacity(50000, 1), /inventory work budget/);
+  assert.doesNotThrow(() => inventoryCapacity(50000));
+  assert.throws(() => inventoryCapacity(50001), /inventory work budget/);
+  assert.ok(inventoryEntryCount(path.join(__dirname, 'helpers'), 1) > 1);
+});
+
+test('private entry budget refuses before npm and preserves failure records', async t => {
+  const f = fixture(t);
+  const filesModule = require.resolve('../src/deploy-files');
+  // Inject only the counted entry total at the inventory boundary, avoiding
+  // 50,000 physical objects. Git, approvals, copy, npm admission and audit are
+  // the shipping implementation. A missing early gate would reach PREPARED.
+  fs.writeFileSync(f.worker, `
+    const filesBudget = require(${JSON.stringify(filesModule)});
+    const realEntryCount = filesBudget.inventoryEntryCount;
+    filesBudget.inventoryEntryCount = (root, reserve) => {
+      realEntryCount(root, reserve);
+      filesBudget.inventoryCapacity(50000, reserve);
+      return 50000;
+    };
+  ` + fs.readFileSync(f.worker, 'utf8'));
+  await assert.rejects(f.prepare(), /inventory work budget exceeded/);
+  const receipt = JSON.parse(fs.readFileSync(f.checkpoint(), 'utf8'));
+  assert.equal(receipt.state, 'FAILED');
+  const records = fs.readFileSync(receipt.transcript, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(records.some(record => record.state === 'FAILED' && /inventory work budget/.test(record.error)));
+  assert.ok(records.some(record => record.historyCopy?.verified));
+  assert.equal(fs.existsSync(path.join(receipt.attempt, 'npm-ci.stdout')), false);
+  assert.equal(fs.existsSync(path.join(receipt.attempt, 'npm-test.stdout')), false);
+  assert.ok(fs.readdirSync(receipt.attempt).some(name => /^git-\d+\.stderr$/.test(name)));
 });

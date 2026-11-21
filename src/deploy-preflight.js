@@ -10,7 +10,7 @@ const { createJobStore, resolveStateDir } = require('./autopilot-state');
 const { approved } = require('./r1-dependencies');
 const { ciStateForRuns } = require('./autopilot-github');
 
-const execute = promisify(execFile);
+const executeFile = promisify(execFile);
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 function requireCandidate(condition, message) {
   if (!condition) throw new Error(`Deployment preflight refused: ${message}`);
@@ -22,9 +22,16 @@ async function validateDeploymentCandidate(issueNumber, options) {
   return validateCandidate(issueNumber, options);
 }
 
-// The third argument is private and used only by the source-loaded test harness.
-// Public callers cannot override the canonical production URL or transport.
-async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanonicalUrl) {
+// The explicit testing namespace can supply local transport. The production
+// interface and options cannot override the canonical URL or transport.
+async function validateCandidate(issueNumber, { configPath, deploymentConfigPath } = {}, testOnlyCanonicalUrl, observers = {}) {
+  const execute = async (...args) => {
+    observers.onCommand?.(...args);
+    if (args[1].includes('ls-remote') && !args[1].includes('--get-url')) observers.onObservation?.(...args);
+    const result = await executeFile(...args);
+    observers.onResult?.(result, ...args);
+    return result;
+  };
   const project = loadProjectConfig('ralph', configPath === undefined ? {} : { configPath });
   requireCandidate(project.baseBranch === 'ralph-dev' && project.reviewPolicy === 'always'
     && project.autoMerge === true && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.repo), 'owner Ralph policy or repository is invalid');
@@ -46,7 +53,9 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
     env: { ...env, ...overrides }, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
   })).stdout.trim();
   requireCandidate(fs.realpathSync(await git(['rev-parse', '--show-toplevel'])) === fs.realpathSync(project.checkout), 'configured checkout must be the repository root');
-  const oldSha = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
+  const sourceHead = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
+  const deployment = deploymentConfigPath ? require('./deploy-layout').layout(deploymentConfigPath, require('./autopilot-config').projectConfigPath(configPath), fs.realpathSync(project.checkout)) : null;
+  const oldSha = deployment ? (await execute('/usr/bin/git', ['--no-replace-objects', '-C', deployment.installedCheckout, 'rev-parse', '--verify', 'HEAD^{commit}'], { env, encoding: 'utf8', timeout: 5000 })).stdout.trim() : sourceHead;
   requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch, 'checkout is on the wrong branch');
   const newSha = job.merge.commit;
   requireCandidate(sha(oldSha), 'installed HEAD is not a commit SHA');
@@ -146,8 +155,12 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
         offset = nul + 21;
       }
     };
-    collect(installedTree);
-    requireCandidate(await cleanStatus(project.checkout, oldSha, git, env, privateObjects, expected) === '', 'checkout is dirty');
+    const sourceCommit = await readVerified(sourceHead, 'commit');
+    const sourceTree = /^tree ([a-f0-9]{40})\n/.exec(sourceCommit.toString())?.[1];
+    requireCandidate(sha(sourceTree), 'invalid source tree');
+    await verifyTree(sourceTree);
+    collect(sourceTree);
+    requireCandidate(await cleanStatus(project.checkout, sourceHead, git, env, privateObjects, expected, execute) === '', 'checkout is dirty');
     const allowedUrls = [
       `https://github.com/${project.repo}`, `https://github.com/${project.repo}.git`,
       `git@github.com:${project.repo}`, `git@github.com:${project.repo}.git`,
@@ -160,7 +173,7 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
     const targetRef = `refs/heads/${project.baseBranch}`;
     const canonicalUrl = `https://github.com/${project.repo}.git`;
     const remote = await observeRemote(testOnlyCanonicalUrl ?? canonicalUrl, targetRef,
-      testOnlyCanonicalUrl !== undefined);
+      testOnlyCanonicalUrl !== undefined, execute);
     requireCandidate(remote === `${newSha}\t${targetRef}`, 'approved merge is not the exact origin/ralph-dev target');
     const header = (await readVerified(newSha, 'commit')).toString('utf8').split('\n\n', 1)[0];
     const parents = header.split('\n').filter(line => line.startsWith('parent ')).map(line => line.slice(7));
@@ -195,11 +208,11 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
     await isolatedGit(['merge-base', '--is-ancestor', oldSha, newSha]);
     await git(diffArgs, { GIT_OBJECT_DIRECTORY: privateObjects });
     await isolatedGit(diffArgs);
-    requireCandidate(await git(['rev-parse', '--verify', 'HEAD^{commit}']) === oldSha,
+    requireCandidate(await git(['rev-parse', '--verify', 'HEAD^{commit}']) === sourceHead,
       'checkout HEAD changed during validation');
     requireCandidate(await git(['symbolic-ref', '--quiet', '--short', 'HEAD']) === project.baseBranch,
       'checkout branch changed during validation');
-    requireCandidate(await cleanStatus(project.checkout, oldSha, git, env, privateObjects, expected) === '',
+    requireCandidate(await cleanStatus(project.checkout, sourceHead, git, env, privateObjects, expected, execute) === '',
       'checkout became dirty during validation');
     return Object.freeze({ oldSha, newSha, noOp: oldSha === newSha });
   } finally {
@@ -210,7 +223,7 @@ async function validateCandidate(issueNumber, { configPath } = {}, testOnlyCanon
 // Status must not load checkout filter drivers or recurse into submodule Git
 // metadata. Inspect a snapshot for staged changes and unsupported flags, then
 // discard its stat cache and build the status index from verified HEAD objects.
-async function cleanStatus(checkout, head, git, env, objects, expected) {
+async function cleanStatus(checkout, head, git, env, objects, expected, execute) {
   const index = await git(['rev-parse', '--path-format=absolute', '--git-path', 'index']);
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-status-'));
   try {
@@ -291,7 +304,7 @@ function worktreeMatches(checkout, expected) {
 // gitdir has no config, and neither inherited Git settings nor proxy/TLS/helper
 // environment can affect the request. Only the trusted Git HTTPS transport is
 // enabled in production; local transport exists solely for the private tests.
-async function observeRemote(url, ref, localForTest) {
+async function observeRemote(url, ref, localForTest, execute) {
   if (localForTest) requireCandidate(path.isAbsolute(url), 'test remote must be an absolute local path');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-remote-'));
   try {
@@ -315,4 +328,4 @@ async function observeRemote(url, ref, localForTest) {
   }
 }
 
-module.exports = { validateDeploymentCandidate };
+module.exports = { validateDeploymentCandidate, testing: { validateCandidate } };

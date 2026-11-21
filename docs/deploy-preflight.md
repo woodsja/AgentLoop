@@ -8,7 +8,7 @@ const { validateDeploymentCandidate } = require('../src/deploy-preflight');
 const { oldSha, newSha, noOp } = await validateDeploymentCandidate(issueNumber);
 ```
 
-The optional second argument `{ configPath }` selects an owner-managed project
+The optional second argument `{ configPath, deploymentConfigPath }` selects an owner-managed project
 configuration file (also used by disposable repository tests). Never obtain that
 path from issue or other candidate input. The function loads the `ralph` project
 using the existing config loader, then reads the selected issue from its canonical
@@ -102,12 +102,17 @@ Network access is limited to the read-only remote observation; missing
 objects require a separate owner-authorized preparation step.
 
 Run `node test/deploy-preflight.test.js` for real disposable checkout/bare-remote
-tests. It is also included in `npm test`. The source-loaded test harness supplies
-only a private test-only canonical local bare path; it runs the actual Git
+tests. It is also included in `npm test`. The ordinary imported module exposes a private testing seam for a canonical
+local bare path and command-observation callbacks; it runs the actual Git
 observation code, enabling file transport exclusively for that dependency.
-The public module exports only `validateDeploymentCandidate`; neither its
-options nor additional arguments can choose a production URL or observer.
-Tests exercise real helper-alias forgery, HTTP config isolation, inherited config
+The production `validateDeploymentCandidate` entry point cannot select a URL
+or observer through options or extra arguments. An explicit `testing` namespace
+provides the local-transport/observation seam for disposable tests; tests do not patch
+implementation text or append exports by internal name.
+Callbacks observe actual Git calls and do not replace command results or
+child_process. No source evaluation or synthetic module loader is used. Existing
+command-boundary mutation tests fail on missing observations or verification
+drift. Tests exercise real helper-alias forgery, HTTP config isolation, inherited config
 and environment isolation, graft-hidden intermediate commits, marker-writing
 fsmonitor programs, forged loose commits/trees/blobs, binary object hashing,
 marker-writing clean/process filters and submodule commands, dirty index-flag
@@ -115,3 +120,15 @@ attacks and forged stat-cache/checksum attacks at both clean checks, shared
 installed commit/tree/blob swaps before and during status, raw-byte normalization
 checks, real blob/tree swaps after verification, exact
 remote results and failures, and scratch cleanup.
+
+For the local #30 separated layout, `deploymentConfigPath` is an explicitly
+selected external owner file as described in [deploy-update](deploy-update.md).
+The configured project checkout is SOURCE: its HEAD and clean bytes are verified
+against their own snapshot. `oldSha` is independently read from the dedicated
+DEPLOYMENT checkout and used for exact reviewed ancestry. All required objects
+are read and hash-verified from source into private scratch; no fetch or write
+into the installed object database is performed. Final source HEAD/branch/clean
+checks remain required. Old SHA and owner layout are rechecked by staging and
+sealed into its receipt; updater checks the actual installed bytes independently.
+Without the layout argument, preflight retains its original single-checkout
+read-only behavior and does not authorize an update.

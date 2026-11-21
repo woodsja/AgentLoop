@@ -556,3 +556,30 @@ test('last worker admission failure in the real task service propagates without 
   assert.deepEqual(after.failures, before.failures);
   assert.match(fs.readFileSync(after.executionJournal.file, 'utf8'), /architecture_resume_blocked/);
 });
+
+for (const nongrant of [false,true]) test(`independent timer entrypoint uses external-only project policy for ADR resume (grant=${!nongrant})`,async t=>{
+  // Each timer starts a fresh process with its own pinned runtime identity.
+  const selected=process.env.RALPH_TEST_EXTERNAL_TIMER;
+  if(selected===undefined){
+    const child=require('node:child_process').spawnSync(process.execPath,['--test-name-pattern=independent timer',__filename],{
+      env:{...process.env,RALPH_TEST_EXTERNAL_TIMER:String(nongrant)},encoding:'utf8'});
+    assert.equal(child.status,0,(child.stdout||'')+'\n'+(child.stderr||''));
+    return;
+  }
+  if(selected!==String(nongrant)){t.skip('other independent timer fixture');return;}
+  const f=await fixture(t,nongrant);await f.command('accept');f.mergeAdr();await f.command('resume',{});
+  const prior=process.env.AGENTLOOP_PROJECTS_PATH;process.env.AGENTLOOP_PROJECTS_PATH=f.options.projectsPath;
+  t.after(()=>{if(prior===undefined)delete process.env.AGENTLOOP_PROJECTS_PATH;else process.env.AGENTLOOP_PROJECTS_PATH=prior;});
+  // Omit milestoneOptions, as the timer's independent autopilot entrypoint does.
+  const configPrior=process.env.AGENTLOOP_CONFIG_PATH,statePrior=process.env.AGENTLOOP_STATE_DIR;
+  process.env.AGENTLOOP_CONFIG_PATH=f.options.configPath;process.env.AGENTLOOP_STATE_DIR=f.root;
+  t.after(()=>{if(configPrior===undefined)delete process.env.AGENTLOOP_CONFIG_PATH;else process.env.AGENTLOOP_CONFIG_PATH=configPrior;if(statePrior===undefined)delete process.env.AGENTLOOP_STATE_DIR;else process.env.AGENTLOOP_STATE_DIR=statePrior;});
+  let workers=0;
+  const result=await require('../src/autopilot').run(['--project','demo'],{
+    jobStore:f.store,execFile:f.options.execFile,discoverReadyIssues:async()=>[f.issue],write(){},
+    prepareIssueWorkspace:async()=>{throw Error('Retained worktree required');},
+    prepareRepositoryEnvironment:async()=>({}),readRepositoryInstructions:async()=>[],cleanupIssueWorkspace:async()=>{},
+    createRalphTaskService:()=>({run:async()=>{workers++;return {status:'needs_planning',attempts:[]};}}),
+  });
+  assert.equal(workers,1,JSON.stringify(result));assert.equal(result.job.runs,2);assert.equal(result.job.architectureDecisionHistory.length,1);
+});

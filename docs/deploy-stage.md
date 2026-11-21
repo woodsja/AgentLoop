@@ -24,7 +24,7 @@ in the installed repository. The only installed-repository operation added here
 is a read of its object-directory location. Existing preflight reads and its
 read-only canonical remote observation still run before and after staging.
 
-A Linux `flock` on a persistent `prepare.lock` serializes all issues and SHA pairs
+A Linux `flock` on a persistent `deployment.lock` serializes all issues and SHA pairs
 under that root. Contenders fail immediately. A worker owns the lock; loss of
 the API caller does not cancel its work. npm and its external GNU timeout inherit
 the locked descriptor, so worker SIGKILL cannot permit another prepare while a
@@ -191,9 +191,62 @@ skip is necessary. Worker/Git/npm raw streams and checkpoints are archived under
 Other focused/benchmark runs can set `RALPH_STAGE_TEST_AUDIT_DIR` to archive the
 same records before disposable fixture cleanup.
 
-**Verification remains pending:** no successful shipping-worker PREPARED receipt
-for the complete real Ralph suite has been observed at this patch. Prior native
-attempts recorded FAILED; adapted/cancelled sandbox runs are not passes. Passing
-focused tests, the uv regression, and the copy benchmark do not satisfy this gate.
-The owner must run the native integration after independent review and retain its
-actual result before claiming preparation is verified. No deployment is implied.
+**Native staging verification completed November 20, 2026:** earlier attempts
+failed, and sandbox adaptations/skips were not counted as passes. The later
+`step14-30-native-final2.deploy-integration.stdout` and `.exit` record the real
+shipping worker staging the complete Ralph `npm test` in a disposable fixture:
+`state=PREPARED`, one integration test passed, zero failed, exit 0. The native
+`npm run test:deploy` and full `npm test` also exited 0 (the latter after fixing
+the test runner PATH for installed `uv`). All raw evidence and prior failures
+remain retained. **PREPARED is not DEPLOYED**: no production systemd restart,
+bootstrap, or real unattended rollout has occurred.
+
+
+The local #30 receipt-contract proposal (`step14-update-v3`) adds installed/candidate
+filesystem seals and pins owner project config
+to the PREPARED receipt. The lock is shared with the independent updater; a
+receipt with an update journal cannot be re-prepared. See
+[local updater and #31 bootstrap](deploy-update.md).
+
+The combined #30 implementation incorporates reviewed #29 feature tip c53773f
+and the #30 receipt contract; the implementation was subsequently committed for
+PR #180. Native staging gates passed. Independent zero-finding review and GitHub
+CI must apply to the exact current PR head before merge.
+The updater additionally requires a dedicated disposable deployment checkout and
+external owner config/state; never commit owner configuration to satisfy a gate.
+
+The source/deployment separation and explicit owner-sealed retry namespace are
+specified in [correction2's contract and mapping](deploy-update.md#correction2-supported-sourcedeployment-contract-local-proposal).
+Project `checkout` stays pointed at SOURCE. `deploymentConfigPath` selects the
+external layout and its lock-protocol attestation; without it the producer emits
+`step14-stage-only-v1`, which cannot be consumed by the updater. `retryApprovalPath`
+never changes canonical candidate/review selection: it authorizes only a fresh
+namespace after a sealed FAILED/ROLLED_BACK journal. Existing journals and all
+backup/rejected trees remain immutable and retained.
+
+This variant retains the original #29 (c53773f) bounded bulk copy (100,000 objects, 512 MiB raw
+objects, 128 Git commands, ten-minute copy deadline, 768 MiB Git output), raw
+Git/npm streams, trusted Node/npm resolution, 64 MiB npm output termination
+thresholds, 64-request/2-GiB retained admission and independent failure recording.
+Thresholds retain all written bytes including overshoot. No automatic pruning
+occurs. Filesystem seals additionally impose 512 MiB, 50,000 entries and thirty
+seconds per private candidate/dedicated installation inventory; SOURCE is never
+inventoried. Stage-only receipts omit the installed inventory. The specialized #29 native, uv and copy-benchmark scripts remain available.
+See state/verification-reports/sync1 for combined gate outcomes and limitations.
+
+Correction3 restores the reviewed environment/Node/limits record and exact
+retained-storage note. Worker error records retain nested AggregateError errors,
+original causes, full stacks and captured raw stdout/stderr. Recording failures
+attempt both durable records independently and preserve all errors.
+
+A pre-existing legacy `prepare.lock` refuses staging and updating. Migration requires
+a separately coordinated owner procedure with no old staging workers active; never
+unlink a live lock. Both current workers share `deployment.lock`.
+
+Before either npm gate, staging now counts the complete materialized private
+candidate tree (root, files, directories, loose objects and Git metadata) against
+the same 50,000-entry seal ceiling, reserving one entry for the later owner
+`deployment-only` marker. Admission and remaining entries are recorded in the
+raw transcript. This preserves the history copy ceiling without a blanket
+40,000-object restriction. npm and tests can add entries after admission; the
+final full inventory still refuses any resulting overflow and seals all bytes.

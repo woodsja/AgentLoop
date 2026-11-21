@@ -14,7 +14,7 @@ const digest = value => crypto.createHash('sha256').update(JSON.stringify(canoni
 function paths(options) {
   return {
     configPath: options.configPath || process.env.AGENTLOOP_CONFIG_PATH || path.join(__dirname, '../config.json'),
-    projectsPath: options.projectsPath || path.join(__dirname, '../autopilot-projects.json'),
+    projectsPath: require('./autopilot-config').projectConfigPath(options.projectsPath),
     stateDir: options.stateDir || process.env.AGENTLOOP_STATE_DIR || path.join(__dirname, '../state'),
   };
 }

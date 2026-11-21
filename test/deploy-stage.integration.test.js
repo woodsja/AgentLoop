@@ -21,7 +21,14 @@ test('shipping worker stages the real Ralph npm ci and complete npm test offline
   f.oldSha = f.git('rev-parse', 'HEAD');
   // Include uncommitted corrections in the disposable candidate, retaining the
   // real package, lockfile, suite, and all reachable evidence history.
-  const tracked = execFileSync('/usr/bin/git', ['-C', root, 'ls-files', '-z'], { stdio: ['ignore', 'pipe', 'pipe'] }).toString().split('\0').filter(Boolean);
+  const listing = args => execFileSync('/usr/bin/git', ['-C', root, 'ls-files', '-z', ...args],
+    {stdio:['ignore','pipe','pipe']}).toString().split('\0').filter(Boolean);
+  const tracked = [...new Set([...listing(['--cached']),
+    ...listing(['--others','--exclude-standard','--','src','test','docs'])])];
+  const manifest = Object.fromEntries(tracked.map(name => [name,
+    require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root,name))).digest('hex')]));
+  fs.mkdirSync(f.stageRoot,{recursive:true});
+  fs.writeFileSync(path.join(f.stageRoot,'candidate-source-manifest.json'),JSON.stringify(manifest,null,2)+'\n');
   for (const name of tracked) {
     fs.mkdirSync(path.dirname(path.join(f.checkout, name)), { recursive: true });
     fs.copyFileSync(path.join(root, name), path.join(f.checkout, name));

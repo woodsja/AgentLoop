@@ -11,112 +11,7 @@ const { promisify } = require('node:util');
 const state = require('../src/autopilot-state');
 const { validateDeploymentCandidate } = require('../src/deploy-preflight');
 
-// Load the private URL dependency only in tests. No observer/output is faked:
-// every command, including the shipping ls-remote implementation, runs real Git.
-function testValidator(remote, onObservation, onCommand = () => {}) {
-  const filename = require.resolve('../src/deploy-preflight');
-  const realRequire = createRequire(filename);
-  const observedExec = (...args) => execFile(...args);
-  observedExec[promisify.custom] = async (...args) => {
-    onCommand(...args);
-    if (args[1].includes('ls-remote') && !args[1].includes('--get-url')) onObservation(...args);
-    const result = await promisify(execFile)(...args);
-    // Git 2.43 can succeed despite missing-parent diagnostics; never hide them.
-    if (args[1].includes('merge-base')) assert.doesNotMatch(result.stderr, /^(?:error|fatal|warning):/m);
-    return result;
-  };
-  const localRequire = name => name === 'node:child_process'
-    ? { execFile: observedExec } : realRequire(name);
-  const loaded = { exports: {} };
-  const source = fs.readFileSync(filename, 'utf8') +
-    '\nmodule.exports.validateForTest = (issue, options) => validateCandidate(issue, options, testOnlyCanonicalUrl);';
-  new Function('require', 'module', 'exports', 'testOnlyCanonicalUrl', source)(
-    localRequire, loaded, loaded.exports, remote);
-  return remote === undefined ? loaded.exports.validateDeploymentCandidate : loaded.exports.validateForTest;
-}
-
-function fixture(t, content = 'candidate\n', { installedAttributes, candidateAttributes, priorHistory = false, staleBase = false } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-preflight-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const checkout = path.join(root, 'checkout');
-  const remote = path.join(root, 'origin.git');
-  fs.mkdirSync(checkout);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
-  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' });
-  const git = (...args) => execFileSync('git', ['-C', checkout, ...args], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  const rawGit = (...args) => spawnSync('git', ['-C', checkout, ...args], {
-    env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000,
-  });
-  git('init', '-b', 'ralph-dev');
-  git('config', 'user.name', 'Preflight Test');
-  git('config', 'user.email', 'preflight@example.invalid');
-  git('config', 'commit.gpgsign', 'false');
-  git('init', '--bare', remote);
-  // Writes and the real read-only observation use the disposable bare remote.
-  let beforeRemote;
-  let onCommand;
-  const observations = [];
-  const commands = [];
-  const validate = testValidator(remote, (file, args, options) => {
-    observations.push({ file, args, options });
-    if (beforeRemote) beforeRemote();
-  }, (file, args, options) => {
-    commands.push({ file, args, options });
-    if (onCommand) onCommand(file, args, options);
-  });
-  git('remote', 'add', 'origin', 'git@github.com:woodsja/AgentLoop.git');
-  if (installedAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), installedAttributes);
-  const commit = text => {
-    fs.writeFileSync(path.join(checkout, 'file.txt'), text);
-    git('add', '.'); git('commit', '-m', 'fixture');
-    return git('rev-parse', 'HEAD');
-  };
-  if (priorHistory || staleBase) commit('earlier installed history\n');
-  const fork = staleBase ? commit('installed\n') : undefined;
-  if (staleBase) {
-    fs.writeFileSync(path.join(checkout, 'base.txt'), 'another installed change\n');
-    git('add', '.'); git('commit', '-m', 'base advanced after branch fork');
-  }
-  const oldSha = staleBase ? git('rev-parse', 'HEAD') : commit('installed\n');
-  git('checkout', '-b', 'ralph/issue-28', ...(staleBase ? [fork] : []));
-  const side = staleBase ? commit('first reviewed side commit\n') : undefined;
-  if (candidateAttributes) fs.writeFileSync(path.join(checkout, '.gitattributes'), candidateAttributes);
-  const head = commit(content);
-  git('checkout', 'ralph-dev');
-  git('merge', '--no-ff', 'ralph/issue-28', '-m', 'approved merge');
-  const newSha = git('rev-parse', 'HEAD');
-  git('push', remote, 'ralph-dev');
-  git('reset', '--hard', oldSha);
-  const configPath = path.join(root, 'projects.json');
-  const project = {
-    enabled: true, repo: 'woodsja/AgentLoop', checkout, worktreeRoot: root,
-    stateDir: path.join(root, 'state'), baseBranch: 'ralph-dev',
-    readyLabel: 'ready-for-agent', humanLabel: 'ready-for-human', worker: 'codex',
-    verification: 'npm test && git diff --check', ciWorkflow: 'CI', reviewPolicy: 'always', autoMerge: true,
-  };
-  const configure = () => fs.writeFileSync(configPath, JSON.stringify({ ralph: project }));
-  configure();
-  const store = state.createJobStore(project.stateDir);
-  const job = state.createJob({ projectName: 'ralph', repo: project.repo, issue: { number: 28, title: 'candidate' },
-    branch: 'ralph/issue-28', worktreePath: checkout, now: store.now });
-  state.recordVerification(job, project.verification, { passed: true, exitCode: 0, timedOut: false, stdout: 'passed', stderr: '' });
-  state.recordDelivery(job, { commit: head });
-  state.recordPullRequest(job, { number: 128, url: 'https://github.com/woodsja/AgentLoop/pull/128' });
-  state.recordReview(job, { reviewer: 'claude:opus', verdict: 'PASS', commit: head, policy: 'always', findings: [], attempt: state.beginReviewAttempt(job) });
-  state.recordCiState(job, { state: 'green', headCommit: head, prNumber: 128, requiredWorkflow: 'CI', runs: [{
-    databaseId: 1, workflowName: 'CI', status: 'completed', conclusion: 'success', name: null,
-    url: null, startedAt: null, updatedAt: null,
-  }] });
-  state.recordMerge(job, { prNumber: 128, approvedHead: head, commit: newSha, repo: project.repo, issueClosed: true });
-  state.markTerminal(job, 'merged');
-  const save = () => store.save(job);
-  save();
-  return { root, checkout, remote, configPath,
-    setBeforeRemote: callback => { beforeRemote = callback; },
-    setOnCommand: callback => { onCommand = callback; },
-    observationCount: () => observations.length, observations, commands, git, rawGit, commit, oldSha, newSha, head, fork, side, job, store, save, project, configure,
-    validate: () => validate(28, { configPath }) };
-}
+const { fixture, testValidator } = require('./deploy-preflight-fixture');
 
 // Compare every byte, including config, durable evidence, index, and refs.
 function snapshot(directory) {
@@ -166,9 +61,9 @@ for (const kind of ['untracked', 'unstaged', 'staged', 'branch', 'detached', 'or
     if (kind === 'branch') f.git('checkout', '-b', 'main');
     if (kind === 'detached') f.git('checkout', '--detach');
     if (kind === 'origin') f.git('remote', 'set-url', 'origin', f.remote);
-    if (kind === 'missing remote ref') f.git('push', f.remote, ':ralph-dev');
+    if (kind === 'missing remote ref') f.removeRemoteRef();
     if (kind === 'stale remote tracking ref') {
-      f.git('push', '--force', f.remote, `${f.oldSha}:refs/heads/ralph-dev`);
+      f.publish(f.oldSha);
       f.git('update-ref', 'refs/remotes/origin/ralph-dev', f.newSha);
     }
     if (kind === 'non-FF') f.commit('divergent installed commit\n');
@@ -210,7 +105,7 @@ for (const [name, change] of Object.entries(invalidEvidence)) {
 
 test('accepts a fast-forward whose target is the exact reviewed head', async t => {
   const f = fixture(t);
-  f.git('push', '--force', f.remote, `${f.head}:refs/heads/ralph-dev`);
+  f.publish(f.head);
   f.job.merge.commit = f.head; f.save();
   assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.head, noOp: false });
 });
@@ -290,7 +185,7 @@ test('rejects a real remote commit unrelated to the exact approved head', async 
   const f = fixture(t);
   f.git('checkout', '--orphan', 'unrelated');
   const unrelated = f.commit('unrelated\n');
-  f.git('push', '--force', f.remote, `${unrelated}:refs/heads/ralph-dev`);
+  f.publish(unrelated);
   f.git('checkout', 'ralph-dev');
   f.job.merge.commit = unrelated; f.save();
   await assert.rejects(f.validate(), /exact reviewed head/);
@@ -339,7 +234,7 @@ for (const kind of ['merge', 'fast-forward']) {
     else f.git('merge', '--ff-only', head);
     const candidate = f.git('rev-parse', 'HEAD');
     if (kind === 'merge') assert.equal(f.git('rev-parse', `${candidate}^1`), intermediate);
-    f.git('push', '--force', f.remote, 'ralph-dev');
+    f.publish();
     f.git('reset', '--hard', f.oldSha);
     f.job.verification.commit = head;
     f.job.delivery.commit = head;
@@ -411,7 +306,7 @@ test('rejects a direct base push before merging the original reviewed head', asy
   const candidate = f.git('rev-parse', 'HEAD');
   assert.equal(f.git('rev-parse', `${candidate}^1`), intermediate);
   assert.equal(f.git('rev-parse', `${candidate}^2`), f.head);
-  f.git('push', '--force', f.remote, 'ralph-dev');
+  f.publish();
   f.git('reset', '--hard', f.oldSha);
   f.job.merge.commit = candidate; f.save();
   const before = snapshot(f.root);
@@ -439,7 +334,7 @@ for (const kind of ['merge', 'fast-forward']) {
     if (kind === 'merge') f.git('merge', '--no-ff', head, '-m', 'approved PR after direct push');
     else head = f.commit('reviewed after direct push\n');
     const candidate = f.git('rev-parse', 'HEAD');
-    f.git('push', '--force', f.remote, 'ralph-dev');
+    f.publish();
     f.git('reset', '--hard', f.oldSha);
     f.job.verification.commit = head;
     f.job.delivery.commit = head;
@@ -544,7 +439,7 @@ for (const key of ['core.sshCommand', 'ssh.variant', 'remote.origin.uploadpack']
 test('vcs helper alias can forge origin, but cannot forge canonical observation', async t => {
   const f = fixture(t);
   const marker = path.join(f.root, 'alias-executed');
-  f.git('push', '--force', f.remote, `${f.oldSha}:refs/heads/ralph-dev`);
+  f.publish(f.oldSha);
   const helper = `preflight-forgery-${process.pid}`;
   f.git('config', 'remote.origin.vcs', helper);
   f.git('config', `alias.remote-${helper}`,
@@ -586,7 +481,7 @@ for (const [key, value] of Object.entries({
     assert.deepEqual(await f.validate(), { oldSha: f.oldSha, newSha: f.newSha, noOp: false });
     assert.deepEqual(snapshot(f.root), before);
     // Correct config isolation must also reject a real stale remote.
-    f.git('push', '--force', f.remote, `${f.oldSha}:refs/heads/ralph-dev`);
+    f.publish(f.oldSha);
     await assert.rejects(f.validate(), /exact origin\/ralph-dev target/);
   });
 }
@@ -637,7 +532,7 @@ test('observation uses config-free scratch metadata and a controlled environment
 });
 
 test('public interface fixes the production canonical URL and permits only HTTPS', async t => {
-  assert.deepEqual(Object.keys(require('../src/deploy-preflight')), ['validateDeploymentCandidate']);
+  assert.deepEqual(Object.keys(require('../src/deploy-preflight')), ['validateDeploymentCandidate', 'testing']);
   assert.equal(validateDeploymentCandidate.length, 2);
   const f = fixture(t);
   const stopped = new Error('stop before contacting production');
@@ -697,7 +592,7 @@ test('forged raw merge parents cannot hide an unreviewed direct push', async t =
   const intermediate = f.git('rev-parse', 'HEAD');
   f.git('merge', '--no-ff', f.head, '-m', 'approved merge');
   const candidate = f.git('rev-parse', 'HEAD');
-  f.git('push', '--force', f.remote, 'ralph-dev');
+  f.publish();
   f.git('reset', '--hard', f.oldSha);
   f.job.merge.commit = candidate; f.save();
   const forged = f.git('cat-file', 'commit', candidate).replace(`parent ${intermediate}`, `parent ${f.oldSha}`) + '\n';
@@ -1023,4 +918,55 @@ test('raw byte comparison rejects attribute-normalized worktree content', async 
   });
   await assert.rejects(f.validate(), /checkout is dirty/);
   assert.equal(f.commands.filter(c => c.args.includes('status')).length, 1);
+});
+
+for (const staleBase of [false, true]) {
+  test(`real merge-base result observer is mandatory (stale base: ${staleBase})`, async t => {
+    const f = fixture(t, 'candidate\n', { staleBase, priorHistory: true });
+    const marker = new Error('post-execution observer reached');
+    let observed = 0;
+    f.setOnResult((result, file, args, options) => {
+      if (!args.includes('merge-base')) return;
+      observed++;
+      // Independently repeat the exact real command while its private objects
+      // still exist. No fabricated output or patched shipping module is used.
+      const real = spawnSync(file, args, options);
+      assert.equal(real.status, 0);
+      assert.equal(result.stdout, real.stdout);
+      assert.equal(result.stderr, real.stderr);
+      assert.equal(result.stderr, '');
+      throw marker;
+    });
+    await assert.rejects(f.validate(), error => error === marker);
+    assert.equal(observed, 1);
+  });
+}
+
+test('real malformed stale-base boundary cannot silently succeed with missing-parent diagnostics', async t => {
+  const f = fixture(t, 'candidate\n', { staleBase: true });
+  let result;
+  f.setOnCommand((file, args, options) => {
+    if (!args.includes('merge-base')) return;
+    // Deliberately lose the excluded side boundary just before the real Git
+    // walk. Its older parent is absent from the private verified object store.
+    fs.writeFileSync(path.join(options.cwd, 'shallow'), `${f.oldSha}\n`);
+  });
+  f.setOnResult((value, file, args) => { if (args.includes('merge-base')) result = value; });
+  await assert.rejects(f.validate(), error => {
+    const stderr = result?.stderr ?? error.stderr;
+    assert.match(stderr, /^(?:error|fatal|warning):/m);
+    t.diagnostic(JSON.stringify({ git: f.git('--version'), successfulCommand: Boolean(result), stderr }));
+    return true;
+  });
+});
+
+test('merge-base result guard rejects all diagnostic severities even on successful results', () => {
+  const { assertCommandResult } = require('./deploy-preflight-fixture');
+  // Unit inputs for the assertion policy; the integration tests above observe
+  // real Git output. Legitimate stderr from other commands is allowed.
+  for (const severity of ['error', 'fatal', 'warning']) {
+    const result = { stdout: '', stderr: `prefix\n${severity}: missing parent\n` };
+    assert.throws(() => assertCommandResult(result, 'git', ['merge-base', '--is-ancestor']), assert.AssertionError);
+    assert.doesNotThrow(() => assertCommandResult(result, 'git', ['status']));
+  }
 });
