@@ -34,7 +34,17 @@ async function runCase(testCase) {
  const worktreeRoot=path.join(root,'worktrees');fs.mkdirSync(worktreeRoot);
  const marker = 'token=owner-secret /tmp/private/vm-file <script>alert(1)</script>\r\nmultiline failure\n';
  const scenarioPath=path.join(root,'scenario.json');const mockState=path.join(root,'mock-state');
- fs.writeFileSync(scenarioPath,JSON.stringify({engine:{worker:[{write:'answer',contents:'wrong',touchState:false,stdout:marker,stderr:'worker stderr\n',earlyStdout:testCase==='transcript-crash'?marker:undefined,latencyMs:testCase==='transcript-crash'?10000:0},{write:'answer',contents:'42',touchState:false}],critic:testCase==='critic-reject' ? ['FAIL - not acceptable'] : testCase==='critic-invalid' ? ['INVALID'] : [{verdict:'FAIL - answer was wrong',stderr:marker},'PASS']}}));
+ const largeFix = 'Correct the implementation using this entire diagnostic: ' + 'exact-fix-block '.repeat(1300) + 'END_FIX token=owner /tmp/failure';
+ const critic = testCase === 'critic-reject' ? ['FAIL - not acceptable']
+   : testCase === 'critic-invalid' ? ['INVALID']
+   : testCase === 'continue' ? ['CONTINUE - done: initial implementation; next: validate exact answer', 'PASS']
+   : testCase === 'no-change' ? ['PASS']
+   : testCase === 'large-fix' ? ['FAIL - ' + largeFix, 'PASS']
+   : [{verdict:'FAIL - answer was wrong',stderr:marker},'PASS'];
+ const worker = testCase === 'no-change' ? [{noChange:true}]
+   : [{write:'answer',contents:'wrong',touchState:false,stdout:marker,stderr:'worker stderr\n',earlyStdout:['transcript-crash','cancel-worker'].includes(testCase)?marker:undefined,latencyMs:['transcript-crash','cancel-worker'].includes(testCase)?10000:0},
+      {write:'answer',contents:'42',touchState:false}];
+ fs.writeFileSync(scenarioPath,JSON.stringify({engine:{worker,critic}}));
  const project={enabled:true,repo:'fixture/none',checkout,worktreeRoot,baseBranch:'main',worker:'codex',reviewPolicy:'always',reviewModel:'opus',implementationStrategy:'worker-critic-loop',autoMerge:false,
   readyLabel:'ready-for-agent',humanLabel:'ready-for-human',maxAttempts:2,stateDir:path.join(root,'r1-jobs'),verification:`node -e "if(require('fs').readFileSync('answer','utf8') !== '42')process.exit(1);require('fs').writeFileSync('${path.join(worktreeRoot, 'issue-5', 'verified-at')}',new Date().toISOString())"`};
  if (testCase === 'transcript') {
@@ -58,6 +68,31 @@ async function runCase(testCase) {
   let port = await launch();
   const created=await request(port,'/api/r1/jobs',{project:'demo',issue:5,title:'Add answer'});
   assert.match(created.id,/^t-[a-f0-9]{8}$/);
+  if (testCase === 'cancel-worker') {
+    await until(async () => {
+      const page = await request(port, `/api/log/${created.id}?raw=1&bytes=262144`);
+      const records = Buffer.from(page.base64 || '', 'base64').toString().trim().split('\n').flatMap(line=>{ try{return [JSON.parse(line)];}catch{return [];} });
+      const workerOutput = Buffer.concat(records.filter(x=>x.event==='output' && x.role==='worker' && x.base64).map(x=>Buffer.from(x.base64,'base64'))).toString();
+      return workerOutput.includes(marker);
+    }, 20000);
+    const index = fs.readdirSync(path.join(queue, 'r1-child-index', created.id)).find(name=>name.endsWith('.json'));
+    const child = JSON.parse(fs.readFileSync(path.join(queue, 'r1-child-index', created.id, index)));
+    const active = JSON.parse(fs.readFileSync(path.join(queue, 'tasks/running', child.id + '.json')));
+    assert.ok(active.workerPid > 0 && active.workerStartTime, 'the worker was a real identified child process');
+    assert.deepEqual(await request(port, '/api/cancel', { id: created.id }), { ok: true });
+    const done = await until(async () => {
+      try { const x = JSON.parse(fs.readFileSync(path.join(queue, 'tasks/done', child.id + '.json'))); return x.status === 'cancelled' && x; }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    }, 18000);
+    assert.equal(done.r1Child.parentJobId, created.id);
+    assert.equal(lines(path.join(root, 'delivery')).length, 0, 'cancelled worker cannot trigger delivery');
+    const parent = await until(async () => { const x = await request(port, `/api/r1/jobs/${created.id}`); return ['blocked', 'failed', 'cancelled'].includes(x.status) && x; }, 18000);
+    assert.notEqual(parent.status, 'passed');
+    // The fake CLI records an invocation only on exit; a killed worker must
+    // never have completed and written its second implementation step.
+    assert.equal(lines(path.join(mockState, 'invocations.ndjson')).filter(x=>x.role==='worker').length, 0);
+    return;
+  }
   if (testCase === 'transcript-crash') {
     const before = await until(async () => {
       const page = await request(port, `/api/log/${created.id}?raw=1&bytes=262144`);
@@ -125,11 +160,20 @@ async function runCase(testCase) {
     assert.equal((await request(port, `/api/r1/jobs/${created.id}`)).evidence.verification.stderr, 'test: owner failure\nstack line\n');
     return;
   }
+  if (testCase === 'no-change') {
+    assert.ok(['failed', 'blocked'].includes(finished.status));
+    const actual = lines(path.join(mockState, 'invocations.ndjson'));
+    assert.deepEqual(actual.map(x=>x.role), ['worker','critic']);
+    assert.equal(actual[0].changed, false);
+    assert.equal(actual[1].verdict, 'VERDICT: PASS');
+    assert.equal(lines(path.join(root,'delivery')).length,0, 'deterministic test must veto critic PASS without source changes');
+    return;
+  }
   if (testCase === 'critic-invalid') {
     assert.ok(['blocked', 'failed'].includes(finished.status), `Invalid critic was accepted: ${finished.status}`);
     const seen = lines(path.join(mockState, 'invocations.ndjson'));
     const critics = seen.filter(item => item.role === 'critic');
-    assert.ok(critics.length >= 1, 'an actual Claude critic process must run');
+    assert.ok(critics.length >= 1 && critics.length <= 3, 'malformed reviews must consume a bounded cycle budget');
     assert.ok(critics.every(item => item.verdict === 'VERDICT: INVALID'), 'all returned verdicts are invalid');
     assert.equal(lines(path.join(root, 'delivery')).length, 0, 'no PR can be delivered from invalid reviews');
     assert.equal(lines(path.join(root, 'ci')).length, 0);
@@ -140,7 +184,7 @@ async function runCase(testCase) {
     assert.ok(['blocked','failed'].includes(finished.status), `Unexpected rejection status: ${finished.status}`);
     const rejectedInvocations=lines(path.join(mockState,'invocations.ndjson'));
     const critics=rejectedInvocations.filter(x=>x.role==='critic');
-    assert.ok(critics.length>=2,'Critic must actually reject repeatedly, not merely fail to start');
+    assert.ok(critics.length>=2 && critics.length<=3,'Critic must reject with a bounded cycle budget');
     assert.ok(critics.every(x=>/VERDICT: FAIL/.test(x.verdict)),'All critic attempts must reject');
     assert.ok(rejectedInvocations.some(x=>x.role==='worker'),'Codex must actually run');
     assert.equal(lines(path.join(root,'delivery')).length,0);
@@ -152,6 +196,17 @@ async function runCase(testCase) {
   assert.equal(finished.evidence.outcome,'ready_for_human_merge');
   const invocations=lines(path.join(mockState,'invocations.ndjson'));
   assert.deepEqual(invocations.map(x=>[x.engine,x.role]),[['codex','worker'],['claude','critic'],['codex','worker'],['claude','critic']]);
+  if (testCase === 'continue') {
+    const childId = fs.readdirSync(path.join(queue,'r1-child-index',created.id)).find(x=>x.endsWith('.json'));
+    const index = JSON.parse(fs.readFileSync(path.join(queue,'r1-child-index',created.id,childId)));
+    const loop = JSON.parse(fs.readFileSync(path.join(queue,'tasks','done',index.id+'.json')));
+    assert.deepEqual(loop.cycles.map(x=>x.verdict), ['CONTINUE','PASS']);
+    assert.equal(loop.done.length, 1, 'CONTINUE checkpoints one completed plan item');
+    assert.equal(loop.status, 'passed');
+  }
+  if (testCase === 'large-fix') {
+    assert.equal(invocations[2].prompt.split('--- FIXES START ---\n')[1].split('\n--- FIXES END ---')[0],largeFix, 'all critic feedback reaches the next Codex context exactly');
+  }
   assert.deepEqual(invocations.map(x=>x.model),['gpt-6.1-sol','opus','gpt-6.1-sol','opus']);
   assert.ok(invocations[1].argv.includes('dontAsk'));
   assert.ok(invocations[1].argv.includes('--restricted'));
@@ -176,6 +231,7 @@ async function runCase(testCase) {
   assert.equal(identity.parentJobId,created.id);
   const childState=JSON.parse(fs.readFileSync(path.join(queue,'tasks','done',`${identity.id}.json`)));
   assert.equal(childState.status,'passed');
+  assert.equal(childState.autoCommit,false, 'the canonical parent alone owns delivery commits');
   assert.equal(childState.criticEngine,'claude');
   assert.equal(childState.cycles.at(-1).verdict,'PASS');
   const parentState=JSON.parse(fs.readFileSync(path.join(root,'r1-jobs','issue-5.json')));
@@ -196,3 +252,9 @@ test('invalid critic verdict cannot become a passing delivery', {timeout:69000},
 test('complete worker, critic and failed verification output is paged verbatim after daemon restart', {timeout:69000}, () => runCase('transcript'));
 
 test('daemon SIGKILL during active child execution preserves captured output through recovery', {timeout:69000}, () => runCase('transcript-crash'));
+
+test('R1 child CONTINUE advances its plan and hands a final Claude PASS to the parent', {timeout:69000}, () => runCase('continue'));
+test('a Claude PASS cannot bypass deterministic verification when Codex made no change', {timeout:69000}, () => runCase('no-change'));
+test('the full large Claude correction reaches the next Codex worker byte-for-byte', {timeout:69000}, () => runCase('large-fix'));
+
+test('cancelling an active R1 parent kills its identified Codex child and prevents delivery', {timeout:69000}, () => runCase('cancel-worker'));

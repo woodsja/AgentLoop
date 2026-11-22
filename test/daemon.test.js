@@ -225,15 +225,59 @@ test('legacy archival failure cannot prevent other queued jobs from being retire
       if (result.id === first.id) throw new Error('simulated archived-result storage failure');
       return originalWrite(result);
     };
+    const terminalEvents = id => fs.readFileSync(isolated.store.executionPath(id), 'utf8')
+      .trim().split('\n').map(JSON.parse).filter(event => event.event === 'legacy_job_terminal');
     isolated.daemon.fillSlots();
     assert.equal(isolated.store.readTask(first.id, 'pending').id, first.id);
+    assert.equal(terminalEvents(first.id).length, 0, 'failed archival attempt is not a terminal transition');
     assert.equal(isolated.store.readTask(second.id, 'done').reason, 'legacy_execution_retired');
     isolated.store.writeResult = originalWrite;
     isolated.daemon.fillSlots();
     assert.equal(isolated.store.readTask(first.id, 'done').reason, 'legacy_execution_retired');
+    assert.equal(terminalEvents(first.id).length, 1, 'retried archival produces one successful terminal transition');
+    isolated.daemon.fillSlots();
+    assert.equal(terminalEvents(first.id).length, 1, 'subsequent ticks cannot duplicate a terminal transition');
   } finally {
     isolated.store.writeResult = originalWrite;
     isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('partial legacy archival resumes once after a fresh daemon without replay or lost logs', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-partial-restart-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const config = { allowedProjects: { demo: project }, maxConcurrent: 1,
+    enginePaths: { codex: '/nonexistent/highlander-worker-must-never-start' } };
+  let id;
+  let captured;
+  const first = isolatedDaemon(config, directory);
+  try {
+    const item = first.store.enqueueTask({ project: 'demo', engine: 'codex', prompt: 'Retired work cannot run.' });
+    id = item.id;
+    first.store.appendExecution(id, { event: 'output', role: 'worker', stream: 'stdout', base64: Buffer.from('earlier captured log\n').toString('base64') });
+    captured = fs.readFileSync(first.store.executionPath(id));
+    const realMove = first.store.moveTask;
+    first.store.moveTask = () => { throw new Error('simulated crash before archive rename'); };
+    try { first.daemon.fillSlots(); } finally { first.store.moveTask = realMove; }
+    assert.equal(first.store.readTask(id, 'pending').status, 'failed', 'intermediate task record is durable');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(first.store.paths.results, id + '.json'))).status, 'failed');
+    assert.equal(fs.readFileSync(first.store.executionPath(id), 'utf8').includes('legacy_job_terminal'), false);
+  } finally { first.restore(); }
+  const restarted = isolatedDaemon(config, directory);
+  try {
+    restarted.daemon.fillSlots();
+    restarted.daemon.fillSlots();
+    const events = fs.readFileSync(restarted.store.executionPath(id), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(events.filter(event => event.event === 'legacy_job_terminal').map(event => event.reason), ['legacy_execution_retired']);
+    assert.deepEqual(fs.readFileSync(restarted.store.executionPath(id)).subarray(0, captured.length), captured);
+    assert.equal(restarted.store.readTask(id, 'done').reason, 'legacy_execution_retired');
+    assert.deepEqual(restarted.store.listTasks('running'), []);
+    assert.deepEqual(restarted.store.listTasks('pending'), []);
+    assert.equal(restarted.store.readTask(id, 'done').prompt, 'Retired work cannot run.');
+  } finally {
+    restarted.restore();
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

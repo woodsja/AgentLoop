@@ -46,6 +46,21 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
   try {
     let port = await launch();
     const bad = await request(port, '/api/r1/jobs', { project: 'demo', issue: 99 }); assert.equal(bad.status, 400);
+    // An alien Git repository must not gain executor access even when its
+    // linked worktree occupies a path explicitly named by the owner registry.
+    const alien = path.join(root, 'alien-repo'); fs.mkdirSync(alien);
+    const alienGit = (...args) => execFileSync('git', args, { cwd: alien, stdio: 'pipe' });
+    alienGit('init', '-b', 'main'); alienGit('config', 'user.name', 'Alien');
+    alienGit('config', 'user.email', 'alien@example.invalid');
+    fs.writeFileSync(path.join(alien, 'README'), 'other repository');
+    alienGit('add', '.'); alienGit('commit', '-m', 'other');
+    fs.mkdirSync(worktreeRoot, { recursive: true });
+    const alienWorktree = path.join(worktreeRoot, 'issue-4');
+    alienGit('worktree', 'add', '-b', 'alien-branch', alienWorktree);
+    try {
+      const denied = await request(port, '/api/r1/jobs', { project: 'demo', issue: 4, worktree: 'issue4' });
+      assert.equal(denied.status, 400, 'wrong-repository linked worktree must be refused at submission');
+    } finally { alienGit('worktree', 'remove', '--force', alienWorktree); }
     // The surviving HTTP admission must reject spoofed project paths/worktrees before work starts.
     for (const forged of [
       { project: 'demo', issue: 1, cwd: '/tmp/forged' },
@@ -189,7 +204,9 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     await halt(); port = await launch();
     assert.deepEqual(await get(id), completed);
     const before = fs.readFileSync(path.join(root, 'reviews'), 'utf8');
-    const replay = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 })).value.id;
+    const replayResponse = await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 });
+    assert.equal(replayResponse.status, 201, JSON.stringify(replayResponse.value));
+    const replay = replayResponse.value.id;
     await until(async () => (await get(replay)).status === 'passed');
     assert.equal(fs.readFileSync(path.join(root, 'reviews'), 'utf8'), before, 'persisted exact-SHA approval is reused');
     assert.equal((await request(port, '/api/r1/jobs/unknown')).status, 404);

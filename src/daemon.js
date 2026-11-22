@@ -1581,10 +1581,13 @@ function closeRetiredJob(task, stage, reason = 'legacy_execution_retired') {
   const ended = { ...task, status: 'failed', reason, summary, finishedAt };
   const result = { id: task.id, status: 'failed', reason, summary, finishedAt,
     durationMs: taskTime(task, 'startedAt') ? Math.max(0, Date.now() - taskTime(task, 'startedAt')) : 0 };
-  recorder(store, task.id)('legacy_job_terminal', { reason, stage, summary });
+  // A failed result/task/move write is not terminal: leave the original stage
+  // for fail-closed recovery. Emit the terminal event only after the durable
+  // state is actually in done, so retries cannot claim completion twice.
   store.writeResult(result);
   store.writeTask(ended, stage);
   store.moveTask(task.id, stage, 'done');
+  recorder(store, task.id)('legacy_job_terminal', { reason, stage, summary });
   try { store.appendLogLine(task.id, summary); }
   catch (error) { console.error('Failed to append archived job log: ' + error.message); }
   recordEvent('fail', { id: task.id, reason });
