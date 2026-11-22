@@ -152,6 +152,67 @@ test('retired pending direct tasks are closed without launching a worker', async
   }
 });
 
+test('restart archives an interrupted historical direct task without replay or lost evidence', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-restart-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({
+    dashboardPort: 0, allowedProjects: { demo: project }, maxConcurrent: 1,
+    enginePaths: { codex: '/nonexistent/highlander-legacy-worker' },
+  }, directory);
+  let started = false;
+  try {
+    const legacy = isolated.store.enqueueTask({ project: 'demo', engine: 'codex', cwd: project, status: 'running', prompt: 'Never rerun this task', startedAt: new Date().toISOString() });
+    isolated.store.moveTask(legacy.id, 'pending', 'running');
+    const previouslyCaptured = Buffer.from('raw worker output before interruption\n');
+    isolated.store.appendExecution(legacy.id, { event: 'output', role: 'worker', stream: 'stdout', base64: previouslyCaptured.toString('base64') });
+    const before = fs.readFileSync(isolated.store.executionPath(legacy.id));
+    isolated.daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+    started = true;
+    const done = isolated.store.readTask(legacy.id, 'done');
+    assert.equal(done.status, 'failed');
+    assert.equal(done.reason, 'daemon_restarted');
+    const result = JSON.parse(fs.readFileSync(path.join(isolated.store.paths.results, legacy.id + '.json'), 'utf8'));
+    assert.equal(result.reason, 'daemon_restarted');
+    assert.equal(isolated.store.listTasks('running').length, 0);
+    assert.equal(isolated.store.listTasks('pending').length, 0);
+    const after = fs.readFileSync(isolated.store.executionPath(legacy.id));
+    assert.deepEqual(after.subarray(0, before.length), before, 'all earlier owner-visible captured bytes survive recovery');
+    const event = after.toString('utf8').trim().split('\n').map(JSON.parse).find(entry => entry.event === 'output' && entry.role === 'worker');
+    assert.deepEqual(Buffer.from(event.base64, 'base64'), previouslyCaptured);
+  } finally {
+    if (started) { await isolated.daemon.stop(() => {}); isolated.daemon.resetStopping(); }
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('legacy archival failure cannot prevent other queued jobs from being retired', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-archive-fail-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project }, maxConcurrent: 2 }, directory);
+  const originalWrite = isolated.store.writeResult;
+  try {
+    const first = isolated.store.enqueueTask({ project: 'demo', priority: 1, prompt: 'legacy first' });
+    const second = isolated.store.enqueueLoop({ project: 'demo', priority: 2, projectPath: project });
+    isolated.store.writeResult = result => {
+      if (result.id === first.id) throw new Error('simulated archived-result storage failure');
+      return originalWrite(result);
+    };
+    isolated.daemon.fillSlots();
+    assert.equal(isolated.store.readTask(first.id, 'pending').id, first.id);
+    assert.equal(isolated.store.readTask(second.id, 'done').reason, 'legacy_execution_retired');
+    isolated.store.writeResult = originalWrite;
+    isolated.daemon.fillSlots();
+    assert.equal(isolated.store.readTask(first.id, 'done').reason, 'legacy_execution_retired');
+  } finally {
+    isolated.store.writeResult = originalWrite;
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('historical HTTP jobs remain inspectable after removing new direct submission', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));
   const project = path.join(directory, 'registered-project');

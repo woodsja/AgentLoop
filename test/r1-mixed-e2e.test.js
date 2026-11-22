@@ -34,7 +34,7 @@ async function runCase(testCase) {
  const worktreeRoot=path.join(root,'worktrees');fs.mkdirSync(worktreeRoot);
  const marker = 'token=owner-secret /tmp/private/vm-file <script>alert(1)</script>\r\nmultiline failure\n';
  const scenarioPath=path.join(root,'scenario.json');const mockState=path.join(root,'mock-state');
- fs.writeFileSync(scenarioPath,JSON.stringify({engine:{worker:[{write:'answer',contents:'wrong',touchState:false,stdout:marker,stderr:'worker stderr\n',earlyStdout:testCase==='transcript-crash'?marker:undefined,latencyMs:testCase==='transcript-crash'?10000:0},{write:'answer',contents:'42',touchState:false}],critic:testCase==='critic-reject' ? ['FAIL - not acceptable'] : [{verdict:'FAIL - answer was wrong',stderr:marker},'PASS']}}));
+ fs.writeFileSync(scenarioPath,JSON.stringify({engine:{worker:[{write:'answer',contents:'wrong',touchState:false,stdout:marker,stderr:'worker stderr\n',earlyStdout:testCase==='transcript-crash'?marker:undefined,latencyMs:testCase==='transcript-crash'?10000:0},{write:'answer',contents:'42',touchState:false}],critic:testCase==='critic-reject' ? ['FAIL - not acceptable'] : testCase==='critic-invalid' ? ['INVALID'] : [{verdict:'FAIL - answer was wrong',stderr:marker},'PASS']}}));
  const project={enabled:true,repo:'fixture/none',checkout,worktreeRoot,baseBranch:'main',worker:'codex',reviewPolicy:'always',reviewModel:'opus',implementationStrategy:'worker-critic-loop',autoMerge:false,
   readyLabel:'ready-for-agent',humanLabel:'ready-for-human',maxAttempts:2,stateDir:path.join(root,'r1-jobs'),verification:`node -e "if(require('fs').readFileSync('answer','utf8') !== '42')process.exit(1);require('fs').writeFileSync('${path.join(worktreeRoot, 'issue-5', 'verified-at')}',new Date().toISOString())"`};
  if (testCase === 'transcript') {
@@ -125,6 +125,17 @@ async function runCase(testCase) {
     assert.equal((await request(port, `/api/r1/jobs/${created.id}`)).evidence.verification.stderr, 'test: owner failure\nstack line\n');
     return;
   }
+  if (testCase === 'critic-invalid') {
+    assert.ok(['blocked', 'failed'].includes(finished.status), `Invalid critic was accepted: ${finished.status}`);
+    const seen = lines(path.join(mockState, 'invocations.ndjson'));
+    const critics = seen.filter(item => item.role === 'critic');
+    assert.ok(critics.length >= 1, 'an actual Claude critic process must run');
+    assert.ok(critics.every(item => item.verdict === 'VERDICT: INVALID'), 'all returned verdicts are invalid');
+    assert.equal(lines(path.join(root, 'delivery')).length, 0, 'no PR can be delivered from invalid reviews');
+    assert.equal(lines(path.join(root, 'ci')).length, 0);
+    assert.equal(lines(path.join(root, 'final-review')).length, 0);
+    return;
+  }
   if(testCase==='critic-reject') {
     assert.ok(['blocked','failed'].includes(finished.status), `Unexpected rejection status: ${finished.status}`);
     const rejectedInvocations=lines(path.join(mockState,'invocations.ndjson'));
@@ -180,6 +191,7 @@ async function runCase(testCase) {
 
 test('opt-in parent executes Codex FAIL -> Claude critic -> Codex correction -> Claude PASS then R1 gates', {timeout:69000}, () => runCase('accepted'));
 test('rejected final critic never delivers, observes CI, or records final PR review', {timeout:69000}, () => runCase('critic-reject'));
+test('invalid critic verdict cannot become a passing delivery', {timeout:69000}, () => runCase('critic-invalid'));
 
 test('complete worker, critic and failed verification output is paged verbatim after daemon restart', {timeout:69000}, () => runCase('transcript'));
 

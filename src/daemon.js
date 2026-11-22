@@ -1646,8 +1646,17 @@ function fillSlots() {
   const canonical = [];
   for (const entry of pending) {
     const task = store.readTask(entry.id, 'pending');
-    if (task.r1Child || task.workflow === 'r1') canonical.push(entry);
-    else closeRetiredJob(task, 'pending');
+    if (task.r1Child || task.workflow === 'r1') {
+      canonical.push(entry);
+    } else {
+      // A damaged legacy record cannot starve authorized R1 jobs. No retired
+      // executor is started; a failed terminal write leaves the original for
+      // explicit recovery, while the scheduler continues with other entries.
+      try { closeRetiredJob(task, 'pending'); }
+      catch (error) {
+        console.error(`Legacy job ${task.id} could not be archived; no worker started: ${error.message}`);
+      }
+    }
   }
   for (const selected of canonical.slice(0, slots)) {
     const task = store.readTask(selected.id, 'pending');
