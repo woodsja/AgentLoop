@@ -46,6 +46,17 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
   try {
     let port = await launch();
     const bad = await request(port, '/api/r1/jobs', { project: 'demo', issue: 99 }); assert.equal(bad.status, 400);
+    // The surviving HTTP admission must reject spoofed project paths/worktrees before work starts.
+    for (const forged of [
+      { project: 'demo', issue: 1, cwd: '/tmp/forged' },
+      { project: 'demo', issue: 1, projectPath: '/tmp/forged' },
+      { project: 'demo', issue: 1, worktree: '../unrelated' },
+      { project: 'demo', issue: 1, worktree: 'issue4' },
+      { project: 'unregistered', issue: 1 },
+    ]) {
+      const denied = await request(port, '/api/r1/jobs', forged);
+      assert.equal(denied.status, 400, JSON.stringify(forged));
+    }
     const submitted = await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 }); assert.equal(submitted.status, 201);
     const id = submitted.value.id;
     assert.equal(fs.existsSync(path.join(root, 'worker-release')), false, 'HTTP response precedes release of implementation');

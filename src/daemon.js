@@ -14,7 +14,6 @@ const engines = require('./engines');
 const { resolveWorkerScope } = require('./project-registry');
 const state = require('./state');
 const {
-  taskPrompt,
   loopWorkerPrompt,
   polishWorkerPrompt,
   criticPrompt,
@@ -26,7 +25,6 @@ const {
 } = require('./prompts');
 
 const pollMs = 1500;
-const maxResultText = 20000;
 const maxLogLines = 1000;
 const maxEventBytes = 16 * 1024;
 const maxDigestBytes = 1024 * 1024;
@@ -69,11 +67,6 @@ function sortPending(tasks) {
     taskPriority(left) - taskPriority(right)
     || taskTime(left, 'createdAt') - taskTime(right, 'createdAt')
   ));
-}
-
-function trimResult(text) {
-  const value = String(text || '').trim();
-  return value.length > maxResultText ? value.slice(-maxResultText) : value;
 }
 
 function recordActivity(id, engine, line) {
@@ -187,28 +180,6 @@ function terminateLoopWorker(worker) {
     catch { /* Fallback still targets the known direct child. */ }
   }
   terminateWorker(worker.child);
-}
-
-function stopWorker(child) {
-  if (!child.pid) {
-    return;
-  }
-
-  if (process.platform === 'win32') {
-    try {
-      spawnSync(taskkillPath(), ['/pid', String(child.pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-    } catch {
-    }
-    return;
-  }
-
-  try {
-    child.kill('SIGTERM');
-  } catch {
-  }
 }
 
 function bridgePort() {
@@ -582,78 +553,6 @@ function fallbackSummary(text, status, timedOut) {
   }
 
   return status === 'done' ? 'Worker completed.' : 'Worker failed.';
-}
-
-function completeTask(task, details) {
-  const finishedAt = new Date().toISOString();
-  const startedAt = taskTime(task, 'startedAt');
-  const parsed = parseLoopResult(details.resultText);
-  const cancelled = details.cancelled === true;
-  const workerExitedNonzero = !cancelled && !details.forceFailed && !details.timedOut
-    && (details.exitCode !== 0 || details.signal);
-  const invalidLoopResult = !cancelled && !details.forceFailed && !details.timedOut
-    && !workerExitedNonzero && !parsed;
-  let reason = null;
-
-  if (cancelled) {
-    reason = 'cancelled';
-  } else if (details.timedOut) {
-    reason = 'timed_out';
-  } else if (details.reason) {
-    reason = details.reason;
-  } else if (details.forceFailed) {
-    reason = 'worker_failed';
-  } else if (workerExitedNonzero) {
-    reason = 'worker_exited_nonzero';
-  } else if (invalidLoopResult) {
-    reason = 'invalid_loop_result';
-  } else if (parsed.status === 'failed') {
-    reason = 'worker_reported_failure';
-  }
-
-  const status = cancelled ? 'cancelled' : reason ? 'failed' : parsed.status;
-  const result = {
-    id: task.id,
-    status,
-    summary: cancelled
-      ? 'Cancelled.'
-      : details.timedOut
-      ? fallbackSummary(details.resultText, status, true)
-      : invalidLoopResult
-      ? 'worker exited without a valid LOOP_RESULT'
-      : parsed && parsed.summary
-        ? parsed.summary
-        : fallbackSummary(details.resultText, status, details.timedOut),
-    resultText: trimResult(details.resultText),
-    exitCode: details.exitCode,
-    ...(typeof details.costUsd === 'number' ? { costUsd: details.costUsd } : {}),
-    ...(reason ? { reason } : {}),
-    durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
-    finishedAt,
-  };
-  const completedTask = {
-    ...task,
-    status,
-    finishedAt,
-    ...(reason ? { reason } : {}),
-  };
-
-  try {
-    store.writeResult(result);
-    store.writeTask(completedTask, 'running');
-    store.moveTask(task.id, 'running', 'done');
-    if (status === 'cancelled') {
-      recordEvent('cancel', { id: task.id, reason });
-    } else if (status === 'failed') {
-      recordEvent('fail', { id: task.id, reason, ...(workerExitedNonzero ? { code: details.exitCode } : {}) });
-    } else {
-      recordEvent('done', { id: task.id, status });
-    }
-  } catch (error) {
-    console.error(`Failed to finish ${task.id}: ${error.message}`);
-  } finally {
-    runningActivity.delete(task.id);
-  }
 }
 
 function completeLoop(loop, status, summary, reason) {
@@ -1659,133 +1558,6 @@ function startLoop(loop) {
   }
 }
 
-function spawnWorker(task) {
-  const engine = engines.get(task.engine) || engines.get(store.config.defaultEngine);
-  const model = engines.modelFor(engine, store.config, task.model);
-  const cwd = task.cwd ? path.resolve(task.cwd) : path.join(store.paths.root, 'workspace');
-  const outputPath = engine.usesOutputFile
-    ? path.join(store.paths.results, `.${task.id}.${Date.now()}.last-message.tmp`)
-    : null;
-  let child;
-  const record = recorder(store, task.id, { role: 'worker', stage: 'implementation', attempt: 1 });
-
-  try {
-    const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
-    const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
-    child = captureProcess((_file, argv, options) => spawnEngine(engine, argv, options), engines.binary(engine, store.config.enginePaths) || engine.command, args, {
-      cwd: scope.cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    }, record);
-  } catch (error) {
-    record('exception', { name: error.name, message: error.message, stack: error.stack, code: error.code });
-    completeTask(task, {
-      exitCode: null,
-      forceFailed: true,
-      reason: 'worker_start_failed',
-      resultText: `Worker failed to start: ${error.message}`,
-      timedOut: false,
-    });
-    return;
-  }
-
-  const tail = { text: '', message: '', result: '' };
-  let inputFailed = false;
-  let timedOut = false;
-  let settled = false;
-  let timeout;
-  const worker = { child, timeout: null, cancelled: false };
-  activeWorkers.set(task.id, worker);
-  const captureLine = (line) => {
-    try {
-      store.appendLogLine(task.id, line);
-    } catch (error) {
-      console.error(`Failed to write log for ${task.id}: ${error.message}`);
-    }
-
-    trackTail(tail, recordActivity(task.id, engine, line));
-  };
-  const finish = (exitCode, signal, forceFailed = false, reason) => {
-    if (settled || stopping) {
-      return;
-    }
-
-    settled = true;
-    clearTimeout(timeout);
-    activeWorkers.delete(task.id);
-    completeTask(task, {
-      exitCode,
-      signal,
-      forceFailed,
-      reason: timedOut ? 'timed_out' : reason || (inputFailed ? 'worker_input_failed' : undefined),
-      resultText: finalText(engine, outputPath, tail, record),
-      timedOut,
-      cancelled: worker.cancelled,
-      ...(typeof tail.costUsd === 'number' ? { costUsd: tail.costUsd } : {}),
-    });
-  };
-
-  streamLines(child.stdout, captureLine);
-  streamLines(child.stderr, captureLine);
-  child.once('error', (error) => {
-    captureLine(`Worker error: ${error.message}`);
-    finish(null, null, true, 'worker_error');
-  });
-  child.once('close', (code, signal) => finish(code, signal));
-  child.stdin.on('error', (error) => {
-    inputFailed = true;
-    captureLine(`Worker input error: ${error.message}`);
-  });
-
-  const timeoutMin = timeoutMinutes();
-  timeout = setTimeout(() => {
-    timedOut = true;
-    captureLine(`Worker timed out after ${timeoutMin} minutes.`);
-    terminateLoopWorker(worker);
-  }, timeoutMin * 60 * 1000);
-  worker.timeout = timeout;
-
-  try {
-    child.stdin.end(taskPrompt(task));
-  } catch (error) {
-    captureLine(`Worker input error: ${error.message}`);
-    finish(null, null, true, 'worker_input_failed');
-  }
-}
-
-function startTask(task) {
-  const runningTask = {
-    ...task,
-    startedAt: new Date().toISOString(),
-  };
-
-  try {
-    store.moveTask(task.id, 'pending', 'running');
-  } catch (error) {
-    console.error(`Failed to start ${task.id}: ${error.message}`);
-    return;
-  }
-
-  try {
-    store.writeTask(runningTask, 'running');
-    recordEvent('start', { id: task.id });
-    runningActivity.set(task.id, {
-      ts: runningTask.startedAt,
-      text: 'Worker starting.',
-      toolCalls: 0,
-    });
-    spawnWorker(runningTask);
-  } catch (error) {
-    completeTask(runningTask, {
-      exitCode: null,
-      forceFailed: true,
-      reason: 'worker_start_failed',
-      resultText: `Worker failed to start: ${error.message}`,
-      timedOut: false,
-    });
-  }
-}
-
 function failUnauthorizedR1Child(child, error) {
   const failed = {
     ...child, status: 'failed', finishedAt: new Date().toISOString(),
@@ -1796,6 +1568,26 @@ function failUnauthorizedR1Child(child, error) {
   store.writeResult({ id: child.id, status: 'failed', reason: failed.reason,
     finishedAt: failed.finishedAt, summary: failed.summary });
   recordEvent('loop_ended', { id: child.id, status: 'failed', reason: failed.reason });
+}
+
+// Legacy records remain readable, but a pre-upgrade queued task or loop
+// is never allowed to start another executor after admission was retired.
+// This is a terminal recovery transition, not a second job coordinator.
+function closeRetiredJob(task, stage, reason = 'legacy_execution_retired') {
+  const finishedAt = new Date().toISOString();
+  const summary = reason === 'daemon_shutdown'
+    ? 'Daemon shut down before the legacy task finished.'
+    : 'Legacy execution admission retired. No worker or loop was started.';
+  const ended = { ...task, status: 'failed', reason, summary, finishedAt };
+  const result = { id: task.id, status: 'failed', reason, summary, finishedAt,
+    durationMs: taskTime(task, 'startedAt') ? Math.max(0, Date.now() - taskTime(task, 'startedAt')) : 0 };
+  recorder(store, task.id)('legacy_job_terminal', { reason, stage, summary });
+  store.writeResult(result);
+  store.writeTask(ended, stage);
+  store.moveTask(task.id, stage, 'done');
+  try { store.appendLogLine(task.id, summary); }
+  catch (error) { console.error('Failed to append archived job log: ' + error.message); }
+  recordEvent('fail', { id: task.id, reason });
 }
 
 const authorizingR1Children = new Set();
@@ -1851,7 +1643,13 @@ function fillSlots() {
   if (!slots) return;
 
   const pending = sortPending(store.listTasks('pending', { dashboard: true }).filter(task => !task.unreadable));
-  for (const selected of pending.slice(0, slots)) {
+  const canonical = [];
+  for (const entry of pending) {
+    const task = store.readTask(entry.id, 'pending');
+    if (task.r1Child || task.workflow === 'r1') canonical.push(entry);
+    else closeRetiredJob(task, 'pending');
+  }
+  for (const selected of canonical.slice(0, slots)) {
     const task = store.readTask(selected.id, 'pending');
     // An orphan child never becomes an ordinary unprivileged loop simply
     // because its parent moved to done/recovery before queue admission.
@@ -1859,14 +1657,10 @@ function fillSlots() {
       failUnauthorizedR1Child(task, new Error('Parent R1 job is not executing.'));
       continue;
     }
-    if (task.workflow === 'r1') {
-      if (store.listTasks('running', { dashboard: true }).length) return;
-      store.moveTask(task.id, 'pending', 'running');
-      r1Jobs.advance(task);
-      return;
-    }
-    if (task.type === 'loop') startLoop(task);
-    else startTask(task);
+    if (store.listTasks('running', { dashboard: true }).length) return;
+    store.moveTask(task.id, 'pending', 'running');
+    r1Jobs.advance(task);
+    return;
   }
 }
 
@@ -2833,12 +2627,7 @@ async function stop(exitFn = process.exit) {
       }
     } else {
       try {
-        completeTask(task, {
-          exitCode: null,
-          forceFailed: true,
-          reason: 'daemon_shutdown',
-          resultText: 'Daemon shut down before the task finished.',
-        });
+        closeRetiredJob(task, 'running', 'daemon_shutdown');
       } catch (error) {
         console.error(`Failed to finalize task ${task.id} on shutdown: ${error.message}`);
       }

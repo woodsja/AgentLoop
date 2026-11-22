@@ -18,11 +18,11 @@ Codex handles implementation; Claude reviews independently. The daemon persists 
 
 ## Why fresh contexts
 
-Each agent invocation starts with a fresh process. Durable job state and the repository carry forward the authorized task and any reviewer findings; no human must copy intermediate results between conversations. Retries are bounded. Historical task and loop records remain readable, but their old admission interfaces are no longer supported.
+Each agent invocation starts with a fresh process. Durable job state and the repository carry forward the authorized task and any reviewer findings; no human must copy intermediate results between conversations. Retries are bounded. Historical task and loop records remain readable, but their old admission interfaces are no longer supported. Pre-upgrade pending legacy tasks and classic loops are moved to a durable failed state without starting a retired worker; any interrupted legacy process is recovered without replay.
 
 ## How it works
 
-1. Register and activate a project in owner-controlled configuration and authorize its worktree policy. Create an exact GitHub issue with the development requirements and required ready label.
+1. Register and activate a project in owner-controlled configuration and authorize its worktree policy. Supply an exact GitHub issue that has **already** received its separately approved executable release and required ready label; creating or drafting an issue alone does not authorize execution.
 2. Submit `{project, issue}` once with `submit_r1_job`, or choose **New job** in the dashboard. The daemon validates project, repository, and worktree authorization before starting work.
 3. Codex implements the change in the authorized worktree, and Ralph runs deterministic verification with complete captured output. Failed implementation or verification receives bounded correction attempts.
 4. Ralph pushes the delivery branch and opens a PR. Required GitHub Actions workflow results are checked against the *exact delivered commit*, followed by independent read-only Claude review of that same commit. Actionable review findings can trigger bounded correction and a fresh exact-commit check.
@@ -31,6 +31,8 @@ Each agent invocation starts with a fresh process. Durable job state and the rep
 The R1-backed delivery coordinator is the currently proven implementation. The internal classic worker/critic loop is still needed for some projects and will be consolidated in a later change; it is not a separately supported submission path. No direct one-shot task or classic-loop submission interface is offered.
 
 Captured raw logs, historical job lookups, cancellation, and owner-decision holds are retained. The system never promises access to model reasoning not exposed by the CLI.
+
+**Agent permissions and host boundary.** The Codex implementation CLI runs with the configured workspace-write sandbox and network access disabled inside that sandbox, using its existing on-request approval policy. Internal Claude critics run in restricted read-only mode with web tools disabled. The independent PR reviewer uses a separate restricted Claude process with no execution tools and a private owner-managed credential. These agent settings do not establish that the Linux VM is isolated from the Windows host; verify actual VM-to-host bridges separately under [ADR 0001](docs/decisions/0001-agentloop-trust-boundary.md).
 
 ## The dashboard
 

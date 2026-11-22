@@ -114,6 +114,44 @@ test('legacy HTTP submission routes are removed and cannot enqueue a new task', 
   }
 });
 
+test('retired pending direct tasks are closed without launching a worker', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-pending-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({
+    allowedProjects: { demo: project }, maxConcurrent: 1, defaultEngine: 'codex',
+    enginePaths: { codex: '/nonexistent/highlander-codex-worker' },
+  }, directory);
+  const server = isolated.daemon.createHttpServer();
+  try {
+    if (!await listenHttp(t, server)) return;
+    const pending = isolated.store.enqueueTask({ project: 'demo', cwd: fs.realpathSync(project), engine: 'codex', prompt: 'Retired work must not execute' });
+    isolated.daemon.fillSlots();
+    const done = isolated.store.readTask(pending.id, 'done');
+    assert.equal(done.status, 'failed');
+    assert.equal(done.reason, 'legacy_execution_retired');
+    const result = await requestJson(server, 'GET', `/api/jobs/${pending.id}`);
+    assert.equal(result.status, 200);
+    assert.equal(result.body.result.reason, 'legacy_execution_retired');
+    assert.equal(isolated.store.listTasks('running').length, 0);
+    const archived = isolated.store.readExecutionBytes(pending.id, 0, 262144);
+    assert.match(Buffer.from(archived.base64, 'base64').toString('utf8'), /legacy_job_terminal/);
+
+    // A pre-upgrade classic loop is also terminalized; only R1-owned children run.
+    const oldLoop = isolated.store.enqueueLoop({ project: 'demo', projectPath: project, engine: 'codex', maxCycles: 1 });
+    isolated.daemon.fillSlots();
+    const closedLoop = isolated.store.readTask(oldLoop.id, 'done');
+    assert.equal(closedLoop.status, 'failed');
+    assert.equal(closedLoop.reason, 'legacy_execution_retired');
+    assert.equal((await requestJson(server, 'GET', `/api/jobs/${oldLoop.id}`)).body.result.reason, 'legacy_execution_retired');
+    assert.equal(isolated.store.listTasks('running').length, 0);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('historical HTTP jobs remain inspectable after removing new direct submission', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));
   const project = path.join(directory, 'registered-project');
