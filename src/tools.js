@@ -4,25 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const store = require('./store');
-const { createRalphTaskService } = require('./ralph-task-service');
 const { resolveProject } = require('./project-registry');
 const { runBash, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS } = require('./run-bash');
 
-let defaultRalphTaskService;
-
-function ralphTaskService() {
-  if (!defaultRalphTaskService) {
-    defaultRalphTaskService = createRalphTaskService({
-      config: store.config,
-      workerTimeoutMs: store.config.taskTimeoutMin * 60 * 1000,
-    });
-  }
-  return defaultRalphTaskService;
-}
-
-// Ralph tasks run synchronously, so this boundary must independently enforce
-// the same administrator-owned project registry used by daemon submissions.
-// A caller can select a registered name, never a filesystem location.
+// The optional owner run_bash diagnostic tool uses the same registered
+// project-root selection rules. A caller cannot grant a new filesystem root.
 function resolveRegisteredProject(project, config = store.config) {
   const name = typeof project === 'string' ? project.trim() : '';
   if (!name || name === '.' || name === '..' || /[\\/]/.test(name) || /^[A-Za-z]:/.test(name)) {
@@ -47,38 +33,6 @@ function resolveRegisteredProject(project, config = store.config) {
   } catch {
     throw new Error('Registered project folder does not exist.');
   }
-}
-
-function boundedOutput(value) {
-  const limit = 4000;
-  const marker = '[truncated]';
-  return value.length > limit ? marker + value.slice(-(limit - marker.length)) : value;
-}
-
-function compactRalphResult(result) {
-  return {
-    id: result.task.id,
-    status: result.status,
-    attempts: result.attempts.map((attempt) => {
-      const compact = { number: attempt.number, status: attempt.status };
-      if (attempt.status === 'worker_error') {
-        compact.error = {
-          name: attempt.error.name,
-          message: attempt.error.message,
-        };
-      } else {
-        const verification = attempt.verification;
-        compact.verification = {
-          passed: verification.passed,
-          exitCode: verification.exitCode,
-          timedOut: verification.timedOut,
-          stdout: boundedOutput(verification.stdout),
-          stderr: boundedOutput(verification.stderr),
-        };
-      }
-      return compact;
-    }),
-  };
 }
 
 // A non-numeric config value reaches http.request as-is and fails every tool call.
@@ -191,39 +145,6 @@ const tools = [
     annotations: { readOnlyHint: true },
   },
   {
-    name: 'dispatch_task',
-    description: 'Dispatch a task to AgentLoop.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project: { type: 'string', description: 'Registered project name.' },
-        worktree: { type: 'string', description: 'Owner-authorized worktree name.' },
-        title: { type: 'string' },
-        prompt: { type: 'string' },
-        engine: { type: 'string', enum: ['claude', 'codex'] },
-      },
-      required: ['project', 'title', 'prompt'],
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false },
-  },
-  {
-    name: 'submit_job',
-    description: 'Queue a job for a registered AgentLoop project.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project: { type: 'string', description: 'Registered project name.' },
-        title: { type: 'string' },
-        prompt: { type: 'string' },
-        engine: { type: 'string', enum: ['claude', 'codex'] },
-      },
-      required: ['project', 'title', 'prompt'],
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false },
-  },
-  {
     name: 'get_job_status',
     description: 'Read compact status for a queued AgentLoop job.',
     inputSchema: {
@@ -246,27 +167,6 @@ const tools = [
     annotations: { readOnlyHint: true },
   },
   {
-    name: 'start_loop',
-    description: 'Start an AgentLoop project loop.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project: { type: 'string' },
-        worktree: { type: 'string', description: 'Owner-authorized worktree name.' },
-        maxCycles: { type: 'integer', minimum: 1, maximum: 50 },
-        taskRetries: { type: 'integer', minimum: 1, maximum: 10, description: 'failed cycles per task before it is blocked and skipped' },
-        engine: { type: 'string', enum: ['claude', 'codex'] },
-        workerEngine: { type: 'string', enum: ['claude', 'codex'], description: 'implementation engine; defaults to engine or defaultEngine' },
-        criticEngine: { type: 'string', enum: ['claude', 'codex'], description: 'read-only critic engine; defaults to engine or defaultEngine' },
-        polish: { type: 'boolean', default: false, description: 'keep improving after the plan passes' },
-        autoCommit: { type: 'boolean', default: true, description: 'daemon makes a local git checkpoint commit after each completed task' },
-      },
-      required: ['project'],
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false },
-  },
-  {
     name: 'send_message',
     description: 'Post short progress updates, questions for the human, and final result summaries to the AgentLoop dashboard.',
     inputSchema: {
@@ -276,28 +176,6 @@ const tools = [
         kind: { type: 'string', enum: ['info', 'question', 'results'], default: 'info' },
       },
       required: ['text'],
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false },
-  },
-  {
-    name: 'ralph_run_task',
-    description: 'Run a structured Ralph task in a project.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project: { type: 'string', description: 'Registered project name.' },
-        worktree: { type: 'string', description: 'Owner-authorized worktree name.' },
-        id: { type: 'string' },
-        goal: { type: 'string' },
-        acceptance: { type: 'array', items: { type: 'string' }, minItems: 1 },
-        verification: { type: 'string' },
-        worker: { type: 'string', enum: ['codex', 'claude'] },
-        maxAttempts: { type: 'integer', minimum: 1, maximum: 10 },
-        reviewPolicy: { type: 'string', enum: ['none', 'risk', 'always'] },
-        model: { type: 'string' },
-      },
-      required: ['project', 'id', 'goal', 'acceptance', 'verification', 'worker'],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false },
@@ -398,35 +276,6 @@ async function callTool(params, options = {}) {
       ? toolResult(response.value) : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
   }
 
-  if (name === 'dispatch_task') {
-    const response = await requestDaemon(options, '/api/dispatch', {
-      project: args.project,
-      ...(args.worktree !== undefined ? { worktree: args.worktree } : {}),
-      title: args.title,
-      prompt: args.prompt,
-      engine: args.engine,
-      source: 'mcp',
-    });
-
-    return response && response.statusCode >= 200 && response.statusCode < 300
-      ? toolResult({ id: response.value?.id })
-      : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
-  }
-
-  if (name === 'submit_job') {
-    const response = await requestDaemon(options, '/api/jobs', {
-      project: args.project,
-      title: args.title,
-      prompt: args.prompt,
-      engine: args.engine,
-      source: 'mcp',
-    });
-
-    return response && response.statusCode >= 200 && response.statusCode < 300
-      ? toolResult({ id: response.value?.id })
-      : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
-  }
-
   if (name === 'get_job_status' || name === 'get_job_result') {
     const response = await requestDaemon(options, `/api/jobs/${encodeURIComponent(args.id || '')}`);
 
@@ -435,25 +284,6 @@ async function callTool(params, options = {}) {
     return toolResult(name === 'get_job_status'
       ? compactJobStatus(response.value)
       : compactJobResult(response.value));
-  }
-
-  if (name === 'start_loop') {
-    const response = await requestDaemon(options, '/api/loop', {
-      project: args.project,
-      worktree: args.worktree,
-      maxCycles: args.maxCycles,
-      taskRetries: args.taskRetries,
-      engine: args.engine,
-      workerEngine: args.workerEngine,
-      criticEngine: args.criticEngine,
-      polish: args.polish,
-      autoCommit: args.autoCommit,
-      source: 'mcp',
-    });
-
-    return response && response.statusCode >= 200 && response.statusCode < 300
-      ? toolResult({ id: response.value?.id })
-      : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
   }
 
   if (name === 'send_message') {
@@ -465,32 +295,6 @@ async function callTool(params, options = {}) {
     return response && response.statusCode >= 200 && response.statusCode < 300
       ? toolResult(structuredValue(response.value))
       : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
-  }
-
-  if (name === 'ralph_run_task') {
-    if (Object.hasOwn(args, 'cwd') || Object.hasOwn(args, 'projectPath')) {
-      return toolFailure('cwd and projectPath are derived from the registered project.');
-    }
-    const task = {
-      id: args.id,
-      goal: args.goal,
-      acceptance: args.acceptance,
-      verification: args.verification,
-      worker: args.worker,
-    };
-    for (const field of ['maxAttempts', 'reviewPolicy', 'model']) {
-      if (args[field] !== undefined) task[field] = args[field];
-    }
-
-    try {
-      const projectPath = args.worktree === undefined
-        ? (options.resolveProject ?? resolveRegisteredProject)(args.project)
-        : resolveProject(store.config, args.project, args.worktree, store.paths.config).cwd;
-      const service = options.ralphTaskService ?? ralphTaskService();
-      return toolResult(compactRalphResult(await service.run(projectPath, task)));
-    } catch (error) {
-      return toolFailure(error.message);
-    }
   }
 
   if (name === 'run_bash' && options.runBash === true) {

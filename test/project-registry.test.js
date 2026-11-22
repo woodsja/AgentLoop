@@ -63,15 +63,6 @@ test('worker authorization is checked before spawn and cannot come from task con
   assert.equal(calls, 1);
 });
 
-test('MCP discovers a managed worktree and cannot replace it with a request path or registry', t => {
-  const f = fixture(t);
-  fs.writeFileSync(f.registryPath, JSON.stringify({ allowedProjects: { ralph: { root: f.checkout, worktreeRoot: f.root } } }));
-  const toolsPath = path.resolve(__dirname, '../src/tools.js');
-  const script = `const tools=require(${JSON.stringify(toolsPath)}); let calls=[]; const service={run:async(p,t)=>{calls.push(p);return {task:t,status:'passed',attempts:[]}}}; (async()=>{ const base={project:'ralph',worktree:'feature',id:'scope',goal:'edit',acceptance:['edit'],verification:'true',worker:'codex'}; const ok=await tools.callTool({name:'ralph_run_task',arguments:base},{ralphTaskService:service}); const denied=await tools.callTool({name:'ralph_run_task',arguments:{...base,projectPath:${JSON.stringify(f.unrelated)},allowedProjects:{self:${JSON.stringify(f.unrelated)}}}},{ralphTaskService:service}); const unknown=await tools.callTool({name:'ralph_run_task',arguments:{...base,worktree:'self-authorized'}},{ralphTaskService:service}); console.log(JSON.stringify({calls,ok:ok.structuredContent.status,denied:denied.isError,unknown:unknown.isError})); })();`;
-  const output = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8', env: { ...process.env, AGENTLOOP_CONFIG_PATH: f.registryPath } });
-  assert.deepEqual(JSON.parse(output), { calls: [f.feature], ok: 'passed', denied: true, unknown: true });
-});
-
 test('a worktree from a different repository cannot inherit authorization', t => {
   const f = fixture(t);
   const other = fixture(t);

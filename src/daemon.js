@@ -34,7 +34,6 @@ const knownEngines = new Set(engines.ids());
 const messageKinds = new Set(['info', 'question', 'results']);
 const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', 'maxed', 'partial', 'incomplete', 'plan_complete']);
 const dirtyTreeError = 'Auto-checkpoint needs a clean project tree: commit or stash your changes first.';
-const defaultLoopCycles = 3;
 const defaultTaskRetries = 3;
 const shutdownGracePeriodMs = 10000;
 const shutdownDeadlineMarginMs = 2000;
@@ -460,20 +459,6 @@ function finalText(engine, outputPath, tail, record) {
 function timeoutMinutes() {
   const value = Number(store.config.taskTimeoutMin);
   return Number.isFinite(value) ? Math.max(1, value) : 45;
-}
-
-function loopCycles(value) {
-  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
-    return defaultLoopCycles;
-  }
-
-  const parsed = Number(value);
-
-  if (!Number.isFinite(parsed)) {
-    return defaultLoopCycles;
-  }
-
-  return Math.min(50, Math.max(1, Math.trunc(parsed)));
 }
 
 function loopRetries(value) {
@@ -2186,88 +2171,6 @@ function serveDashboard(res) {
   }
 }
 
-function taskSource(body) {
-  return body && body.source === 'mcp' ? 'mcp' : 'api';
-}
-
-// Project roots are an administrator-owned capability.  A request may name a
-// configured project, but cannot choose a filesystem location or an operation
-// for the daemon to perform there.
-function authorizedProject(body) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { error: 'Request body must be an object.' };
-  }
-
-  if (Object.hasOwn(body, 'cwd') || Object.hasOwn(body, 'projectPath')) {
-    return { error: 'cwd and projectPath are derived from the registered project.' };
-  }
-
-  if (Object.hasOwn(body, 'operation') || Object.hasOwn(body, 'type')) {
-    return { error: 'Only standard task submission is supported.' };
-  }
-
-  const name = typeof body.project === 'string' ? body.project.trim() : '';
-
-  if (!name || !Object.hasOwn(store.config.allowedProjects, name)) {
-    return { error: 'Unknown project.' };
-  }
-
-  // The shared registry resolver also selects an optional owner-authorized
-  // worktree and rechecks canonical paths before anything is queued.
-  try {
-    const scope = resolveProject(store.config, name, body.worktree, store.paths.config);
-    return { name, projectPath: scope.cwd };
-  } catch (error) {
-    return { error: error.code === 'ENOENT' ? 'Registered project folder does not exist.' : error.message };
-  }
-}
-
-async function dispatch(req, res) {
-  let body;
-
-  try {
-    body = await readJsonBody(req);
-  } catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-
-  if (!body || typeof body.prompt !== 'string' || !body.prompt.trim()) {
-    sendJson(res, 400, { error: 'prompt is required.' });
-    return;
-  }
-
-  const project = authorizedProject(body);
-
-  if (project.error) {
-    sendJson(res, 400, { error: project.error });
-    return;
-  }
-
-  const engine = body.engine || store.config.defaultEngine;
-
-  if (!knownEngines.has(engine)) {
-    sendJson(res, 400, { error: `Unsupported engine: ${engine}.` });
-    return;
-  }
-
-  const task = store.enqueueTask({
-    prompt: body.prompt,
-    project: project.name,
-    // Never accept a request path here: worker cwd comes only from the
-    // canonical, realpath-resolved configured project root.
-    cwd: project.projectPath,
-    engine,
-    model: body.model,
-    title: body.title,
-    priority: body.priority,
-    source: taskSource(body),
-  });
-  recordEvent('queue', { id: task.id });
-
-  sendJson(res, 201, { id: task.id });
-}
-
 async function createMessage(req, res) {
   let body;
 
@@ -2314,25 +2217,6 @@ function isFile(filePath) {
   } catch {
     return false;
   }
-}
-
-function hasActiveLoop(projectPath) {
-  for (const stage of ['pending', 'running']) {
-    for (const task of store.listTasks(stage)) {
-      if (task.type !== 'loop' || terminalTaskStatuses.has(task.status) || typeof task.projectPath !== 'string') {
-        continue;
-      }
-
-      try {
-        if (fs.realpathSync(task.projectPath) === projectPath) {
-          return true;
-        }
-      } catch {
-      }
-    }
-  }
-
-  return false;
 }
 
 function runGit(projectPath, args) {
@@ -2493,109 +2377,6 @@ function recordCheckpoint(loop, cycleNumber, message) {
       { ...(task === null ? {} : { task }), sha },
     ],
   };
-}
-
-function seedLoopFiles(projectPath) {
-  const defaults = [
-    [
-      path.join(projectPath, 'STATE.md'),
-      '# State\n\n## Completed\n\n- Nothing yet.\n\n## Next\n\n- Start with the first incomplete plan item.\n\n## Notes\n\n- None.\n',
-    ],
-    [
-      path.join(projectPath, 'GUIDELINES.md'),
-      '# Quality Guidelines\n\n- Meet every requirement in PLAN.md.\n- Keep changes scoped to this project.\n- Validate inputs and relevant edge cases.\n- Add concise usage guidance for runnable work.\n- Run an appropriate check before finishing.\n',
-    ],
-  ];
-
-  for (const [filePath, content] of defaults) {
-    if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, content, 'utf8');
-    }
-  }
-}
-
-async function createLoop(req, res) {
-  let body;
-
-  try {
-    body = await readJsonBody(req);
-  } catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-
-  const authorized = authorizedProject(body);
-
-  if (authorized.error) {
-    sendJson(res, 400, { error: authorized.error });
-    return;
-  }
-
-  const project = authorized.name;
-  const projectPath = authorized.projectPath;
-
-  try {
-    resolveWorkerScope(store.config, projectPath, store.paths.config);
-  } catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-
-  if (!isFile(path.join(projectPath, 'PLAN.md'))) {
-    sendJson(res, 400, { error: 'Project folder must contain PLAN.md.' });
-    return;
-  }
-
-  if (hasActiveLoop(projectPath)) {
-    sendJson(res, 400, { error: 'A loop is already running for this project.' });
-    return;
-  }
-
-  let selectedEngines;
-  try { selectedEngines = loopEngines(body); }
-  catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-  const polish = body && body.polish === true;
-
-  const gitPresent = insideGitWorkTree(projectPath);
-  const autoCommit = !(body && body.autoCommit === false) && gitPresent;
-
-  // Must run before seedLoopFiles: seeded STATE.md and GUIDELINES.md would trip it.
-  if (autoCommit) {
-    const status = runGit(projectPath, ['status', '--porcelain', '--', '.']);
-
-    if (!status.ok || status.output) {
-      sendJson(res, 400, { error: dirtyTreeError });
-      return;
-    }
-  }
-
-  try {
-    seedLoopFiles(projectPath);
-  } catch (error) {
-    sendJson(res, 500, { error: `Could not seed loop files: ${error.message}` });
-    return;
-  }
-
-  // The tree this gate approved, seeded files included: a queued loop revalidates against it.
-  const gitAtQueue = autoCommit ? gitSnapshot(projectPath) : null;
-  const loop = store.enqueueLoop({
-    project,
-    projectPath,
-    maxCycles: loopCycles(body && body.maxCycles),
-    taskRetries: loopRetries(body && body.taskRetries),
-    autoCommit,
-    ...(gitAtQueue ? { gitAtQueue } : {}),
-    ...(gitPresent ? {} : { noGit: true }),
-    ...(polish ? { polish: true } : {}),
-    ...selectedEngines,
-    title: `loop: ${project}`,
-    source: taskSource(body),
-  });
-  recordEvent('loop_queued', { id: loop.id });
-  sendJson(res, 201, { id: loop.id });
 }
 
 function logLineCount(value) {
@@ -2834,21 +2615,6 @@ async function handleRequest(req, res) {
     }
     const job = readJob(id);
     sendJson(res, job ? 200 : 404, job || { error: 'Job not found.' });
-    return;
-  }
-
-  if (req.method === 'POST' && requestPath === '/api/jobs') {
-    await dispatch(req, res);
-    return;
-  }
-
-  if (req.method === 'POST' && requestPath === '/api/dispatch') {
-    await dispatch(req, res);
-    return;
-  }
-
-  if (req.method === 'POST' && requestPath === '/api/loop') {
-    await createLoop(req, res);
     return;
   }
 

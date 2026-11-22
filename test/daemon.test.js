@@ -83,43 +83,19 @@ async function listenHttp(t, server) {
   }
 }
 
-test('dispatch and loop discover new managed Git worktrees without registry edits', async t => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-managed-http-'));
-  const checkout = path.join(directory, 'checkout');
-  const managed = path.join(directory, 'managed');
-  const feature = path.join(managed, 'feature');
-  fs.mkdirSync(checkout);
-  const git = args => execFileSync('git', ['-C', checkout, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-  git(['init']);
-  git(['config', 'user.name', 'Ralph test']);
-  git(['config', 'user.email', 'ralph@example.test']);
-  fs.writeFileSync(path.join(checkout, 'PLAN.md'), '# Plan\n');
-  git(['add', '.']);
-  git(['commit', '-m', 'fixture']);
-  fs.mkdirSync(managed);
-  const isolated = isolatedDaemon({ allowedProjects: { demo: { root: checkout, worktreeRoot: managed } } }, directory);
+test('HTTP accepts new development jobs only through the canonical R1 admission', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-http-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project } }, directory);
   const server = isolated.daemon.createHttpServer();
   try {
-    // The daemon has already loaded owner authorization before Git creates it.
-    git(['worktree', 'add', '-b', 'feature/arbitrary-name', feature]);
     if (!await listenHttp(t, server)) return;
-    for (const endpoint of ['/api/dispatch', '/api/loop']) {
-      const response = await requestJson(server, 'POST', endpoint, {
-        project: 'demo', worktree: 'feature', prompt: 'Edit in the linked worktree', autoCommit: false,
-      });
-      assert.equal(response.status, 201, JSON.stringify(response.body));
-      const pending = isolated.store.readTask(response.body.id, 'pending');
-      assert.equal(endpoint === '/api/loop' ? pending.projectPath : pending.cwd, feature);
-      for (const name of ['missing', '../checkout', checkout]) {
-        const denied = await requestJson(server, 'POST', endpoint, { project: 'demo', worktree: name, prompt: 'deny' });
-        assert.equal(denied.status, 400);
-        assert.match(denied.body.error, /Unknown authorized worktree/);
-      }
-      fs.mkdirSync(path.join(managed, 'plain'), { recursive: true });
-      const unsafe = await requestJson(server, 'POST', endpoint, { project: 'demo', worktree: 'plain', prompt: 'deny' });
-      assert.equal(unsafe.status, 400);
-      assert.match(unsafe.body.error, /isolated Git worktree/);
+    for (const endpoint of ['/api/jobs', '/api/dispatch', '/api/loop']) {
+      const res = await requestJson(server, 'POST', endpoint, { project: 'demo', prompt: 'Do not queue this legacy task' });
+      assert.equal(res.status, 404, endpoint + ' must not admit new tasks');
     }
+    assert.equal(isolated.store.listTasks('pending').length, 0);
   } finally {
     await new Promise(resolve => server.close(resolve));
     isolated.restore();
@@ -127,7 +103,7 @@ test('dispatch and loop discover new managed Git worktrees without registry edit
   }
 });
 
-test('authorized HTTP jobs persist under a configured project and expose compact state/result', async (t) => {
+test('historical HTTP jobs remain inspectable after removing new direct submission', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));
   const project = path.join(directory, 'registered-project');
   fs.mkdirSync(project);
@@ -141,20 +117,16 @@ test('authorized HTTP jobs persist under a configured project and expose compact
     if (!await listenHttp(t, server)) return;
     const projects = await requestJson(server, 'GET', '/api/projects');
     assert.deepEqual(projects, { status: 200, body: { projects: ['demo'] } });
-    const submitted = await requestJson(server, 'POST', '/api/jobs', { project: 'demo', prompt: 'Write a focused test.' });
-    assert.equal(submitted.status, 201);
-    assert.match(submitted.body.id, /^t-/);
+    // Simulate an already-captured legacy task. No new HTTP ingress may create one.
+    const legacy = isolated.store.enqueueTask({ project: 'demo', cwd: fs.realpathSync(project), prompt: 'Previously admitted task.' });
+    const submitted = { body: { id: legacy.id } };
+    assert.match(legacy.id, /^t-/);
 
     const pending = isolated.store.readTask(submitted.body.id, 'pending');
     assert.equal(pending.project, 'demo');
     assert.equal(pending.cwd, fs.realpathSync(project));
 
-    fs.writeFileSync(path.join(project, 'PLAN.md'), '# Plan\n');
-    const loopSubmitted = await requestJson(server, 'POST', '/api/loop', { project: 'demo', autoCommit: false });
-    assert.equal(loopSubmitted.status, 201);
-    const pendingLoop = isolated.store.readTask(loopSubmitted.body.id, 'pending');
-    assert.equal(pendingLoop.project, 'demo');
-    assert.equal(pendingLoop.projectPath, fs.realpathSync(project));
+    assert.equal((await requestJson(server, 'POST', '/api/loop', { project: 'demo' })).status, 404);
 
     const queued = await requestJson(server, 'GET', `/api/jobs/${submitted.body.id}`);
     assert.deepEqual(queued.body, { id: submitted.body.id, status: 'pending', project: 'demo' });
@@ -176,7 +148,7 @@ test('authorized HTTP jobs persist under a configured project and expose compact
   }
 });
 
-test('HTTP submission and legacy dispatch/loop fail closed for unknown projects and cwd spoofing', async (t) => {
+test('obsolete HTTP admission stays closed, and canonical R1 rejects unknown projects', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));
   const project = path.join(directory, 'registered-project');
   fs.mkdirSync(project);
@@ -196,8 +168,10 @@ test('HTTP submission and legacy dispatch/loop fail closed for unknown projects 
       ['/api/loop', { project: 'missing' }],
     ]) {
       const response = await requestJson(server, 'POST', endpoint, body);
-      assert.equal(response.status, 400);
+      assert.equal(response.status, 404);
     }
+    const denied = await requestJson(server, 'POST', '/api/r1/jobs', { project: 'missing', issue: 5 });
+    assert.equal(denied.status, 400);
     assert.equal(isolated.store.listTasks('pending').length, 0);
     assert.equal((await requestJson(server, 'POST', '/api/projects', { project: 'new' })).status, 404);
   } finally {

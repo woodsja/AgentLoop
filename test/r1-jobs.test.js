@@ -165,7 +165,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.equal(generic.status, 200);
     assert.deepEqual([generic.value.id, generic.value.status, generic.value.project, generic.value.phases], [id, 'passed', 'demo', undefined]);
     const r1Shaped = await request(port, '/api/jobs', { project: 'demo', issue: 1 });
-    assert.deepEqual([r1Shaped.status, r1Shaped.value.error], [400, 'prompt is required.']);
+    assert.deepEqual([r1Shaped.status, r1Shaped.value.error], [404, 'Not found.']);
     await until(async () => (await get(second)).status === 'passed');
     fs.writeFileSync(path.join(root, 'review-error'), '');
     const third = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 3 })).value.id;
