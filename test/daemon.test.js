@@ -1208,10 +1208,16 @@ for (const role of ['worker', 'critic']) {
     t.after(() => { isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
     const s = isolated.store, d = isolated.daemon;
     s.ensureDirs();
-    const parent = { id: 't-12345678', workflow: 'r1', status: 'running', milestoneAuthorization: { grantId: 'g1' } };
+    const parent = { id: 't-12345678', workflow: 'r1', project: 'demo', issue: 1,
+      autopilotStateDir: path.join(directory, 'jobs'), status: 'running', milestoneAuthorization: { grantId: 'g1' } };
+    const { createJob, createJobStore } = require('../src/autopilot-state');
+    const durable = createJobStore(parent.autopilotStateDir);
+    durable.save({ ...createJob({ projectName: 'demo', repo: 'owner/demo', issue: { number: 1, title: 'Held' },
+      branch: 'ralph/issue-1-held', worktreePath: directory, now: durable.now }),
+      r1ParentJobId: parent.id, status: 'running', workspaceState: 'prepared', runs: 1 });
     const previous = { n: 1, status: 'failed', phase: 'critic', verdict: 'FAIL', summary: 'Prior review retained' };
     const cycle = { n: 2, status: 'running', phase: role, workerSummary: 'Implementation retained' };
-    const loop = { id: 't-23456789', type: 'loop', status: 'running', projectPath: directory,
+    const loop = { id: 't-23456789', type: 'loop', project: 'demo', status: 'running', projectPath: directory,
       engine: 'unavailable-test-engine', cycles: [previous, cycle], cycle: 2,
       r1Child: { parentJobId: parent.id, attempt: 1 } };
     s.writeTask(parent, 'running'); s.writeTask(loop, 'running');
@@ -1247,18 +1253,129 @@ for (const role of ['worker', 'critic']) {
 }
 
 for (const missing of [null, 'ENOENT']) {
-  test(`non-milestone R1 session tolerates a parent lookup returning ${missing}`, t => {
-    let finished = false;
+  test(`historical R1 session rejects a parent lookup returning ${missing} without starting a worker`, t => {
+    let finished = false, checkpoint = null;
+    const events = [];
     t.mock.method(store, 'readTask', () => {
       if (missing === 'ENOENT') throw Object.assign(new Error('Parent moved'), { code: 'ENOENT' });
       return null;
     });
-    const loop = { id: 'non-milestone-child', engine: 'unavailable-test-engine',
+    t.mock.method(store, 'writeTask', (task, stage) => { checkpoint = { task, stage }; });
+    t.mock.method(store, 'appendExecution', (id, event) => { events.push({ id, event }); });
+    const loop = { id: 'historical-child', engine: 'unavailable-test-engine',
       r1Child: { parentJobId: 'moved-parent' } };
-    daemon.spawnLoopSession(loop, { n: 1 }, 'worker', 'prompt', details => {
-      finished = true;
-      assert.match(details.resultText, /Unsupported/);
-    });
-    assert.equal(finished, true);
+    daemon.spawnLoopSession(loop, { n: 1 }, 'worker', 'prompt', () => { finished = true; });
+    assert.equal(finished, false, 'unknown historical parent never starts a new worker');
+    assert.equal(checkpoint.stage, 'running');
+    assert.equal(checkpoint.task.authorizationBlocked.prompt, 'prompt');
+    assert.match(checkpoint.task.authorizationBlocked.message, /Canonical R1 parent is not running/);
+    assert.ok(events.some(entry => entry.event.event === 'authorization_blocked'));
   });
 }
+
+test('dashboard HTTP handler isolates one bad canonical record and exposes its raw journal link', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-canonical-diagnostic-'));
+  const isolated = isolatedDaemon({}, directory);
+  t.after(() => { isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const s = isolated.store, d = isolated.daemon;
+  d.testing.initializeRuntime();
+  const bad = s.enqueueTask({ workflow: 'r1', project: 'demo', issue: 1, autopilotStateDir: path.join(directory, 'jobs'), title: 'Bad checkpoint', status: 'running' });
+  s.moveTask(bad.id, 'pending', 'running');
+  const good = s.enqueueTask({ title: 'Healthy queued job' });
+  s.appendExecution(bad.id, { event: 'owner_raw', text: 'RAW TAIL '.repeat(10000) });
+  const server = d.createHttpServer();
+  // Drive the real HTTP request listener without binding a socket. This also
+  // runs in restricted environments; socket/process integration stays separate.
+  const response = await new Promise(resolve => {
+    const req = { method: 'GET', url: '/api/state', headers: { host: 'localhost:5769' }, socket: { localPort: 5769 } };
+    const res = { writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); } };
+    server.emit('request', req, res);
+  });
+  assert.equal(response.status, 200);
+  const diagnostic = response.body.tasks.running.find(task => task.id === bad.id);
+  assert.equal(diagnostic.status, 'blocked');
+  assert.match(diagnostic.diagnostic, /checkpoint/);
+  assert.equal(diagnostic.executionJournal.raw, `/api/log/${bad.id}?raw=1`);
+  assert.ok(response.body.tasks.pending.some(task => task.id === good.id));
+  const chunks = []; let offset = 0, hasMore;
+  do {
+    const page = await new Promise(resolve => server.emit('request', {
+      method: 'GET', url: `/api/log/${bad.id}?raw=1&offset=${offset}&bytes=32768`,
+      headers: { host: 'localhost:5769' }, socket: { localPort: 5769 },
+    }, { writeHead(status) { assert.equal(status, 200); }, end(body) { resolve(JSON.parse(body)); } }));
+    chunks.push(Buffer.from(page.base64, 'base64'));
+    assert.ok(page.nextOffset > offset, 'raw paging makes progress');
+    offset = page.nextOffset; hasMore = page.hasMore;
+    assert.ok(chunks.length <= 10, 'raw journal paging is bounded');
+  } while (hasMore);
+  assert.deepEqual(Buffer.concat(chunks), fs.readFileSync(s.executionPath(bad.id)), 'all raw bytes remain available despite a broken checkpoint');
+});
+
+test('HTTP cancellation of a supervision hold persists canonical cancellation without an executor', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-cancel-hold-'));
+  const isolated = isolatedDaemon({}, directory);
+  t.after(() => { isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const s = isolated.store, d = isolated.daemon;
+  d.testing.initializeRuntime({ r1: { autopilotDependencies: { loadProjectConfig: () => assert.fail('held cancellation cannot admit an executor') } } });
+  const parent = s.enqueueTask({ workflow: 'r1', project: 'demo', repo: 'owner/demo', issue: 1,
+    autopilotStateDir: path.join(directory, 'jobs'), title: 'Held before start', status: 'running',
+    supervisionBlocked: { reason: 'Owner configuration revoked' } });
+  s.moveTask(parent.id, 'pending', 'running');
+  const server = d.createHttpServer();
+  const invoke = (method, url, body) => new Promise(resolve => {
+    const req = new (require('node:stream').PassThrough)();
+    Object.assign(req, { method, url, headers: { host: 'localhost:5769' }, socket: { localPort: 5769 } });
+    const res = { writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); } };
+    server.emit('request', req, res); req.end(body ? JSON.stringify(body) : '');
+  });
+  assert.equal((await invoke('POST', '/api/cancel', { id: parent.id })).status, 200);
+  d.fillSlots();
+  const result = await invoke('GET', `/api/r1/jobs/${parent.id}`);
+  assert.equal(result.body.status, 'cancelled');
+  assert.equal(result.body.evidence.cancelRequested, true);
+  assert.equal(require('../src/autopilot-state').createJobStore(parent.autopilotStateDir).load(1).runs, 0);
+});
+
+test('HTTP R1 corrected specification retains old status result and raw identity while queuing one fresh job', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'http-spec-rearm-'));
+  const checkout = path.join(directory, 'repo'); fs.mkdirSync(checkout);
+  const worktreeRoot = path.join(directory, 'worktrees');
+  const isolated = isolatedDaemon({ allowedProjects: { demo: { root: checkout, worktreeRoot } } }, directory);
+  t.after(() => { isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const s = isolated.store, d = isolated.daemon;
+  const issue = { number: 1, title: 'Correct the specification', body: 'fix it' };
+  const project = { enabled: true, autoMerge: true, worker: 'codex', reviewPolicy: 'always', repo: 'owner/demo', checkout, worktreeRoot,
+    baseBranch: 'main', readyLabel: 'ready', humanLabel: 'human', stateDir: path.join(directory, 'jobs') };
+  d.testing.initializeRuntime({ r1: { ciPollMs: 0, autopilotDependencies: {
+    loadProjectConfig: () => project, discoverReadyIssues: async () => [issue],
+    createRalphTaskService: () => assert.fail('no worker for insufficient specification'),
+    execFile: (_file, args, _options, callback) => callback(null, args.includes('comments') ? '{"comments":[]}' : '', ''),
+  } } });
+  const server = d.createHttpServer();
+  const invoke = (method, url, body) => new Promise(resolve => {
+    const req = new (require('node:stream').PassThrough)();
+    Object.assign(req, { method, url, headers: { host: 'localhost:5769' }, socket: { localPort: 5769 } });
+    server.emit('request', req, { writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); } });
+    req.end(body ? JSON.stringify(body) : '');
+  });
+  const submitted = await invoke('POST', '/api/r1/jobs', { project: 'demo', issue: 1 });
+  assert.equal(submitted.status, 201);
+  const oldId = submitted.body.id;
+  d.fillSlots();
+  const deadline = Date.now() + 2000;
+  while (!s.listTasks('done').some(task => task.id === oldId) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(s.listTasks('done').some(task => task.id === oldId), 'specification outcome finishes within two seconds');
+  const before = await invoke('GET', `/api/r1/jobs/${oldId}`);
+  const raw = await invoke('GET', `/api/log/${oldId}?raw=1&bytes=262144`);
+  assert.equal(before.body.status, 'needs_specification');
+  issue.body = '## Acceptance\n- Implement a deterministic sum helper with unit tests for two integers. Keep the result explicit.';
+  const [fresh, duplicate] = await Promise.all([invoke('POST', '/api/r1/jobs', { project: 'demo', issue: 1 }), invoke('POST', '/api/r1/jobs', { project: 'demo', issue: 1 })]);
+  assert.equal(fresh.status, 201); assert.equal(duplicate.body.id, fresh.body.id);
+  assert.notEqual(fresh.body.id, oldId);
+  assert.equal((await invoke('GET', `/api/r1/jobs/${fresh.body.id}`)).body.status, 'queued');
+  d.testing.initializeRuntime(); // reconstruct service readers without launching a daemon
+  assert.deepEqual(await invoke('GET', `/api/r1/jobs/${oldId}`), before);
+  assert.deepEqual(await invoke('GET', `/api/log/${oldId}?raw=1&bytes=262144`), raw);
+  const result = await invoke('GET', `/api/jobs/${oldId}`);
+  assert.equal(result.body.result.status, 'needs_specification');
+});

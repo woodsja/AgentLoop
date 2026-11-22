@@ -22,8 +22,8 @@ function authorizeR1Child(child, {
     throw new Error('Invalid R1 child execution claim.');
   }
   const parent = store.readTask(claim.parentJobId, 'running');
-  const job = parent.autopilotStateDir
-    ? createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id) : parent.r1;
+  if (!parent.autopilotStateDir) throw new Error('Historical R1 parent is read-only; canonical checkpoint required.');
+  const job = createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id);
   if (parent.id !== claim.parentJobId || parent.workflow !== 'r1' || parent.status !== 'running'
     || parent.cancelRequested || parent.issue !== claim.issue || parent.project !== child.project
     || !job || job.terminal || job.status !== 'running' || job.workspaceState !== 'prepared'

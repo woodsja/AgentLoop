@@ -1,3 +1,4 @@
+const { deliveryPhase } = require('./autopilot-state');
 'use strict';
 
 // Preserve owner-visible evidence; sanitize only the new CI display fields.
@@ -76,6 +77,8 @@ function evidence(job, configuredWorkflow) {
     architectureDecisionHistory: job.architectureDecisionHistory || [],
     environmentPreflight: job.environmentPreflight,
     ownershipBlocked: job.ownershipBlocked,
+    cancelRequested: job.cancelRequested,
+    outcomeActions: job.outcomeActions,
     reviewAttempts: job.reviewAttempts,
     reviewPreparationHistory: job.reviewPreparationHistory || [],
     reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: ownerText(entry.reviewer), findings: review(entry).findings, findingCount: review(entry).findingCount, diagnostics: entry.diagnostics && ownerText(entry.diagnostics) })),
@@ -84,6 +87,8 @@ function evidence(job, configuredWorkflow) {
 }
 
 function nextAction(task, projected) {
+  if (projected?.ownershipBlocked) return { action: 'owner_decision', reason: projected.ownershipBlocked };
+  if (Object.values(projected?.outcomeActions || {}).some(action => !action.ok)) return { action: 'owner_decision', reason: 'Outcome cleanup is incomplete; inspect action attempts and raw journal. Automatic retries are bounded at three.' };
   if (projected?.architectureDecision?.resumeRequested) return { action: 'wait', reason: 'Owner resume requested; awaiting fresh guarded authorization.' };
   if (task.status === 'paused_owner_decision' || projected?.architectureDecision) return { action: 'owner_decision', reason: projected?.architectureDecision?.blockedReason || 'Implementation and guarded merge are paused. Inspect the decision issue, notification status and original logs; prose is not approval.' };
   if (['passed', 'blocked', 'failed', 'merged', 'needs_specification', 'completed', 'cancelled'].includes(task.status)) {
@@ -96,18 +101,11 @@ function nextAction(task, projected) {
 }
 // Presentation only: terminal evidence is decided and persisted by Autopilot.
 function deliveryStatus(job, autonomous = false) {
-  if (!job.terminal) return (job.authorizationBlocked || job.ownershipBlocked) ? 'blocked' : 'running';
+  if (!job.terminal) return (job.authorizationBlocked || job.ownershipBlocked) ? 'blocked' : job.status === 'pending' ? 'queued' : 'running';
   if (job.terminalState === 'paused_owner_decision') return 'paused_owner_decision';
   if (job.terminalState === 'ready_for_human_merge') return 'passed';
   if (['merged', 'needs_specification', 'cancelled'].includes(job.terminalState)) return job.terminalState;
   return autonomous ? 'failed' : 'blocked';
 }
 
-function deliveryPhase(job) {
-  if (job.terminal) return ['merged', 'ready_for_human_merge'].includes(job.terminalState) ? 'completed' : job.terminalState;
-  if (job.authorizationBlocked || job.ownershipBlocked) return 'blocked';
-  if (job.reviewHistory?.at(-1)?.status === 'running') return 'review';
-  if (job.status === 'running') return job.phase || 'implementation';
-  return job.status === 'awaiting_ci' ? 'ci' : job.status === 'pending' ? 'queued' : job.status;
-}
 module.exports = { evidence, nextAction, deliveryStatus, deliveryPhase };

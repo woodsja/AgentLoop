@@ -592,3 +592,14 @@ test('a corrective head gets its own CI deadline while same-head checkpoints ret
   recordDelivery(job, { commit: 'corrected-head' });
   assert.equal(job.ciWaitSince, undefined);
 });
+
+test('persisted phase navigation stays bounded while the journal retains the first transition', () => {
+  const directory = temporaryDirectory(), store = createJobStore(directory);
+  const job = createJob({ projectName: 'demo', repo: 'owner/demo', issue: { number: 1, title: 'Many phases' }, branch: 'ralph/issue-1', worktreePath: null, now: store.now });
+  job.r1ParentJobId = 't-0000abcd';
+  for (let i = 0; i < 75; i++) { job.status = `phase-${i}`; store.save(job); }
+  assert.ok(store.load(1).phases.length <= 50);
+  const raw = fs.readFileSync(store.jobPath(1).replace('.json', '.execution.ndjson'), 'utf8');
+  assert.ok(raw.includes('phase-0'));
+  assert.ok(raw.includes('phase-74'));
+});

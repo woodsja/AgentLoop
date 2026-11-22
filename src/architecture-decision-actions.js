@@ -180,7 +180,7 @@ async function decisionCommand(action, id, options = {}) {
         }
         if (!task || !task.autopilotStateDir || !['paused_owner_decision', 'pending', 'running'].includes(task.status)
           || task.workflow !== 'r1' || task.project !== job.project || task.issue !== job.issue.number
-          || (task.autopilotStateDir ? task.autopilotStateDir !== store.directory : task.r1?.createdAt !== job.createdAt)) throw new Error('Original owner queue job identity changed or is missing.');
+          || task.autopilotStateDir !== store.directory) throw new Error('Original owner queue job identity changed or is missing.');
       }
       try {
         d.resumeEvidence = await validateResume(project, job, store, options);

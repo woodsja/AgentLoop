@@ -22,10 +22,9 @@ function createR1ChildHandoff({ store, loadProject, configPath = store?.paths?.c
     const parent = store.readTask(parentJobId, 'running');
     if (parent.id !== parentJobId || parent.workflow !== 'r1' || parent.status !== 'running'
       || !Number.isSafeInteger(parent.issue) || parent.issue < 1) throw new Error('R1 parent job is not eligible.');
-    if (parent.autopilotStateDir) {
-      Object.defineProperty(parent, 'r1', { enumerable: false,
-        value: createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id) });
-    }
+    if (!parent.autopilotStateDir) throw new Error('Historical R1 parent is read-only; canonical checkpoint required.');
+    Object.defineProperty(parent, 'r1', { enumerable: false,
+      value: createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id) });
     const job = parent.r1;
     if (!job || job.terminal || job.project !== parent.project || job.issue?.number !== parent.issue
       || job.status !== 'running' || job.workspaceState !== 'prepared'

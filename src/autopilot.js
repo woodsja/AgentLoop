@@ -195,6 +195,132 @@ async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write
   return cleaned;
 }
 
+// Cancellation of an operator-held reservation never needs executor admission.
+// Unknown process ownership remains held with a durable cancellation request.
+function cancelHeldDelivery(task, store) {
+  const lock = store.acquire(task.issue);
+  try {
+    let job = store.load(task.issue);
+    if (job && job.r1ParentJobId !== task.id) throw new Error('Cancellation checkpoint belongs to another parent.');
+    job ||= { ...createJob({ projectName: task.project, repo: task.repo || `unknown:${task.project}`,
+      issue: { number: task.issue, title: task.title || `Issue ${task.issue}` },
+      branch: deriveBranchName({ number: task.issue, title: task.title || `Issue ${task.issue}` }),
+      worktreePath: null, now: store.now }), r1ParentJobId: task.id };
+    job.cancelRequested = true;
+    if (job.merge) { store.save(job); return job; }
+    for (const key of ['agentProcess', 'environmentProcess']) {
+      const claim = job[key];
+      if (!claim) continue;
+      if (claim.status === 'launching' || !require('./r1-process-claim').terminatePriorR1Worker({
+        r1Child: true, workerPid: claim.pid, workerStartTime: claim.startTime,
+      })) {
+        job.ownershipBlocked = 'Cancellation requested; prior process ownership remains unconfirmed. No worker will launch.';
+        store.save(job); return job;
+      }
+      job[key] = null;
+    }
+    if (!job.terminal) {
+      store.appendIntegrationEvent(job, { event: 'owner_cancelled', supervision: task.supervisionBlocked || null });
+      delete job.ownershipBlocked; delete job.authorizationBlocked;
+      job.status = 'cancelled'; markTerminal(job, 'cancelled');
+    }
+    store.save(job); return job;
+  } finally { lock.release(); }
+}
+
+// Admission may reserve a new queue identity only for corrected insufficient
+// specifications. The coordinator replaces the one active checkpoint after
+// preserving the complete previous attempt in its existing representation.
+function rearmCorrectedSpecification(projectName, project, store, issue, reserve) {
+  const lock = store.acquire(issue.number);
+  try {
+    const old = store.load(issue.number);
+    if (!old?.terminal || old.terminalState !== 'needs_specification' || old.agentProcess
+      || old.environmentProcess || old.architectureDecision || old.integrationActive
+      || String(issue.body || '').replace(/\s+/g, '').length < 40
+      || issue.body === old.originalIssue?.body) return null;
+    store.archive(old);
+    const task = reserve(old);
+    const job = createJob({ projectName, repo: project.repo, issue,
+      branch: deriveBranchName(issue), worktreePath: deriveWorktreePath(project, issue),
+      maxReviewRounds: project.maxReviewRounds || 2, now: store.now });
+    job.r1ParentJobId = task.id;
+    if (task.milestoneAuthorization) job.milestoneAuthorization = task.milestoneAuthorization;
+    store.appendIntegrationEvent(old, { event: 'specification_rearmed', previousParent: old.r1ParentJobId, parent: task.id });
+    store.save(job);
+    return task;
+  } finally { lock.release(); }
+}
+
+// Owner outcome policy belongs to the delivery coordinator, under its issue lock.
+// Checkpoint each action; reconcile remote effects before retrying after a crash.
+async function publishOutcome(project, job, store, dependencies) {
+  if (!job?.r1ParentJobId || !project.autoMerge || !job.terminal || job.architectureDecision
+    || job.authorizationBlocked || job.ownershipBlocked || job.agentProcess || job.environmentProcess
+    || job.workspaceState === 'integration_retained' || job.integrationActive) return;
+  const command = (file, args) => new Promise((resolve, reject) => {
+    (dependencies.outcomeExecFile || dependencies.execFile || require('./execution-log').execFile)(file, args,
+      { cwd: project.checkout, encoding: 'utf8', shell: false, timeout: 60000,
+        env: { ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' } },
+      (error, stdout, stderr) => error ? reject(Object.assign(new Error(String(stderr || error.message)), { cause: error })) : resolve(String(stdout)));
+  });
+  job.outcomeActions ||= {};
+  const action = async (name, work) => {
+    const prior = job.outcomeActions[name];
+    if (prior?.ok || prior?.attempts >= 3) return;
+    const entry = { attempts: (prior?.attempts || 0) + 1, at: store.now(), ok: false };
+    job.outcomeActions[name] = entry; store.save(job);
+    try { await work(); entry.ok = true; }
+    catch (error) { entry.error = error.message; store.appendIntegrationEvent(job, { event: 'outcome_action_failed', action: name, error: error.message }); }
+    store.save(job);
+  };
+  let merged = Boolean(job.merge);
+  if (!merged && job.pr) {
+    await action('inspect-pr', async () => {
+      const state = JSON.parse(await command('gh', ['pr', 'view', String(job.pr.number), '--repo', project.repo, '--json', 'state'])).state;
+      if (!['OPEN', 'CLOSED', 'MERGED'].includes(state)) throw new Error('PR state unavailable; refusing outcome cleanup.');
+      job.outcomePrState = state;
+    });
+    // An inconclusive read cannot authorize PR/branch destruction or failure notification.
+    if (!job.outcomeActions['inspect-pr']?.ok) return;
+    merged = job.outcomePrState === 'MERGED';
+  }
+  const marker = `<!-- ralph-outcome:${job.r1ParentJobId} -->`;
+  const reason = (job.terminalState === 'needs_specification'
+    ? `Ralph needs a product specification before it can start: describe the required behaviour and acceptance criteria, then re-apply \`${project.readyLabel}\`.`
+    : `Ralph could not complete this issue autonomously and stopped with outcome FAILED (job ${job.r1ParentJobId}): ${job.terminalState}. Full execution evidence is available in the owner dashboard.`) + `\n\n${marker}`;
+  if (!merged) {
+    if (job.pr && job.outcomePrState === 'OPEN') await action('close-pr', async () => {
+      const current = JSON.parse(await command('gh', ['pr', 'view', String(job.pr.number), '--repo', project.repo, '--json', 'state'])).state;
+      if (current === 'MERGED') { job.outcomePrState = 'MERGED'; return; }
+      if (current === 'OPEN') await command('gh', ['pr', 'close', String(job.pr.number), '--repo', project.repo, '--comment', reason]);
+      else if (current !== 'CLOSED') throw new Error('PR state unavailable.');
+    });
+    if (job.outcomePrState === 'MERGED') return;
+    await action('comment-issue', async () => {
+      const response = JSON.parse(await command('gh', ['issue', 'view', String(job.issue.number), '--repo', project.repo, '--json', 'comments']));
+      if (!Array.isArray(response.comments)) throw new Error('Issue comments unavailable; refusing duplicate notification.');
+      if (!response.comments.some(comment => comment.body?.includes(marker))) {
+        await command('gh', ['issue', 'comment', String(job.issue.number), '--repo', project.repo, '--body', reason]);
+      }
+    });
+    await action('relabel-issue', () => command('gh', ['issue', 'edit', String(job.issue.number), '--repo', project.repo,
+      '--remove-label', project.readyLabel, '--add-label', project.humanLabel]));
+  }
+  if (/^ralph\/issue-\d+-[A-Za-z0-9._-]+$/.test(job.branch)) {
+    if (job.delivery?.pushed) await action('delete-remote-branch', async () => {
+      try { await command('gh', ['api', '--method', 'DELETE', `repos/${project.repo}/git/refs/heads/${job.branch}`]); }
+      catch (error) { if (!/404|Reference does not exist/.test(error.message)) throw error; }
+    });
+    await action('delete-local-branch', async () => {
+      let exists;
+      try { exists = await command('git', ['-C', project.checkout, 'rev-parse', '--verify', '--quiet', `refs/heads/${job.branch}`]); }
+      catch (error) { if (error.cause?.code === 1) return; throw error; }
+      if (exists.trim()) await command('git', ['-C', project.checkout, 'branch', '-D', job.branch]);
+    });
+  }
+}
+
 async function run(argv, dependencies = {}) {
   const { projectName, dryRun } = parseArguments(argv);
   const loadConfig = dependencies.loadProjectConfig || loadProjectConfig;
@@ -210,6 +336,7 @@ async function run(argv, dependencies = {}) {
     return newJob;
   };
   let job;
+  let startedRun = false;
   const authorizeMilestoneRaw = (issue = candidate, existing = job) => project.milestoneAuthorization !== true ? Promise.resolve(null) : dependencies.checkMilestoneAuthorization
     ? dependencies.checkMilestoneAuthorization(issue, existing)
     : checkMilestoneAdmission(projectName, project, issue.number, {
@@ -264,14 +391,36 @@ async function run(argv, dependencies = {}) {
     if (!dependencies.parentJobId) return (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, options);
     assertNotCancelled();
     job.agentProcess = { status: 'launching' }; store.save(job);
-    const child = (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, { ...options, detached: true });
-    const claim = { status: 'running', pid: child.pid, startTime: require('./r1-process-claim').startTime(child.pid) };
+    let child;
+    try {
+      child = (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, { ...options, detached: true });
+    } catch (error) {
+      job.agentProcess = null; store.save(job); // spawn threw before returning a process
+      throw error;
+    }
+    if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
+      // Node reports asynchronous launch errors on an unspawned ChildProcess.
+      child.once('error', error => write(`Autopilot: delivery launch failed: ${errorMessage(error)}`));
+      job.agentProcess = null; store.save(job);
+      throw new Error('Delivery agent failed to start: no PID was assigned.');
+    }
+    const claim = { status: 'running', pid: child.pid, startTime: null };
     job.agentProcess = claim;
     try {
-      if (!claim.startTime) throw new Error('Delivery agent identity unavailable; job held.');
+      claim.startTime = require('./r1-process-claim').startTime(child.pid);
+      if (!claim.startTime) {
+        if (!require('./r1-process-claim').hasLiveClaim({ workerPid: child.pid, workerStartTime: null })) {
+          job.agentProcess = null; store.save(job);
+          throw new Error('Delivery agent exited before its identity checkpoint.');
+        }
+        throw Object.assign(new Error('Started delivery process identity unavailable; owner reconciliation required.'), { code: 'AUTOPILOT_PROCESS_UNCONFIRMED' });
+      }
       store.save(job);
     } catch (error) {
-      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      if (claim.startTime && require('./r1-process-claim').terminatePriorR1Worker({ r1Child: true, workerPid: claim.pid, workerStartTime: claim.startTime })) {
+        job.agentProcess = null;
+      }
+      if (job.agentProcess) error.code = 'AUTOPILOT_PROCESS_UNCONFIRMED';
       throw error;
     }
     child.once('close', () => {
@@ -562,6 +711,10 @@ async function run(argv, dependencies = {}) {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
     assertProcessStopped();
+    if (job?.merge && !job.terminal) {
+      await finishApprovedMerge(); store.save(job);
+      return { issue: candidate, job, outcome: { status: job.terminalState || job.status, terminal: job.terminal } };
+    }
     if (job?.architectureDecision?.resumeRequested) {
       const d = job.architectureDecision;
       try {
@@ -590,6 +743,9 @@ async function run(argv, dependencies = {}) {
     if (job?.architectureDecision) {
       await decisions.publish(project, job, store, { execFile: dependencies.execFile });
       return { issue: candidate, job, outcome: { status: 'paused_owner_decision', terminal: true, deliverable: false } };
+    }
+    if (job && !isResumable(job) && dependencies.parentJobId) {
+      return { issue: candidate, job, outcome: { status: job.terminalState, terminal: job.terminal } };
     }
     if (job && !isResumable(job)) {
       const existing = job;
@@ -636,6 +792,7 @@ async function run(argv, dependencies = {}) {
       && String(candidate.body || '').replace(/\s+/g, '').length < 40)) {
       job ||= createBoundJob({ projectName, repo: project.repo, issue: candidate,
         branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
+      job.originalIssue = structuredClone(candidate);
       const outcome = selection.unavailable ? 'failed' : 'needs_specification';
       recordFailure(job, 'admission', selection.unavailable
         ? 'Issue is not ready and has no resumable Autopilot checkpoint.'
@@ -646,12 +803,13 @@ async function run(argv, dependencies = {}) {
     if (job && dependencies.requestedIssue && !admitted.some(issue => issue.number === candidate.number)
       && !job.originalIssue?.body && !job.delivery?.commit) {
       job.ownershipBlocked = 'Issue requirements unavailable from discovery; hold existing work for owner reconciliation.';
+      job.ownershipBlockSource = 'discovery';
       store.save(job);
       return { issue: candidate, job, outcome: { status: 'ownership_blocked', terminal: false, deliverable: false } };
     }
-    if (job?.ownershipBlocked === 'Issue requirements unavailable from discovery; hold existing work for owner reconciliation.'
+    if (job?.ownershipBlockSource === 'discovery'
       && admitted.some(issue => issue.number === candidate.number)) {
-      delete job.ownershipBlocked;
+      delete job.ownershipBlocked; delete job.ownershipBlockSource;
       store.save(job);
     }
     // Before a new job allocates anything, leave an explicitly-closing PR
@@ -699,13 +857,12 @@ async function run(argv, dependencies = {}) {
       // without the target lock so other issues can make progress.
       phase = 'ci';
       if (dependencies.deliveryTimeoutMs !== undefined) {
-        job.ciWaitSince ||= store.now();
+        if (!job.ciWaitSince) { job.ciWaitSince = store.now(); store.save(job); }
         if (Date.parse(store.now()) - Date.parse(job.ciWaitSince) > dependencies.deliveryTimeoutMs) {
           handToHuman(job, 'ci', 'Required CI did not reach a final result within the delivery timeout.', store.now);
           store.save(job);
           return { issue: candidate, job, outcome: { status: job.terminalState, terminal: true, deliverable: false } };
         }
-        store.save(job);
       }
       targetLock = (dependencies.acquireTargetLock || (() => store.acquireTarget(project.repo, project.baseBranch)))();
       const integration = await synchronize();
@@ -949,7 +1106,7 @@ async function run(argv, dependencies = {}) {
     const reviewCorrection = Boolean(savedReviewCorrection && correction === savedReviewCorrection);
     phase = 'preparing';
     job.issue.title = candidate.title;
-    if (job.runs >= maxJobRuns && job.ralph?.status !== 'passed') {
+    if (job.runs - (job.supervisorStops || 0) >= maxJobRuns && job.ralph?.status !== 'passed') {
       handToHuman(job, 'correction', `Total feature run limit (${maxJobRuns}) reached.`, store.now);
       store.save(job);
       return { issue: candidate, job, outcome: { status: READY_FOR_HUMAN } };
@@ -958,6 +1115,7 @@ async function run(argv, dependencies = {}) {
     if (job.ralph?.status !== 'passed') {
       if (job.architectureDecisionHistory?.at(-1)?.resumedAt) resumePreparation = { runs: job.runs, ralph: structuredClone(job.ralph), verification: structuredClone(job.verification) };
       job.runs += 1;
+      startedRun = true;
     }
     job.status = 'preparing';
     store.save(job);
@@ -1180,12 +1338,25 @@ async function run(argv, dependencies = {}) {
       write(`Autopilot: project ${projectName}; issue #${candidate.number}; target busy, deferred.`);
       return { issue: candidate, workspace: null, result: null, outcome: { status: 'deferred' }, job };
     }
-    if (error.code === 'AUTOPILOT_STOPPING') return { issue: candidate, job, outcome: { status: 'stopping' } };
+    if (error.code === 'AUTOPILOT_STOPPING' || dependencies.isStopping?.()) {
+      if (job) {
+        if (startedRun && ACTIVE_STATUSES.has(job.status)) {
+          job.supervisorStops = (job.supervisorStops || 0) + 1;
+          for (const correction of [job.correction, job.reviewCorrection]) {
+            if (correction?.status === 'running') correction.status = 'eligible';
+          }
+          job.status = 'interrupted';
+          job.ralph.status = 'interrupted';
+        }
+        store.save(job);
+      }
+      return { issue: candidate, job, outcome: { status: 'stopping' } };
+    }
     if (job && error.code === 'AUTOPILOT_PROCESS_UNCONFIRMED') {
       job.ownershipBlocked = error.message; store.save(job);
       return { issue: candidate, job, outcome: { status: 'ownership_blocked', terminal: false, deliverable: false } };
     }
-    if (job && dependencies.environmentIsCancelled?.()) {
+    if (job && !job.merge && dependencies.environmentIsCancelled?.()) {
       recordFailure(job, phase, error, store.now);
       error.code = 'AUTOPILOT_CANCELLED';
     }
@@ -1216,7 +1387,7 @@ async function run(argv, dependencies = {}) {
           // infrastructure failures in that path still have a durable bound.
           const runLimitReached = job.ralph?.status === 'passed'
             ? job.failures.filter(failure => ['preparing', 'delivery'].includes(failure.phase)).length >= 3
-            : job.runs >= maxJobRuns;
+            : job.runs - (job.supervisorStops || 0) >= maxJobRuns;
           if (job.ralph && job.ralph.status === 'running') job.ralph.status = 'error';
           if (error.code === 'AUTOPILOT_INTEGRATION_BLOCKED') {
             handToHuman(job, 'integration', errorMessage(error), store.now);
@@ -1286,6 +1457,7 @@ async function run(argv, dependencies = {}) {
           }
         }
       }
+      if (!dependencies.isStopping?.()) await publishOutcome(project, job, store, dependencies);
     } finally {
       targetLock?.release();
       lock.release();
@@ -1307,4 +1479,4 @@ if (require.main === module) {
   main().then(exitCode => { process.exitCode = exitCode; });
 }
 
-module.exports = { USAGE, parseArguments, classifyRalphResult, cleanupTerminalWorkspaces, run, main };
+module.exports = { USAGE, parseArguments, classifyRalphResult, cleanupTerminalWorkspaces, cancelHeldDelivery, rearmCorrectedSpecification, run, main };

@@ -164,7 +164,9 @@ for (const [change, fixedManifest] of ['none', 'revoked', 'expired', 'edited', '
         resumed.recover(f.store.readTask(task.id, 'running'));
         f.store.moveTask(task.id, 'pending', 'running');
         resumed.advance(f.store.readTask(task.id, 'running'));
-        while (!original.load(106).terminal) await new Promise(resolve => setTimeout(resolve, 10));
+        const deadline = Date.now() + 5000;
+        while (!original.load(106).terminal && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(original.load(106).terminal, true, 'resume must complete within five seconds');
         assert.equal(f.jobs.read(task.id).status, 'merged'); assert.equal(merges, 1); assert.equal(reviews, 1);
         assert.deepEqual(f.events.slice(0, before.length), before, 'restart preserves original transcript records');
       }

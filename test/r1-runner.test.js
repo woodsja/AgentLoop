@@ -101,7 +101,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.equal(terminalLog.lines.filter(line => /implementation started/.test(line)).length, 1, 'resuming a persisted phase does not flood the transcript');
     assert.deepEqual(lines(path.join(root, 'merges')), [{ number: 7, headCommit: merged.job.evidence.commit, issue: 7 }]);
     assert.deepEqual(lines(path.join(root, 'closures')), [7]);
-    assert.ok(!commands().some(c => c.includes('DELETE')), 'queue transport does not delete delivery branches');
+    assert.ok(commands().some(c => c.join(' ') === 'gh api --method DELETE repos/example/repo/git/refs/heads/ralph/issue-7-issue-7'));
+    assert.ok(commands().some(c => c.join(' ').endsWith('branch -D ralph/issue-7-issue-7')));
 
     assert.ok(!commands().some(c => c[1] === 'pr' && c[2] === 'close'), 'a merged PR is never closed');
     // The CI watcher polls with a bound instead of on every 1.5s daemon tick.
@@ -116,6 +117,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.equal((await get(port, `/api/log/${unspecified.task.id}?lines=200`)).lines.filter(line => /terminal outcome: needs_specification/.test(line)).length, 1);
     assert.ok(!lines(path.join(root, 'workers')).includes('issue-8'));
     assert.ok(unspecified.job.evidence.diagnostics.some(f => /product specification/.test(f.message)));
+    assert.ok(commands().some(c => c.join(' ') === 'gh issue edit 8 --repo example/repo --remove-label ready-for-agent --add-label ready-for-human'));
+    assert.ok(commands().some(c => c[1] === 'issue' && c[2] === 'comment' && c[3] === '8' && /product specification/.test(c.at(-1))));
 
 
     // FAILED after the bounded review correction: PR closed, branch deleted, nothing merged.
@@ -125,7 +128,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.equal((await get(port, `/api/log/${rejected.task.id}?lines=200`)).lines.filter(line => /terminal outcome: failed/.test(line)).length, 1);
     assert.equal(lines(path.join(root, 'reviews')).filter(review => review.number === 9).length, 2);
     const closed = commands().find(c => c.slice(0, 5).join(' ') === 'gh pr close 9 --repo');
-    assert.equal(closed, undefined, 'queue transport does not close delivered PRs');
+    assert.ok(closed && /outcome FAILED/.test(closed.at(-1)) && !/please review|approve/i.test(closed.at(-1)), 'PR closed with an outcome report, not a review request');
+    assert.ok(commands().some(c => c.join(' ').includes('git/refs/heads/ralph/issue-9-issue-9')));
     assert.ok(rejected.job.evidence.diagnostics.length > 0);
     assert.equal(lines(path.join(root, 'merges')).length, 1);
 
@@ -186,7 +190,8 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     for (const event of ['queued for admission', 'admitted to the R1 runner', 'implementation started', 'deterministic verification passed', 'terminal outcome: merged']) {
       assert.equal(recoveredLog.lines.filter(line => line.includes(event)).length, 1, `restart does not duplicate ${event}`);
     }
-    assert.ok(JSON.parse(fs.readFileSync(path.join(project.stateDir, 'issue-11.json'))).r1LogEvents.includes('verification:1:passed'), 'navigation dedupe lives with the delivery checkpoint');
+    assert.ok(tasksFor(11)[0].r1LogEvents.includes('verification:1:passed'), 'navigation dedupe remains transport metadata');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(project.stateDir, 'issue-11.json'))).r1LogEvents, undefined);
     assert.equal(tasksFor(11)[0].r1, undefined);
 
     // Transcript append is best effort at every R1 transition, including

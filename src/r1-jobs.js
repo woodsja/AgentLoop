@@ -7,7 +7,7 @@ const { recorder, captureProcess, withExecution } = require('./execution-log');
 const { verifyTask } = require('./task-runner');
 const { spawn } = require('node:child_process');
 const { execFile } = require('./execution-log');
-const { run } = require('./autopilot');
+const { run, cancelHeldDelivery, rearmCorrectedSpecification } = require('./autopilot');
 const { loadProjectConfig } = require('./autopilot-config');
 const { discoverReadyIssues, selectReadyIssue } = require('./autopilot-github');
 const { deriveWorktreePath, cleanupIssueWorkspace } = require('./autopilot-workspace');
@@ -60,6 +60,14 @@ function createR1Jobs(store, options = {}) {
     if (seen.includes(key)) return;
     task.r1LogEvents = [...seen, key].slice(-20);
     recorder(store, task.id, { parentId: task.id })('transition', { key, summary });
+    // Transcript deduplication is transport metadata, not delivery state.
+    if (store.writeTask) for (const stage of ['pending', 'running', 'done']) {
+      try {
+        const current = store.readTask(task.id, stage);
+        store.writeTask({ ...current, r1LogEvents: task.r1LogEvents }, stage);
+        break;
+      } catch (error) { if (error.code !== 'ENOENT') break; }
+    }
     const line = `[${new Date().toISOString()}] R1: ${summary}`.replace(/[\r\n]+/g, ' ').slice(0, MAX_TRANSCRIPT_LINE);
     try {
       store.appendLogLine(task.id, line);
@@ -128,20 +136,40 @@ function createR1Jobs(store, options = {}) {
     const enqueue = authorization => {
       const existing = createJobStore(resolveStateDir(body.project, project)).load(body.issue);
       if (existing) {
-        for (const stage of ['pending', 'running', 'done']) {
-          try {
-            const task = store.readTask(existing.r1ParentJobId, stage);
-            if (task.project === body.project && task.issue === body.issue && task.autopilotStateDir) return task;
-          } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        const previous = () => {
+          const parentId = createJobStore(resolveStateDir(body.project, project)).load(body.issue).r1ParentJobId;
+          for (const stage of ['pending', 'running', 'done']) {
+            try {
+              const task = store.readTask(parentId, stage);
+              if (task.project === body.project && task.issue === body.issue && task.autopilotStateDir) return task;
+            } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          }
+          throw new Error('Existing delivery history requires owner reconciliation; it cannot be reassigned.');
+        };
+        if (existing.terminalState === 'needs_specification') {
+          return Promise.resolve(discover(project)).then(issues => {
+            const issue = issues.find(issue => issue.number === body.issue);
+            if (issue) {
+              const fresh = rearmCorrectedSpecification(body.project, project,
+                createJobStore(resolveStateDir(body.project, project)), issue,
+                previous => reserve(authorization, previous.r1ParentJobId));
+              if (fresh) return fresh;
+            }
+            return previous();
+          });
         }
-        throw new Error('Existing delivery history requires owner reconciliation; it cannot be reassigned.');
+        return previous();
       }
       if (typeof store.listTasks === 'function') {
         const reserved = ['pending', 'running'].flatMap(stage => store.listTasks(stage))
           .find(task => task.workflow === 'r1' && task.project === body.project && task.issue === body.issue);
         if (reserved) return reserved;
       }
+      return reserve(authorization);
+    };
+    const reserve = (authorization, rearmFrom) => {
       const task = store.enqueueTask({
+        ...(rearmFrom ? { rearmFrom } : {}), repo: project.repo,
         workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
         requiredCiWorkflow: project.ciWorkflow || null,
         ...(authorization ? { milestoneAuthorization: authorization } : {}),
@@ -166,7 +194,7 @@ function createR1Jobs(store, options = {}) {
   // Queue movement releases the dispatch slot; all delivery outcomes remain
   // in the existing Autopilot issue checkpoint. No result/evidence copy.
   function finish(task, job) {
-    if (!job?.terminal || job.agentProcess || (job.architectureDecision && job.architectureDecision.publication !== 'complete')) return;
+    if (!job?.terminal || (!job.cancelRequested && Object.values(job.outcomeActions || {}).some(action => !action.ok)) || job.agentProcess || job.environmentProcess || (job.architectureDecision && job.architectureDecision.publication !== 'complete')) return;
     store.moveTask(task.id, 'running', 'done');
     logTransition(task, `terminal:${job.terminalState}`, `terminal outcome: ${deliveryStatus(job, task.autonomous)}.`);
   }
@@ -196,13 +224,18 @@ function createR1Jobs(store, options = {}) {
     const original = createJobStore(task.autopilotStateDir);
     const attached = store.listR1ChildLoops?.(task.id) || [];
     if (attached.some(child => child.stage !== 'done')) return;
-    const saved = original.load(task.issue);
+    let saved = original.load(task.issue);
+    if (saved && saved.r1ParentJobId !== task.id && task.rearmFrom === saved.r1ParentJobId) {
+      const issue = (await discover(project)).find(issue => issue.number === task.issue);
+      if (issue) rearmCorrectedSpecification(task.project, project, original, issue, () => task);
+      saved = original.load(task.issue);
+    }
     if (saved && saved.r1ParentJobId !== task.id) {
       throw new Error('Delivery checkpoint belongs to another submission; owner reconciliation required.');
     }
     task.r1LogEvents = saved?.r1LogEvents || task.r1LogEvents || [];
     logTransition(task, 'admitted', 'admitted to the R1 runner.');
-    if (saved?.terminal && !saved.agentProcess && (!saved.architectureDecision || saved.architectureDecision.publication === 'complete')) return finish(task, saved);
+
     const phaseOf = deliveryPhase;
     const snapshot = snapshotter();
     const jobStore = { ...original,
@@ -214,9 +247,9 @@ function createR1Jobs(store, options = {}) {
       list: () => original.list().filter(job => job.issue.number === task.issue),
       save(job) {
         bindR1Parent(job, task.id);
-        task.r1LogEvents = job.r1LogEvents || task.r1LogEvents || [];
+        task.r1LogEvents ||= job.r1LogEvents || [];
         transcriptForJob(task, job);
-        job.r1LogEvents = task.r1LogEvents;
+        delete job.r1LogEvents;
         original.save(job);
         snapshot(task.id, job, details => store.appendExecution(task.id, { ...details, stage: phaseOf(job), attempt: job.runs }));
         return job;
@@ -226,7 +259,7 @@ function createR1Jobs(store, options = {}) {
       const optionsCancelChild = options.cancelChild;
       const mixedEnabled = project.implementationStrategy === 'worker-critic-loop';
       await run(['--project', task.project], {
-        ...dependencies,
+        ...dependencies, outcomeExecFile: dependencies.outcomeExecFile || options.execFile,
         jobStore, loadProjectConfig: () => project,
         requestedIssue: { number: task.issue, title: task.title },
         parentJobId: task.id, isStopping: () => closing,
@@ -298,8 +331,9 @@ function createR1Jobs(store, options = {}) {
       // Autopilot owns bounded retries and terminal outcomes. An unavailable
       // checkpoint or uncertain process owner leaves dispatch held, never a
       // fabricated terminal result or another worker.
-      if (!original.load(task.issue)) holdSupervision(task, error);
-      finish(task, original.load(task.issue));
+      const current = original.load(task.issue);
+      if (!current || (!current.terminal && !['failed', 'awaiting_ci'].includes(current.status))) holdSupervision(task, error);
+      finish(task, current);
     }
   }
 
@@ -311,15 +345,30 @@ function createR1Jobs(store, options = {}) {
     try { current = store.readTask(task.id, 'running'); }
     catch (missing) { if (missing.code === 'ENOENT') return; throw missing; }
     if (current.supervisionBlocked) return;
-    const reason = String(error.message || error).slice(0, 1000);
+    const reason = String(error.message || error);
     store.writeTask({ ...current, supervisionBlocked: { at: new Date().toISOString(), reason } }, 'running');
-    recorder(store, task.id, { parentId: task.id })('supervision_blocked', { message: reason });
+    recorder(store, task.id, { parentId: task.id })('supervision_blocked', { message: reason, stack: error.stack, code: error.code });
   }
 
   function advance(task) {
     if (active.has(task.id) || closing || Date.now() < (nextAdvance.get(task.id) || 0)) return;
     task = store.readTask(task.id, 'running');
-    if (!task.autopilotStateDir || task.supervisionBlocked) return; // inspect-only or operator-held
+    if (!task.autopilotStateDir) return; // historical records are inspect-only
+    const canonical = createJobStore(task.autopilotStateDir);
+    let saved;
+    try { saved = canonical.load(task.issue); }
+    catch (error) { holdSupervision(task, error); return; }
+    if (task.cancelRequested && !saved?.merge && !(store.listR1ChildLoops?.(task.id) || []).some(child => child.stage !== 'done')) {
+      try {
+        const cancelled = cancelHeldDelivery(task, canonical);
+        finish(task, cancelled);
+        if (!cancelled.terminal && cancelled.ownershipBlocked) nextAdvance.set(task.id, Infinity);
+      }
+      catch (error) { holdSupervision(task, error); }
+      return;
+    }
+    if (task.supervisionBlocked || saved?.ownershipBlocked
+      || Object.values(saved?.outcomeActions || {}).some(action => !action.ok && action.attempts >= 3)) return;
     if (task.status !== 'running') {
       task.status = 'running';
       store.writeTask(task, 'running');
@@ -418,22 +467,34 @@ function createR1Jobs(store, options = {}) {
         // Recover those records even when the queue checkpoint predates the action.
         let durable = task.r1;
         if (task.autopilotStateDir) {
-          durable = createJobStore(task.autopilotStateDir).load(task.issue);
-          if (durable && durable.r1ParentJobId !== id) throw new Error('Delivery checkpoint ownership mismatch.');
+          try {
+            durable = createJobStore(task.autopilotStateDir).load(task.issue, id);
+          } catch (error) {
+            if (stage === 'pending' && task.status === 'queued'
+              && !fs.existsSync(path.join(task.autopilotStateDir, `issue-${task.issue}.json`))) {
+              durable = null; // admitted reservation has not started yet
+            } else {
+              return { id, project: task.project, status: 'blocked', phase: 'blocked',
+                diagnostic: error.message, evidence: null, phases: [],
+                nextAction: { action: 'owner_decision', reason: error.message },
+                executionJournal: { id, raw: `/api/log/${id}?raw=1` } };
+            }
+          }
         } else if (task.r1?.architectureDecision || task.r1?.architectureDecisionHistory?.length) {
           const project = load(task.project);
           const current = createJobStore(resolveStateDir(task.project, project)).load(task.issue);
           if (current && current.createdAt === task.r1.createdAt && current.r1ParentJobId === id) durable = current;
         }
         const projected = evidence(durable, task.requiredCiWorkflow);
-        const status = task.supervisionBlocked ? 'blocked' : task.autopilotStateDir
+        const supervisionBlocked = task.supervisionBlocked && !durable?.terminal;
+        const status = supervisionBlocked ? 'blocked' : task.autopilotStateDir
           ? (durable ? deliveryStatus(durable, task.autonomous) : task.status || stage)
           : (durable && durable !== task.r1 ? durable.terminalState || durable.status : task.status || stage);
-        const phase = task.supervisionBlocked ? 'blocked' : task.autopilotStateDir ? durable ? deliveryPhase(durable) : 'queued' : task.phase;
+        const phase = supervisionBlocked ? 'blocked' : task.autopilotStateDir ? durable ? deliveryPhase(durable) : 'queued' : task.phase;
         return { id, status, project: task.project,
           ...(task.failure ? { failure: task.failure } : {}),
           phase, phases: task.autopilotStateDir ? durable?.phases || [{ phase: 'queued', at: task.createdAt }] : task.phases || [], evidence: projected,
-          nextAction: task.supervisionBlocked ? { action: 'owner_decision', reason: task.supervisionBlocked.reason } : nextAction({ ...task, status, phase }, projected),
+          nextAction: supervisionBlocked ? { action: 'owner_decision', reason: task.supervisionBlocked.reason } : nextAction({ ...task, status, phase }, projected),
           executionJournal: { id, raw: `/api/log/${id}?raw=1` },
         };
       } catch (error) {
@@ -444,6 +505,7 @@ function createR1Jobs(store, options = {}) {
   }
 
   function cancel(id, terminate) {
+    nextAdvance.delete(id); // an explicit owner retry may reconcile an unresolved cancellation
     for (const [child, parentId] of children) if (parentId === id) {
       try { process.kill(-child.pid, 'SIGKILL'); } catch { terminate(child); }
     }

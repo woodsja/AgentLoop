@@ -22,6 +22,7 @@ function stripAbsPaths(text) {
 
 function sanitizeState(value) {
   if (typeof value === 'string') {
+    if (/^\/api\/log\/t-[a-f0-9]{8}\?raw=1$/.test(value)) return value;
     return stripAbsPaths(value);
   }
 
@@ -93,6 +94,13 @@ function roleEngines(task) {
   } : {};
 }
 
+function deliveryFields(task) {
+  if (task.workflow !== 'r1') return {};
+  return { project: task.project, status: task.status, phase: task.phase,
+    ...(task.diagnostic ? { diagnostic: task.diagnostic } : {}),
+    nextAction: task.nextAction, executionJournal: task.executionJournal };
+}
+
 function publicPending(task, defaultEngine) {
   return {
     id: task.id,
@@ -101,6 +109,7 @@ function publicPending(task, defaultEngine) {
     ...(task.type === 'loop' ? { project: projectName(task) } : {}),
     engine: task.engine || defaultEngine,
     ...roleEngines(task),
+    ...deliveryFields(task),
     createdAt: task.createdAt,
   };
 }
@@ -228,6 +237,7 @@ function publicRunning(task, activity, defaultEngine, now = Date.now()) {
     ...(task.type === 'loop' ? { project: projectName(task) } : {}),
     engine: task.engine || defaultEngine,
     ...roleEngines(task),
+    ...deliveryFields(task),
     startedAt: task.startedAt,
     elapsedMs: Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : 0,
     ...(activity && activity.text ? { lastActivity: activity.text } : {}),
@@ -278,6 +288,7 @@ function publicRecent(task, result, defaultEngine) {
     title: displayTitle(task),
     engine: task.engine || defaultEngine,
     ...roleEngines(task),
+    ...deliveryFields(task),
     status: merged.status,
     summary: typeof merged.summary === 'string' ? merged.summary : '',
     ...(costUsd !== null ? { costUsd } : {}),

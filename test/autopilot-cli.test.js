@@ -2609,3 +2609,102 @@ test('supervisor shutdown preserves a delivered checkpoint for restart without o
   assert.equal(saved.terminal, false);
   assert.equal(saved.status, 'awaiting_ci');
 });
+
+test('missing PID is a retryable pre-start failure, never an uncertain ownership hold', async () => {
+  const store = temporaryStore();
+  const issue = { number: 211, title: 'Missing CLI', body: 'Exact requirements' };
+  const deps = enabledDependencies(store, {
+    parentJobId: 't-0000abcd', discoverReadyIssues: async () => [issue],
+    ralphOptions: { spawnImpl: () => { const child = new (require('node:events').EventEmitter)(); return child; } },
+    createRalphTaskService: options => ({ run: async () => { options.spawnImpl('missing-cli', [], {}); throw new Error('unexpected start'); } }),
+  });
+  await assert.rejects(runAutopilot(['--project', 'demo'], deps), /start|identity|launch/i);
+  assert.equal(createJobStore(store.directory).load(issue.number).agentProcess, null);
+  const result = await runAutopilot(['--project', 'demo'], { ...deps, createRalphTaskService: () => ({ run: async () => ({ status: 'needs_planning', attempts: [] }) }) });
+  assert.equal(result.job.runs, 2);
+  assert.equal(result.job.ownershipBlocked, undefined);
+});
+
+test('supervisor stop during active worker preserves run budget and resumes without a failure', async () => {
+  const store = temporaryStore();
+  let stopping = false;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [{ number: 212, title: 'Stop worker' }],
+    isStopping: () => stopping,
+    createRalphTaskService: () => ({ run: async () => { stopping = true; throw new Error('worker killed by supervisor'); } }),
+  }));
+  const saved = store.load(212);
+  assert.equal(saved.terminal, false);
+  assert.equal(saved.runs, 1);
+  assert.equal(saved.supervisorStops, 1);
+  assert.equal(saved.failures.length, 0);
+  assert.equal(saved.status, 'interrupted');
+  const resumed = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    maxJobRuns: 1, discoverReadyIssues: async () => [{ number: 212, title: 'Stop worker' }],
+    createRalphTaskService: () => ({ run: async () => ({ status: 'needs_planning', attempts: [] }) }),
+  }));
+  assert.equal(resumed.job.runs, 2, 'a distinct attempt identity survives restart');
+  assert.equal(resumed.job.failures.length, 0, 'shutdown spends no retry budget');
+});
+
+test('canonical insufficient-spec outcome comments and relabels once without starting work', async () => {
+  const store = temporaryStore(); const commands = [];
+  const issue = { number: 213, title: 'Missing specification', body: 'fix it' };
+  const deps = enabledDependencies(store, {
+    parentJobId: 't-0000abcd', requestedIssue: issue,
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, checkout: '/tmp', humanLabel: 'human' }),
+    discoverReadyIssues: async () => [issue],
+    createRalphTaskService: () => assert.fail('no worker before a specification'),
+    execFile: (file, args, options, callback) => { commands.push([file, ...args]); callback(null, args.includes('--json') ? '{"comments":[]}' : '', ''); },
+  });
+  await runAutopilot(['--project', 'demo'], deps);
+  assert.equal(store.load(issue.number).terminalState, 'needs_specification');
+  assert.equal(commands.filter(c => c[1] === 'issue' && c[2] === 'comment').length, 1);
+  assert.ok(commands.some(c => c.includes('--remove-label') && c.includes('--add-label')));
+  await runAutopilot(['--project', 'demo'], deps);
+  assert.equal(commands.filter(c => c[1] === 'issue' && c[2] === 'comment').length, 1);
+});
+
+for (const state of ['OPEN', 'MERGED', 'held']) test(`canonical failed PR outcome respects ${state} and bounded cleanup retries`, async () => {
+  const store = temporaryStore(); const commands = [];
+  const issue = { number: 214, title: 'Failed delivery' };
+  saveJob(store, issue.number, { r1ParentJobId: 't-0000abcd', terminal: true, terminalState: 'failed', status: 'failed',
+    workspaceState: state === 'held' ? 'integration_retained' : 'removed',
+    branch: 'ralph/issue-214-failed-delivery',
+    pr: { number: 99, url: 'https://example.invalid/pull/99' }, delivery: { branch: 'ralph/issue-214-failed-delivery', commit: 'abc123', pushed: true } });
+  const deps = enabledDependencies(store, {
+    parentJobId: 't-0000abcd', requestedIssue: issue, discoverReadyIssues: async () => [],
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, checkout: '/tmp', humanLabel: 'human' }),
+    execFile: (file, args, options, callback) => {
+      commands.push([file, ...args]);
+      if (args[0] === 'api') return callback(new Error('temporary provider outage'), '', 'temporary provider outage');
+      callback(null, args.includes('--json') ? JSON.stringify(args.includes('comments') ? { comments: [] } : { state }) : 'exists', '');
+    },
+  });
+  for (let i = 0; i < 5; i++) await runAutopilot(['--project', 'demo'], deps);
+  if (state === 'held') { assert.equal(commands.length, 0); return; }
+  assert.equal(commands.filter(c => c[1] === 'api').length, 3, 'cleanup is bounded');
+  assert.equal(commands.filter(c => c[1] === 'pr' && c[2] === 'close').length, state === 'MERGED' ? 0 : 1);
+  assert.equal(commands.filter(c => c[1] === 'issue' && c[2] === 'comment').length, state === 'MERGED' ? 0 : 1);
+  assert.equal(store.load(214).outcomeActions['delete-remote-branch'].attempts, 3);
+});
+
+test('restart after recorded merge reconciles closure despite a later cancellation request', async () => {
+  const store = temporaryStore();
+  const job = saveJob(store, 215, { status: 'awaiting_ci',
+    pr: { number: 99, url: 'https://example.invalid/pull/99' },
+    delivery: { branch: 'ralph/issue-215-issue-215', commit: 'abc123', pushed: true },
+    merge: { prNumber: 99, approvedHead: 'abc123', commit: 'merged123', repo: 'example/repo', mergedAt: store.now(), issueClosed: false } });
+  const attempt = beginReviewAttempt(job, store.now, { reviewer: 'claude:sonnet', model: 'sonnet', policy: 'always', commit: 'abc123' });
+  recordReview(job, { reviewer: 'claude:sonnet', verdict: 'PASS', findings: [], policy: 'always', commit: 'abc123', attempt }, store.now); store.save(job);
+  let closed = 0;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, baseBranch: 'main', reviewPolicy: 'always' }),
+    discoverReadyIssues: async () => [{ number: 215, title: 'Merged' }],
+    environmentIsCancelled: () => true,
+    observePullRequest: async () => ({ number: 99, state: 'MERGED', isCrossRepository: false, headRefName: job.branch, headRefOid: 'abc123', baseRefName: 'main', mergeCommit: 'merged123' }),
+    reconcileIssueClosure: async () => { closed++; return {}; },
+    createRalphTaskService: () => assert.fail('merged work must never run again'),
+  }));
+  assert.equal(store.load(215).terminalState, 'merged'); assert.equal(closed, 1);
+});

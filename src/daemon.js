@@ -715,7 +715,13 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       let parent;
       try { parent = store.readTask(loop.r1Child.parentJobId, 'running'); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
-      if (!parent && loop.authorizationBlocked) throw new Error('Milestone parent is not running; session remains on hold.');
+      if (!parent?.autopilotStateDir) throw new Error('Canonical R1 parent is not running; historical sessions are read-only.');
+      const job = require('./autopilot-state').createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id);
+      if (parent.cancelRequested || parent.status !== 'running' || job.terminal || job.status !== 'running'
+        || job.runs !== loop.r1Child.attempt || job.project !== loop.project
+        || job.worktreePath !== loop.projectPath || job.workspaceState !== 'prepared') {
+        throw new Error('Canonical R1 parent no longer authorizes this child session.');
+      }
       if (parent?.milestoneAuthorization) {
         require('./milestone-work').checkCurrent(parent.milestoneAuthorization, { stateDir: store.paths.state });
       }
@@ -1606,7 +1612,6 @@ function fillSlots() {
     .filter(task => task.workflow !== 'r1' || task.autopilotStateDir);
   const r1 = running.find(task => task.workflow === 'r1');
   if (r1) {
-    if (!r1.autopilotStateDir) return; // historical parent ownership remains held for the owner
     r1Jobs.advance(r1);
     // R1 owns the coordination slot. While its child is executing, no other
     // project can use a worker slot. This avoids maxConcurrent=1 deadlock.
@@ -1665,8 +1670,8 @@ function fillSlots() {
     if (task.workflow === 'r1' && !task.autopilotStateDir) continue;
     if (task.r1Child) {
       let parent;
-      try { parent = store.readTask(task.r1Child.parentJobId, 'pending'); } catch {}
-      if (parent && !parent.autopilotStateDir) continue;
+      try { parent = store.readTask(task.r1Child.parentJobId, 'running'); } catch {}
+      if (!parent?.autopilotStateDir) continue;
     }
     if (task.r1Child || task.workflow === 'r1') {
       canonical.push(entry);
@@ -1856,7 +1861,7 @@ function daemonState() {
   const defaultEngine = store.config.defaultEngine;
   const projectTask = task => {
     if (!task.autopilotStateDir) return task;
-    const current = r1Jobs.read(task.id);
+    const current = r1Jobs.read(task.id) || { status: 'blocked', diagnostic: 'Canonical checkpoint unavailable.', executionJournal: { raw: `/api/log/${task.id}?raw=1` } };
     return { ...task, ...require('./execution-preview').preview(current),
       ...(current.evidence?.updatedAt ? { finishedAt: current.evidence.updatedAt } : {}) };
   };
@@ -2561,10 +2566,10 @@ function recoverRunningTasks() {
     try {
       const parent = store.readTask(child.r1Child.parentJobId, 'running');
       const job = parent.autopilotStateDir
-        ? require('./autopilot-state').createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id) : parent.r1;
+        ? require('./autopilot-state').createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id) : null;
       activeParent = parent.workflow === 'r1' && parent.status === 'running'
         && job?.runs === child.r1Child.attempt && !parent.cancelRequested;
-    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    } catch (error) { console.error(`R1 child recovery denied: ${error.message}`); }
     if (!activeParent) failUnauthorizedR1Child(child, new Error('Pending R1 child orphaned by daemon restart.'));
   }
 }

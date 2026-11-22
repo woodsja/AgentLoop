@@ -683,11 +683,45 @@ function createJobStore(stateDir, options = {}) {
   }
 
   function load(issueNumber, parentId) {
+    if (parentId !== undefined && /^t-[a-f0-9]{8}$/.test(parentId)) {
+      const archived = readJobFile(path.join(directory, 'attempts', parentId, `issue-${issueNumber}.json`));
+      if (archived) {
+        if (archived.r1ParentJobId !== parentId || !archived.terminal) throw new Error('Archived checkpoint ownership mismatch.');
+        return archived;
+      }
+    }
     const job = readJobFile(jobPath(issueNumber));
     if (parentId !== undefined && (!job || job.r1ParentJobId !== parentId)) {
       throw new Error('Autopilot checkpoint does not belong to this parent.');
     }
     return job;
+  }
+
+  // Immutable snapshots use the existing checkpoint representation. They are
+  // inspection history, never selected by list() or used as active issue state.
+  function archive(job) {
+    if (!/^t-[a-f0-9]{8}$/.test(job.r1ParentJobId || '') || !job.terminal) throw new Error('Only an identified terminal attempt can be archived.');
+    const destination = path.join(directory, 'attempts', job.r1ParentJobId);
+    fs.mkdirSync(destination, { recursive: true });
+    for (const suffix of ['.json', '.execution.ndjson']) {
+      const source = jobPath(job.issue.number).replace(/\.json$/, suffix);
+      const target = path.join(destination, path.basename(source));
+      if (!fs.existsSync(source)) continue;
+      const bytes = fs.readFileSync(source);
+      try {
+        const fd = fs.openSync(target, 'wx', 0o600);
+        try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        const archived = fs.readFileSync(target);
+        if (suffix === '.json' ? !archived.equals(bytes) : !bytes.subarray(0, archived.length).equals(archived)) {
+          throw new Error('Immutable attempt archive differs from the prior checkpoint.');
+        }
+      }
+    }
+    fsyncDirectory(destination);
+    fsyncDirectory(path.dirname(destination));
+    fsyncDirectory(directory);
   }
 
   function list() {
@@ -716,9 +750,9 @@ function createJobStore(stateDir, options = {}) {
     validateJob(job, jobPath(job && job.issue && job.issue.number));
     job.updatedAt = now();
     if (job.r1ParentJobId) {
-      const phase = require('./r1-status').deliveryPhase(job);
+      const phase = deliveryPhase(job);
       job.phases ||= [{ phase: 'queued', at: job.createdAt }];
-      if (job.phases.at(-1)?.phase !== phase) job.phases.push({ phase, at: job.updatedAt });
+      if (job.phases.at(-1)?.phase !== phase) job.phases = [...job.phases, { phase, at: job.updatedAt }].slice(-50);
     }
     const file = jobPath(job.issue.number).replace(/\.json$/, '.execution.ndjson');
     const summary = snapshot(job.issue.number, job, record => journal.append(file, { ...record, timestamp: now() }));
@@ -785,7 +819,7 @@ function createJobStore(stateDir, options = {}) {
     throw new Error(`Autopilot job lock ${filePath} could not be acquired`);
   }
 
-  return { directory, jobPath, load, list, save, acquire, acquireTarget, now, appendIntegrationEvent };
+  return { directory, jobPath, load, list, save, archive, acquire, acquireTarget, now, appendIntegrationEvent };
 }
 
 function isResumable(job) {
@@ -805,13 +839,26 @@ function isResumable(job) {
 // job is terminal or already passed are never restarted.
 function selectIssueForJobs(issues, jobs, choose) {
   const byIssue = new Map(jobs.map(job => [job.issue.number, job]));
-  const eligible = issues.filter(issue => isResumable(byIssue.get(issue.number)));
+  const eligible = issues.filter(issue => {
+    const job = byIssue.get(issue.number);
+    return isResumable(job) || (job.terminalState === 'needs_specification'
+      && String(issue.body || '').replace(/\s+/g, '').length >= 40
+      && issue.body !== job.originalIssue?.body);
+  });
   const resuming = eligible.filter(issue => byIssue.has(issue.number));
   const issue = choose(resuming.length > 0 ? resuming : eligible);
   return issue ? { issue, job: byIssue.get(issue.number) || null } : null;
 }
 
+function deliveryPhase(job) {
+  if (job.terminal) return ['merged', 'ready_for_human_merge'].includes(job.terminalState) ? 'completed' : job.terminalState;
+  if (job.authorizationBlocked || job.ownershipBlocked) return 'blocked';
+  if (job.reviewHistory?.at(-1)?.status === 'running') return 'review';
+  if (job.status === 'running') return job.phase || 'implementation';
+  return job.status === 'awaiting_ci' ? 'ci' : job.status === 'pending' ? 'queued' : job.status;
+}
 module.exports = {
+  deliveryPhase,
   ACTIVE_STATUSES,
   DEFAULT_MAX_CORRECTIVE_CYCLES,
   DEFAULT_MAX_JOB_RUNS,
