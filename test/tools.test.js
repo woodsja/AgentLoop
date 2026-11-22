@@ -107,4 +107,6 @@ test('R1 admission remains separate from historical read-only job tools', async 
   const canonical = tools.tools.find((tool) => tool.name === 'submit_r1_job');
   assert.deepEqual(canonical.inputSchema.required, ['project', 'issue']);
   assert.equal(Object.hasOwn(canonical.inputSchema.properties, 'prompt'), false);
+  assert.deepEqual(canonical.inputSchema.properties.worktree, { type: 'string' });
+  assert.equal(canonical.inputSchema.additionalProperties, false);
 });

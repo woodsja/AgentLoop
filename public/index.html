@@ -771,7 +771,7 @@ body.panel-open{overflow:hidden}
   <div class="dhead">
     <span class="eb">Submit development job</span>
     <span class="ttl"></span>
-    <button id="jclose" aria-label="Close job panel">Close</button>
+    <button id="jclose" aria-label="Close job panel"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"></path></svg></button>
   </div>
   <div class="pform">
     <form id="jobForm">
@@ -1373,18 +1373,14 @@ async function loadProjects(){
     if (!r.ok) throw new Error('http ' + r.status);
     const data = await r.json();
     const projects = Array.isArray(data?.projects) ? data.projects.filter(name => typeof name === 'string' && name) : [];
-    {
-      const select = $('#jobProject');
-      select.replaceChildren(new Option(projects.length ? 'Select a project' : 'No registered projects', ''));
-      for (const name of projects) select.add(new Option(name, name));
-      select.disabled = projects.length === 0;
-    }
+    const select = $('#jobProject');
+    select.replaceChildren(new Option(projects.length ? 'Select a project' : 'No registered projects', ''));
+    for (const name of projects) select.add(new Option(name, name));
+    select.disabled = projects.length === 0;
   } catch (e) {
-    {
-      const select = $('#jobProject');
-      select.replaceChildren(new Option('Unable to load projects', ''));
-      select.disabled = true;
-    }
+    const select = $('#jobProject');
+    select.replaceChildren(new Option('Unable to load projects', ''));
+    select.disabled = true;
   }
 }
 

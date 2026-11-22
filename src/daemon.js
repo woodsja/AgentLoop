@@ -11,7 +11,7 @@ const { createR1Jobs } = require('./r1-jobs');
 const { startTime: r1ProcessStartTime, terminatePriorR1Worker } = require('./r1-process-claim');
 let r1Jobs = createR1Jobs(store, { cancelChild: cancelOwnedR1Child });
 const engines = require('./engines');
-const { resolveProject, resolveWorkerScope } = require('./project-registry');
+const { resolveWorkerScope } = require('./project-registry');
 const state = require('./state');
 const {
   taskPrompt,
@@ -2203,22 +2203,6 @@ async function createMessage(req, res) {
   sendJson(res, 200, store.appendMessage({ kind, text }));
 }
 
-function isDirectory(filePath) {
-  try {
-    return fs.statSync(filePath).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function isFile(filePath) {
-  try {
-    return fs.statSync(filePath).isFile();
-  } catch {
-    return false;
-  }
-}
-
 function runGit(projectPath, args) {
   try {
     const result = spawnSync('git', args, {
@@ -2312,11 +2296,6 @@ function projectTreeUnchanged(before, projectPath, attempts = 4) {
 
 function madeNoChanges(before, after) {
   return sameProjectTree(before, after) && before.head === after.head;
-}
-
-function insideGitWorkTree(projectPath) {
-  const result = runGit(projectPath, ['rev-parse', '--is-inside-work-tree']);
-  return result.ok && result.output === 'true';
 }
 
 // A worker that committed its own work leaves nothing to commit, so its sha is this cycle's

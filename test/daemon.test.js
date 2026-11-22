@@ -32,6 +32,17 @@ function requestJson(server, method, requestPath, body) {
   });
 }
 
+function requestBytes(server, requestPath) {
+  return new Promise((resolve, reject) => {
+    const address = server.address();
+    http.get({ host: '127.0.0.1', port: address.port, path: requestPath }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, bytes: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+}
+
 function isolatedDaemon(config, stateDir) {
   const configPath = path.join(stateDir, 'config.json');
   fs.writeFileSync(configPath, JSON.stringify(config));
@@ -83,7 +94,7 @@ async function listenHttp(t, server) {
   }
 }
 
-test('HTTP accepts new development jobs only through the canonical R1 admission', async t => {
+test('legacy HTTP submission routes are removed and cannot enqueue a new task', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-http-'));
   const project = path.join(directory, 'project');
   fs.mkdirSync(project);
@@ -141,6 +152,45 @@ test('historical HTTP jobs remain inspectable after removing new direct submissi
       project: 'demo',
       result: { id: submitted.body.id, status: 'done', summary: 'Completed.' },
     });
+
+    // Read the same historical result through the actual MCP facade and real HTTP handler.
+    const facade = require('../src/tools');
+    const daemonRequest = async route => {
+      const result = await requestJson(server, 'GET', route);
+      return { statusCode: result.status, value: result.body };
+    };
+    const compactStatus = await facade.callTool({ name: 'get_job_status', arguments: { id: legacy.id } }, { daemonRequest });
+    const compactResult = await facade.callTool({ name: 'get_job_result', arguments: { id: legacy.id } }, { daemonRequest });
+    assert.equal(compactStatus.structuredContent.status, 'done');
+    assert.equal(compactResult.structuredContent.result.status, 'done');
+
+    // Both historic loop and R1 job IDs remain visible through the same read-only route.
+    const pastLoop = isolated.store.enqueueLoop({ project: 'demo', projectPath: fs.realpathSync(project) });
+    const pastR1 = isolated.store.enqueueTask({ project: 'demo', workflow: 'r1', issue: 8 });
+    for (const past of [pastLoop, pastR1]) {
+      isolated.store.writeResult({ id: past.id, status: 'failed', reason: 'archived_test', summary: 'Retained.' });
+      isolated.store.writeTask({ ...past, status: 'failed' }, 'pending');
+      isolated.store.moveTask(past.id, 'pending', 'done');
+      const found = await requestJson(server, 'GET', `/api/jobs/${past.id}`);
+      assert.equal(found.status, 200);
+      assert.equal(found.body.status, 'failed');
+      assert.equal((await facade.callTool({ name: 'get_job_result', arguments: { id: past.id } }, { daemonRequest })).structuredContent.result.status, 'failed');
+    }
+
+    // The owner gets every captured byte from historic records, not only compact summaries.
+    const captured = Buffer.from('owner output /home/owner/raw-file\n' + 'z'.repeat(2000));
+    isolated.store.appendExecution(legacy.id, { event: 'output', role: 'worker', stream: 'stdout', base64: captured.toString('base64') });
+    const source = fs.readFileSync(isolated.store.executionPath(legacy.id));
+    const download = await requestBytes(server, `/api/log/${legacy.id}?download=1`);
+    assert.equal(download.status, 200);
+    assert.deepEqual(download.bytes, source);
+    const page = await requestJson(server, 'GET', `/api/log/${legacy.id}?raw=1&bytes=262144`);
+    assert.equal(page.status, 200);
+    assert.deepEqual(Buffer.from(page.body.base64, 'base64'), source);
+    const records = source.toString('utf8').trim().split('\n').map(JSON.parse);
+    const output = records.find(record => record.event === 'output' && record.role === 'worker' && record.stream === 'stdout');
+    assert.ok(output, 'the archived journal retains the captured stdout event');
+    assert.deepEqual(Buffer.from(output.base64, 'base64'), captured);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     isolated.restore();
