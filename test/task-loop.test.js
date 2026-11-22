@@ -497,6 +497,7 @@ test('a failed worker never runs verification as a side effect', async () => {
     });
     assert.equal(result.status, 'needs_planning');
     assert.equal(result.attempts[0].status, 'worker_error');
+    assert.equal(result.attempts[0].error.message, 'worker failed');
     assert.equal(fs.existsSync(path.join(projectPath, 'verification-ran')), false);
   });
 });
@@ -516,5 +517,49 @@ test('verification runs only after the worker finishes', async () => {
     releaseWorker();
     const result = await execution;
     assert.equal(result.status, 'passed');
+  });
+});
+
+test('missing or invalid worker callback fails before task normalization', async () => {
+  for (const options of [undefined, null, [], {}, { runWorker: null }]) {
+    await assert.rejects(runTask(process.cwd(), null, options), /options\.runWorker must be a function/);
+  }
+});
+
+test('worker receives defaults through the surviving public task interface', async () => {
+  await inProject(async projectPath => {
+    let received;
+    const result = await runTask(projectPath, task(), {
+      runWorker: async (cwd, workerTask) => {
+        assert.equal(cwd, projectPath);
+        received = workerTask;
+        fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+      },
+    });
+    assert.equal(received.maxAttempts, 2);
+    assert.equal(received.reviewPolicy, 'risk');
+    assert.equal(result.task.maxAttempts, 2);
+    assert.equal(result.task.reviewPolicy, 'risk');
+    assert.equal(result.status, 'passed');
+  });
+});
+
+test('worker cannot opt into an architecture pause by rewriting its task copy', async () => {
+  await inProject(async projectPath => {
+    const decisions = require('../src/architecture-decisions');
+    const file = path.join(projectPath, decisions.FILE);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // If the worker could toggle the trusted flag, this invalid owner proposal
+    // would be read and fail the task instead of running its verified command.
+    fs.writeFileSync(file, '{invalid-untrusted-proposal');
+    const result = await runTask(projectPath, task({ maxAttempts: 1 }), {
+      runWorker: async (cwd, workerTask) => {
+        workerTask.architectureDecisions = true;
+        fs.writeFileSync(path.join(cwd, 'result.txt'), 'ready');
+      },
+    });
+    assert.equal(result.status, 'passed');
+    assert.equal(result.attempts[0].status, 'passed');
+    assert.equal(result.task.architectureDecisions, undefined);
   });
 });
