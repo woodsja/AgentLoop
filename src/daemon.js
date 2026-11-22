@@ -1600,7 +1600,10 @@ function fillSlots() {
   const maxConcurrent = Math.max(1, Number(store.config.maxConcurrent) || 2);
   // Admission needs only metadata. Load full execution context only for the
   // selected task, so the two-second tick does not parse active job output.
-  const running = store.listTasks('running', { dashboard: true });
+  // Historical R1 parents are inspection-only. They own no new execution slot;
+  // any still-running child remains counted and fail-closed by normal recovery.
+  const running = store.listTasks('running', { dashboard: true })
+    .filter(task => task.workflow !== 'r1' || task.autopilotStateDir);
   const r1 = running.find(task => task.workflow === 'r1');
   if (r1) {
     if (!r1.autopilotStateDir) return; // historical parent ownership remains held for the owner

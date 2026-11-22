@@ -298,20 +298,34 @@ function createR1Jobs(store, options = {}) {
       // Autopilot owns bounded retries and terminal outcomes. An unavailable
       // checkpoint or uncertain process owner leaves dispatch held, never a
       // fabricated terminal result or another worker.
+      if (!original.load(task.issue)) holdSupervision(task, error);
       finish(task, original.load(task.issue));
     }
+  }
+
+  // Supervisor admission failures are not delivery outcomes. Hold the
+  // reservation, expose a durable operator diagnostic and never poll-retry an
+  // unauthorised executor. Autopilot remains the sole delivery-state owner.
+  function holdSupervision(task, error) {
+    let current;
+    try { current = store.readTask(task.id, 'running'); }
+    catch (missing) { if (missing.code === 'ENOENT') return; throw missing; }
+    if (current.supervisionBlocked) return;
+    const reason = String(error.message || error).slice(0, 1000);
+    store.writeTask({ ...current, supervisionBlocked: { at: new Date().toISOString(), reason } }, 'running');
+    recorder(store, task.id, { parentId: task.id })('supervision_blocked', { message: reason });
   }
 
   function advance(task) {
     if (active.has(task.id) || closing || Date.now() < (nextAdvance.get(task.id) || 0)) return;
     task = store.readTask(task.id, 'running');
-    if (!task.autopilotStateDir) return; // historical records are read-only
+    if (!task.autopilotStateDir || task.supervisionBlocked) return; // inspect-only or operator-held
     if (task.status !== 'running') {
       task.status = 'running';
       store.writeTask(task, 'running');
     }
     const promise = withExecution((event, details) => recorder(store, task.id, { parentId: task.id })(event, details), () => execute(task))
-      .catch(error => recorder(store, task.id, { parentId: task.id })('supervision_blocked', { message: error.message, stack: error.stack }))
+      .catch(error => holdSupervision(task, error))
       .finally(() => {
         active.delete(task.id);
         nextAdvance.set(task.id, Date.now() + ciPollMs);
@@ -326,7 +340,7 @@ function createR1Jobs(store, options = {}) {
     if (closing || admitting || Date.now() < nextAdmission) return admitting;
     nextAdmission = Date.now() + admitIntervalMs;
     admitting = (async () => {
-      if (['pending', 'running'].some(stage => store.listTasks(stage).some(task => task.workflow === 'r1'))) return null;
+      if (['pending', 'running'].some(stage => store.listTasks(stage).some(task => task.workflow === 'r1' && task.autopilotStateDir))) return null;
       for (const name of Object.keys(store.config.allowedProjects || {}).sort()) {
         let project;
         try { project = load(name); } catch (error) {
@@ -412,14 +426,14 @@ function createR1Jobs(store, options = {}) {
           if (current && current.createdAt === task.r1.createdAt && current.r1ParentJobId === id) durable = current;
         }
         const projected = evidence(durable, task.requiredCiWorkflow);
-        const status = task.autopilotStateDir
+        const status = task.supervisionBlocked ? 'blocked' : task.autopilotStateDir
           ? (durable ? deliveryStatus(durable, task.autonomous) : task.status || stage)
           : (durable && durable !== task.r1 ? durable.terminalState || durable.status : task.status || stage);
-        const phase = task.autopilotStateDir ? durable ? deliveryPhase(durable) : 'queued' : task.phase;
+        const phase = task.supervisionBlocked ? 'blocked' : task.autopilotStateDir ? durable ? deliveryPhase(durable) : 'queued' : task.phase;
         return { id, status, project: task.project,
           ...(task.failure ? { failure: task.failure } : {}),
           phase, phases: task.autopilotStateDir ? durable?.phases || [{ phase: 'queued', at: task.createdAt }] : task.phases || [], evidence: projected,
-          nextAction: nextAction({ ...task, status, phase }, projected),
+          nextAction: task.supervisionBlocked ? { action: 'owner_decision', reason: task.supervisionBlocked.reason } : nextAction({ ...task, status, phase }, projected),
           executionJournal: { id, raw: `/api/log/${id}?raw=1` },
         };
       } catch (error) {

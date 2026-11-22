@@ -371,3 +371,28 @@ test('restart reconciles a dead process claim on an already terminal checkpoint 
   assert.equal(durable.load(1).terminalState, 'failed');
   await jobs.stop(() => {});
 });
+
+test('revoked executor configuration creates one durable supervisor hold without retrying or inventing a delivery verdict', async () => {
+  const { createR1Jobs } = require('../src/r1-jobs');
+  let task = { id: 't-0000abcd', workflow: 'r1', project: 'demo', issue: 5,
+    status: 'running', autopilotStateDir: '/tmp/r1-held-job-state', createdAt: new Date().toISOString() };
+  let loads = 0; const events = [];
+  const queue = { paths: {}, config: {},
+    readTask(_id, stage) { if (stage !== 'running') throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return structuredClone(task); },
+    writeTask(value, stage) { assert.equal(stage, 'running'); task = structuredClone(value); },
+    appendExecution(_id, event) { events.push(event); }, appendLogLine() {},
+  };
+  const jobs = createR1Jobs(queue, { autopilotDependencies: {
+    loadProjectConfig() { loads++; throw new Error('Owner configuration revoked the executor'); },
+  } });
+  jobs.advance(task);
+  const deadline = Date.now() + 1000;
+  while (!task.supervisionBlocked && Date.now() < deadline) await delay(10);
+  assert.match(task.supervisionBlocked.reason, /Owner configuration revoked/);
+  assert.equal(jobs.read(task.id).status, 'blocked');
+  assert.equal(jobs.read(task.id).nextAction.action, 'owner_decision');
+  jobs.advance(task); await delay(100);
+  assert.equal(loads, 1, 'held transport must not poll-retry a revoked executor');
+  assert.equal(events.filter(event => event.event === 'supervision_blocked').length, 1);
+  await jobs.stop(() => {});
+});

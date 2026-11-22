@@ -175,7 +175,7 @@ test('owner queue resume reuses the original parent identity and does not enqueu
   const f = await fixture(t);
   const job = f.store.load(10); job.r1ParentJobId = 't-1234abcd'; job.architectureDecision.originatingJob = job.r1ParentJobId; f.store.save(job);
   await f.command('accept'); f.mergeAdr();
-  let task = { id: job.r1ParentJobId, workflow: 'r1', status: 'paused_owner_decision', project: 'demo', issue: 10, r1: job, phases: [{ phase: 'implementation', at: job.createdAt }], priorErrors: ['original error'] };
+  let task = { id: job.r1ParentJobId, workflow: 'r1', status: 'paused_owner_decision', project: 'demo', issue: 10, autopilotStateDir: f.store.directory, phases: [{ phase: 'implementation', at: job.createdAt }], priorErrors: ['original error'] };
   let stage = 'done', moves = 0;
   const queueStore = {
     readTask(id, wanted) { if (wanted !== stage) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return structuredClone(task); },
@@ -183,8 +183,19 @@ test('owner queue resume reuses the original parent identity and does not enqueu
     moveTask(id, from, to) { assert.equal(stage, from); stage = to; moves++; },
   };
   await f.command('resume', {}, { queueStore }); await f.command('resume', {}, { queueStore });
-  assert.equal(moves, 1); assert.equal(task.id, job.r1ParentJobId); assert.equal(task.r1.runs, 1);
+  assert.equal(moves, 1); assert.equal(task.id, job.r1ParentJobId); assert.equal(f.store.load(10).runs, 1);
   assert.deepEqual(task.priorErrors, ['original error']); assert.equal(task.phases.length, 1);
+});
+test('historical decision parent cannot be resurrected through the canonical owner resume path', async t => {
+  const f = await fixture(t);
+  const job = f.store.load(10); job.r1ParentJobId = 't-1234abcd'; job.architectureDecision.originatingJob = job.r1ParentJobId; f.store.save(job);
+  await f.command('accept'); f.mergeAdr();
+  const original = { id: job.r1ParentJobId, workflow: 'r1', status: 'paused_owner_decision',
+    project: 'demo', issue: 10, r1: structuredClone(job) };
+  const queueStore = { readTask(_id, stage) { if (stage !== 'done') throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return structuredClone(original); },
+    moveTask() { throw new Error('historical parent must not dispatch'); }, writeTask() { throw new Error('historical parent must not mutate'); } };
+  await assert.rejects(f.command('resume', {}, { queueStore }), /identity changed or is missing/);
+  assert.equal(f.store.load(10).terminalState, 'paused_owner_decision');
 });
 for (const inputPatch of [{ requiresMilestoneAmendment: true }, { conflictsResolved: false }]) test(`owner choice cannot release unresolved authority: ${JSON.stringify(inputPatch)}`, async t => {
   const f = await fixture(t); await f.command('accept', { ...f.input, ...inputPatch }); f.mergeAdr();

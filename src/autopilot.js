@@ -278,7 +278,7 @@ async function run(argv, dependencies = {}) {
       // Retain a claim if descendants still own the process group.
       try {
         if (!require('./r1-process-claim').hasLiveClaim({ workerPid: claim.pid, workerStartTime: claim.startTime })) {
-          job.agentProcess = null; store.save(job);
+          job.agentProcess = null; // The active coordinator persists the next checkpoint under its issue lock.
         }
       } catch (error) { write(`Autopilot: agent exit checkpoint failed: ${errorMessage(error)}`); }
     });
@@ -429,7 +429,8 @@ async function run(argv, dependencies = {}) {
   // retargeted afterwards, so the merge path always reads the PR immediately
   // before deciding whether to merge or recover a prior merge.
   const finishApprovedMerge = async () => {
-    assertNotCancelled();
+    // A GitHub merge already recorded durably must be reconciled, not cancelled.
+    if (!job.merge) assertNotCancelled();
     if (!project.autoMerge) {
       job.status = 'ready_for_human_merge';
       markTerminal(job, 'ready_for_human_merge');
@@ -533,7 +534,8 @@ async function run(argv, dependencies = {}) {
       return;
     }
     phase = 'merge';
-    assertNotCancelled();
+    // After a confirmed merge, owner cancellation cannot undo the remote action.
+    assertProcessStopped();
     const closeIssue = dependencies.reconcileIssueClosure || reconcileIssueClosure;
     const closure = await closeIssue(project, candidate.number, { execFile: dependencies.execFile });
     if (closure?.reconciledAfterError instanceof Error) {
@@ -646,6 +648,11 @@ async function run(argv, dependencies = {}) {
       job.ownershipBlocked = 'Issue requirements unavailable from discovery; hold existing work for owner reconciliation.';
       store.save(job);
       return { issue: candidate, job, outcome: { status: 'ownership_blocked', terminal: false, deliverable: false } };
+    }
+    if (job?.ownershipBlocked === 'Issue requirements unavailable from discovery; hold existing work for owner reconciliation.'
+      && admitted.some(issue => issue.number === candidate.number)) {
+      delete job.ownershipBlocked;
+      store.save(job);
     }
     // Before a new job allocates anything, leave an explicitly-closing PR
     // entirely to its existing owner. Recovered Ralph jobs deliberately skip

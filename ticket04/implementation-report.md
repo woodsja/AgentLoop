@@ -1,6 +1,6 @@
 # Highlander Ticket 04 implementation
 
-Status: implemented in the isolated working tree; **not ready or complete**. Baseline: `b56ad5876b1ceca4a67ea90f123d4301fd0b094a`. Branch: `simplify/highlander-one-coordinator-20261122`. No push, PR change, merge, deployment, production configuration/service change or Windows-host access.
+Status: isolated draft PR #195, further post-review changes; **not ready or complete**. Baseline: `b56ad5876b1ceca4a67ea90f123d4301fd0b094a`. Branch: `simplify/highlander-one-coordinator-20261122`. No push, PR change, merge, deployment, production configuration/service change or Windows-host access.
 
 ## Result
 
@@ -33,10 +33,10 @@ See measurements.json for exact physical-line counts (includes comments). Source
 | Metric | Baseline | Working tree | Delta |
 | --- | ---: | ---: | ---: |
 | Source modules | 79 | 79 | 0 |
-| Source lines | 16,392 | 16,391 | -1 |
-| r1-jobs.js lines | 631 | 457 | -174 |
+| Source lines | 16,392 | 16,424 | +32 |
+| r1-jobs.js lines | 631 | 472 | -159 |
 | Test JavaScript files (including fixtures) | 77 | 77 | 0 |
-| Test JavaScript lines | 20,534 | 20,737 | +203 |
+| Test JavaScript lines | 20,534 | 20,783 | +249 |
 | Delivery checkpoint copies | 3 | 1 | -2 |
 
 Two independent agents reviewed and re-reviewed the diff; all concrete reported code findings were addressed. See reviews.md. These were working-tree reviews, not exact-commit approvals.
@@ -48,9 +48,9 @@ Two independent agents reviewed and re-reviewed the diff; all concrete reported 
 - The requested external audit/report path is outside writable roots. Reports are in this worktree's ticket04 directory; no out-of-sandbox write was attempted.
 - Local commit outcome is recorded below after the bounded commit attempt. No automatic merge/deploy is authorized by this work.
 
-## Local commit outcome
+## Historical Codex sandbox commit attempt (subsequently resolved)
 
-`git add src test ticket04` failed with exit 128: `Unable to create /home/woodsja/tools/ralph/.git/worktrees/highlander-one-coordinator-20261122/index.lock: Read-only file system`. The worktree's actual Git metadata is outside writable roots. Nothing was staged; no commit or push was made, and HEAD remains the baseline. Approval escalation is unavailable. Creating the requested local commit requires writable access to this isolated worktree's Git metadata, not production access.
+`git add src test ticket04` failed with exit 128: `Unable to create /home/woodsja/tools/ralph/.git/worktrees/highlander-one-coordinator-20261122/index.lock: Read-only file system`. The Codex sandbox could not write Git metadata. The Ralph VM shell subsequently created and pushed commit 831f36a54ea1419d3b04a9dea572150cc54e5b29 and opened draft PR #195. This section records that earlier sandbox obstacle; the draft branch is now writable and the later review corrections are under verification.
 
 ## VM verification follow-up (after sandbox restrictions were lifted)
 
@@ -62,3 +62,14 @@ Actual Git-backed, HTTP and subprocess tests were executed outside the Codex wor
 - `test/r1-child-scheduler.test.js`: **4/4 pass**; `test/r1-child-handoff.test.js`: **11/11 pass**; `test/r1-milestone-admission.test.js`: **31/31 pass**; `test/r1-loop-implementation.test.js`: **12/12 pass**; `test/r1-child-admission.test.js`: passed.
 - Architecture-decision action, Autopilot durable state, and dependency-admission files previously passed 95/95, 29/29 and 32/32. The separate Autopilot CLI test file remained **92/93**, with its one verifier-output case also failing on the unchanged baseline. An exact-SHA full-suite CI result is still required.
 - All modifications remain isolated to this development branch. No owner production configuration or daemon, merge, deployment, or Windows host was touched.
+
+
+## Post-commit independent review and correction status
+
+Two independent no-tool Claude reviews of **exact commit `831f36a54ea1419d3b04a9dea572150cc54e5b29`** returned **FINDINGS**. The repo-standards reviewer and specification reviewer both identified legacy-queue starvation, blocked-but-retrying supervisor exceptions, cancellation after a recorded merge, and a late subprocess-close durable-state race. The spec reviewer also identified a legacy decision-resume writer. These led to post-review corrections: historical R1 records no longer consume a dispatch slot, unauthorized orphan children fail closed, supervisor config exceptions create one durable operator hold without polling, confirmed merge records are reconciled rather than recast as cancellation, and process-close callbacks no longer save stale job snapshots. Legacy decision resume is rejected before changing the canonical checkpoint. Recovered issue requirements clear only their corresponding discovery hold.
+
+**Post-review VM regressions:** full HTTP R1 6/6 pass; mixed worker/critic 9/9 pass; continuous runner 1/1 pass; architecture decisions 96/96 pass; child scheduler 4/4 pass; supervisor hold regression 1/1 pass. Evidence is in `ticket04/vm-tests` on the Ralph VM, not in the Git diff. Previous exact-commit CI (run 45034005792) **passed on 831f36a only**, before these corrections. It cannot validate the follow-up SHA.
+
+**Unresolved acceptance and owner-policy questions:** Whether terminal cancelled or needs-specification issue jobs may be resubmitted after owner changes, and how to preserve old failed-PR closure / issue relabeling / temporary branch cleanup without adding a second lifecycle coordinator. Do not erase the existing issue record to rearm or silently change policy. The final follow-up commit still needs exact-head full CI and independent exact-diff Claude reviews. A fresh real demonstration on `woodsja/dev-ralph` needs a new owner-authorized issue: currently ready-labeled #3 and #5 already have delivered open PRs (#4 and #6). No reused job or fabricated authorization is acceptable.
+
+Ticket 04 remains **incomplete and draft/unmerged**. No production configuration or service, Windows host, or project outside this worktree was changed.

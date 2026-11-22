@@ -9,7 +9,7 @@ const { configuredProjects } = require('../src/project-registry');
 
 function git(dir, ...args) { return execFileSync('git', args, { cwd: dir, encoding: 'utf8' }); }
 
-for (const legacy of [false, true]) test(legacy ? 'historical R1 parent and child remain held without execution' : 'R1 parent with maxConcurrent=1 admits its own child but not unrelated jobs', { timeout: 15000 }, async t => {
+for (const legacy of [false, true]) test(legacy ? 'historical R1 parent remains inspectable while orphaned child is refused and scheduling progresses' : 'R1 parent with maxConcurrent=1 admits its own child but not unrelated jobs', { timeout: 15000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-scheduler-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const checkout = path.join(root, 'repo'); fs.mkdirSync(checkout);
@@ -62,9 +62,19 @@ for (const legacy of [false, true]) test(legacy ? 'historical R1 parent and chil
       loadProjectConfig: () => project, discoverReadyIssues: () => discovery,
     } } });
     if (legacy) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-      assert.equal(store.readTask(child.id, 'pending').id, child.id);
-      assert.deepEqual(store.readTask(parent.id, 'running'), current);
+      const deadline = Date.now() + 2500;
+      while (Date.now() < deadline) {
+        try { store.readTask(child.id, 'done'); break; } catch {}
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(store.readTask(child.id, 'done').reason, 'r1_child_unauthorized', 'obsolete child never launches');
+      assert.deepEqual(store.readTask(parent.id, 'running'), current, 'historical parent is not rewritten');
+      const unrelatedDeadline = Date.now() + 2500;
+      while (Date.now() < unrelatedDeadline) {
+        try { store.readTask(unrelated.id, 'done'); break; } catch {}
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(store.readTask(unrelated.id, 'done').reason, 'legacy_execution_retired', 'old parent does not starve unrelated queue maintenance');
       return;
     }
     // start() calls fillSlots immediately upon listening: check the real scheduler.

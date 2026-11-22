@@ -8,3 +8,8 @@ Two independent read-only agents reviewed the baseline-to-working-tree diff; nei
 All reported code findings were addressed. The publication regression's first fixture attempts were invalid (registry inside checkout, then incomplete fake GitHub headers); corrected fixture passes, and corrected baseline replay fails. The terminal recovery fixture initially omitted baseBranch; corrected red was captured with only the terminal claim guard removed, followed by restored-source green. Do not count invalid fixture runs as behavioral red evidence.
 
 Reviews were against an uncommitted working tree, not an exact committed SHA. The final cleanup removed redundant local helpers and reused cancellation from shutdown; no review claims deployment readiness.
+
+
+## Exact-commit reviews of 831f36a (2026-11-22)
+
+Two independent read-only Claude processes (`review-831f36a/standards.json`, `spec.json` in durable VM verification reports) returned **FINDINGS**, not passing verdicts. Common blocking findings: legacy in-flight R1 scheduler starvation, uncertain config-revocation replay, former rearm behavior, owner-facing PR/issue cleanup, cancellation during merged reconciliation and stale asynchronous process-close writes. Targeted corrections were developed after this SHA; these reports are not reviews of the follow-up commit. Remaining decisions / evidence gaps are tracked in the implementation report. Do not claim the original reviews approved the final diff.
