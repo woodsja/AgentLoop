@@ -583,3 +583,35 @@ for (const nongrant of [false,true]) test(`independent timer entrypoint uses ext
   });
   assert.equal(workers,1,JSON.stringify(result));assert.equal(result.job.runs,2);assert.equal(result.job.architectureDecisionHistory.length,1);
 });
+
+test('a restarted canonical parent recovers pending decision publication without a worker', async t => {
+  const f = await fixture(t, true);
+  f.project.checkout = path.join(f.root, 'checkout'); fs.mkdirSync(f.project.checkout);
+  const job = f.store.load(10); job.r1ParentJobId = 't-1234abcd';
+  job.architectureDecision.publication = 'pending';
+  job.architectureDecision.publicationError = 'Prior network outage'; f.store.save(job);
+  const stages = { running: [{ id: job.r1ParentJobId, workflow: 'r1', status: 'running',
+    project: 'demo', issue: 10, title: f.issue.title, autopilotStateDir: f.store.directory }], pending: [], done: [] };
+  const events = [];
+  const queue = { paths: { config: f.options.configPath, state: f.root },
+    config: { allowedProjects: require('../src/project-registry').configuredProjects({ demo: { root: f.project.checkout, worktreeRoot: f.project.worktreeRoot } }, f.options.configPath) },
+    readTask(id, stage) { const task = stages[stage].find(task => task.id === id); if (!task) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return structuredClone(task); },
+    writeTask(task, stage) { stages[stage] = [task]; },
+    moveTask(id, from, to) { stages[to].push(this.readTask(id, from)); stages[from] = []; },
+    listR1ChildLoops: () => [], appendExecution(id, event) { events.push(event); }, appendLogLine() {},
+  };
+  const jobs = require('../src/r1-jobs').createR1Jobs(queue, { autopilotDependencies: {
+    loadProjectConfig: () => f.project, execFile: (file, args, options, callback) => args.includes('--include')
+      ? callback(null, 'HTTP/2 200 OK\r\n\r\n' + JSON.stringify([f.decisionIssue]), '< HTTP/2.0 200 OK\n')
+      : f.options.execFile(file, args, options, callback), discoverReadyIssues: async () => [],
+    createRalphTaskService() { throw new Error('Decision reconciliation must never start a worker'); },
+  } });
+  jobs.recover(stages.running[0]); queue.moveTask(job.r1ParentJobId, 'pending', 'running');
+  jobs.advance(stages.running[0]);
+  const deadline = Date.now() + 3000;
+  while (!stages.done.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(f.store.load(10).architectureDecision.publication, 'complete', JSON.stringify(events));
+  assert.equal(stages.done.length, 1);
+  assert.ok(events.length > 0, 'recovery and publication evidence reaches the parent journal');
+  await jobs.stop(() => {});
+});

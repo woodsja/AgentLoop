@@ -9,7 +9,7 @@ const { configuredProjects } = require('../src/project-registry');
 
 function git(dir, ...args) { return execFileSync('git', args, { cwd: dir, encoding: 'utf8' }); }
 
-test('R1 parent with maxConcurrent=1 admits its own child but not unrelated jobs', { timeout: 15000 }, async t => {
+for (const legacy of [false, true]) test(legacy ? 'historical R1 parent and child remain held without execution' : 'R1 parent with maxConcurrent=1 admits its own child but not unrelated jobs', { timeout: 15000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-scheduler-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const checkout = path.join(root, 'repo'); fs.mkdirSync(checkout);
@@ -38,9 +38,16 @@ test('R1 parent with maxConcurrent=1 admits its own child but not unrelated jobs
   const discovery = new Promise(resolve => { release = resolve; });
   try {
     store.ensureDirs();
-    const parent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 5, status: 'running', phase: 'implementation',
-      r1: { project: 'demo', issue: { number: 5, title: 'demo' }, status: 'running', runs: 1,
-        terminal: false, workspaceState: 'prepared', worktreePath: worktree } });
+    const parent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 5, status: 'running',
+      ...(legacy ? { r1: { project: 'demo', issue: { number: 5, title: 'demo' }, status: 'running', runs: 1,
+        terminal: false, workspaceState: 'prepared', worktreePath: worktree } } : { autopilotStateDir: project.stateDir }) });
+    if (!legacy) {
+      const { createJob, createJobStore } = require('../src/autopilot-state');
+      const durable = createJobStore(project.stateDir);
+      durable.save({ ...createJob({ projectName: 'demo', repo: project.repo, issue: { number: 5, title: 'demo' },
+        branch: 'issue-5', worktreePath: worktree, now: durable.now }), r1ParentJobId: parent.id,
+        status: 'running', runs: 1, workspaceState: 'prepared' });
+    }
     store.moveTask(parent.id, 'pending', 'running');
     const current = store.readTask(parent.id, 'running');
     const child = store.enqueueR1ChildLoopOnce(parent.id, 1, {
@@ -54,6 +61,12 @@ test('R1 parent with maxConcurrent=1 admits its own child but not unrelated jobs
     daemon.start({ r1: { autopilotDependencies: {
       loadProjectConfig: () => project, discoverReadyIssues: () => discovery,
     } } });
+    if (legacy) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(store.readTask(child.id, 'pending').id, child.id);
+      assert.deepEqual(store.readTask(parent.id, 'running'), current);
+      return;
+    }
     // start() calls fillSlots immediately upon listening: check the real scheduler.
     const deadline = Date.now() + 2500;
     let observed;
@@ -106,7 +119,7 @@ test('daemon restart marks interrupted child terminal and recovers its R1 parent
   for (const name of keys) delete require.cache[require.resolve(name)];
   const store = require('../src/store'), daemon = require('../src/daemon');
   try {
-    const parent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 5, status: 'running', phase: 'implementation' });
+    const parent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 5, status: 'running', autopilotStateDir: path.join(root, 'jobs') });
     store.moveTask(parent.id, 'pending', 'running');
     const child = store.enqueueLoop({ source: 'r1', project: 'demo', projectPath: root,
       workerEngine: 'codex', criticEngine: 'claude', engine: 'codex', status: 'running',
@@ -114,11 +127,11 @@ test('daemon restart marks interrupted child terminal and recovers its R1 parent
       workerPid: 99999999, workerStartTime: '12345',
       r1Child: { parentJobId: parent.id, attempt: 1, issue: 5 } });
     store.moveTask(child.id, 'pending', 'running');
-    const waitingParent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 6, status: 'running' });
+    const waitingParent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 6, status: 'running', autopilotStateDir: path.join(root, 'jobs') });
     store.moveTask(waitingParent.id, 'pending', 'running');
     const orphan = store.enqueueLoop({ source: 'r1', project: 'demo', type: 'loop', status: 'queued',
       r1Child: { parentJobId: waitingParent.id, attempt: 1, issue: 6 } });
-    const retainedParent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 7, status: 'running' });
+    const retainedParent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 7, status: 'running', autopilotStateDir: path.join(root, 'jobs') });
     store.moveTask(retainedParent.id, 'pending', 'running');
     const ambiguous = store.enqueueLoop({ source: 'r1', project: 'demo', type: 'loop', status: 'running',
       r1Child: { parentJobId: retainedParent.id, attempt: 1, issue: 7 } });
@@ -126,7 +139,7 @@ test('daemon restart marks interrupted child terminal and recovers its R1 parent
     daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
     assert.equal(store.readTask(ambiguous.id, 'running').recoveryBlocked, true,
       'an unclaimed former agent is never guessed to be dead');
-    assert.equal(store.readTask(retainedParent.id, 'pending').phase, 'recovering');
+    assert.equal(store.readTask(retainedParent.id, 'pending').status, 'queued');
     const recovered = store.readTask(child.id, 'done');
     assert.equal(recovered.status, 'failed');
     assert.equal(recovered.reason, 'daemon_restarted');
@@ -136,10 +149,10 @@ test('daemon restart marks interrupted child terminal and recovers its R1 parent
       assert.equal(recovery.parentId, item.r1Child.parentJobId);
       assert.match(recovery.message, /exit details are unknown/);
     }
-    assert.equal(store.readTask(parent.id, 'pending').phase, 'recovering');
+    assert.equal(store.readTask(parent.id, 'pending').status, 'queued');
     assert.equal(fs.readdirSync(store.paths.pending).filter(name => name.startsWith(child.id)).length, 0);
     assert.equal(store.readTask(orphan.id, 'done').reason, 'r1_child_unauthorized');
-    assert.equal(store.readTask(waitingParent.id, 'pending').phase, 'recovering');
+    assert.equal(store.readTask(waitingParent.id, 'pending').status, 'queued');
   } finally {
     await daemon.stop(() => {});
     if (old.config === undefined) delete process.env.AGENTLOOP_CONFIG_PATH;

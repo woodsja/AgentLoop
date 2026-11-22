@@ -119,7 +119,11 @@ function createR1LoopImplementation({
         const proposal = require('./architecture-decisions').readProposal(cwd, task.architectureDecisions);
         if (proposal) return { task, status: 'paused_owner_decision', proposal, attempts: [], childLoopId: childId };
         if (!approvedCriticPass(lastLoop)) {
-          throw new Error(`R1 child loop lacks a final Claude critic PASS: ${String(lastLoop?.status)}`);
+          const error = new Error(`R1 child loop lacks a final Claude critic PASS: ${String(lastLoop?.status)}`);
+          // A completed, exhausted child cannot become another parent worker attempt.
+          // Unknown or interrupted child outcomes stay fail-closed for recovery.
+          if (lastLoop?.status === 'maxed') error.code = 'R1_CHILD_CRITIC_EXHAUSTED';
+          throw error;
         }
       } catch (error) {
         // An exhausted deadline or lost parent must not leave the agent free

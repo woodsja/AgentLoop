@@ -1603,6 +1603,7 @@ function fillSlots() {
   const running = store.listTasks('running', { dashboard: true });
   const r1 = running.find(task => task.workflow === 'r1');
   if (r1) {
+    if (!r1.autopilotStateDir) return; // historical parent ownership remains held for the owner
     r1Jobs.advance(r1);
     // R1 owns the coordination slot. While its child is executing, no other
     // project can use a worker slot. This avoids maxConcurrent=1 deadlock.
@@ -1658,6 +1659,12 @@ function fillSlots() {
       console.error(`Queued job ${entry.id} could not be read; no worker started: ${error.message}`);
       continue;
     }
+    if (task.workflow === 'r1' && !task.autopilotStateDir) continue;
+    if (task.r1Child) {
+      let parent;
+      try { parent = store.readTask(task.r1Child.parentJobId, 'pending'); } catch {}
+      if (parent && !parent.autopilotStateDir) continue;
+    }
     if (task.r1Child || task.workflow === 'r1') {
       canonical.push(entry);
     } else {
@@ -1693,6 +1700,11 @@ function sendJson(res, statusCode, value) {
 
 function resultForTask(task, dashboard = false) {
   try {
+    if (task.autopilotStateDir) {
+      const job = r1Jobs.read(task.id);
+      const result = { id: task.id, status: job.status, project: task.project, evidence: job.evidence };
+      return dashboard ? require('./execution-preview').preview(result) : result;
+    }
     if (dashboard) return store.readDashboardResult(task.id);
     const resultPath = path.join(store.paths.results, `${task.id}.json`);
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
@@ -1839,9 +1851,15 @@ function recentEvents() {
 function daemonState() {
   const now = Date.now();
   const defaultEngine = store.config.defaultEngine;
-  const pendingTasks = sortPending(store.listTasks('pending', { dashboard: true }));
-  const runningTasks = store.listTasks('running', { dashboard: true });
-  const completedTasks = store.listTasks('done', { dashboard: true });
+  const projectTask = task => {
+    if (!task.autopilotStateDir) return task;
+    const current = r1Jobs.read(task.id);
+    return { ...task, ...require('./execution-preview').preview(current),
+      ...(current.evidence?.updatedAt ? { finishedAt: current.evidence.updatedAt } : {}) };
+  };
+  const pendingTasks = sortPending(store.listTasks('pending', { dashboard: true }).map(projectTask));
+  const runningTasks = store.listTasks('running', { dashboard: true }).map(projectTask);
+  const completedTasks = store.listTasks('done', { dashboard: true }).map(projectTask);
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
   const todayMs = todayStart.getTime();
@@ -2228,10 +2246,11 @@ function readJob(id) {
   for (const stage of ['pending', 'running', 'done']) {
     try {
       const task = store.readTask(id, stage);
-      const result = resultForTask(task);
+      const canonical = task.autopilotStateDir ? r1Jobs.read(task.id) : null;
+      const result = canonical?.evidence ? { id: task.id, status: canonical.status, evidence: canonical.evidence } : resultForTask(task);
       return {
         id: task.id,
-        status: task.status || stage,
+        status: canonical?.status || task.status || stage,
         ...(typeof task.project === 'string' ? { project: task.project } : {}),
         ...(result ? { result } : {}),
       };
@@ -2303,19 +2322,21 @@ async function cancelTask(req, res) {
   // to its one owned child before it can be scheduled or before further edits.
   let parent = null;
   try {
-    const task = store.readTask(id, 'running');
-    if (task.workflow === 'r1') parent = task;
+    for (const stage of ['running', 'pending']) {
+      try {
+        const task = store.readTask(id, stage);
+        if (task.workflow === 'r1') { parent = task; parent.queueStage = stage; break; }
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (parent) {
     const attached = store.listR1ChildLoops(id);
-    if (!attached.length) {
-      sendJson(res, 404, { error: 'R1 parent has no attached loop to cancel.' });
-      return;
-    }
     // Cancellation retries complete any work left by a partial first request.
     if (!parent.cancelRequested) {
-      store.writeTask({ ...parent, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
+      const { queueStage, ...reservation } = parent;
+      store.writeTask({ ...reservation, cancelRequested: true, lastActivity: 'Cancellation requested.' }, queueStage);
     }
+    r1Jobs.cancel(id, terminateWorker);
     for (const child of attached) {
       if (child.stage === 'running') {
         const stopped = cancelRunningLoop(child.id);
@@ -2536,8 +2557,10 @@ function recoverRunningTasks() {
     let activeParent = false;
     try {
       const parent = store.readTask(child.r1Child.parentJobId, 'running');
+      const job = parent.autopilotStateDir
+        ? require('./autopilot-state').createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id) : parent.r1;
       activeParent = parent.workflow === 'r1' && parent.status === 'running'
-        && parent.r1?.runs === child.r1Child.attempt && !parent.cancelRequested;
+        && job?.runs === child.r1Child.attempt && !parent.cancelRequested;
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (!activeParent) failUnauthorizedR1Child(child, new Error('Pending R1 child orphaned by daemon restart.'));
   }

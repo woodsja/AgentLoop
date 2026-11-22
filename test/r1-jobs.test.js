@@ -121,11 +121,17 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const fullOutput = 'deterministic test passed'+'D'.repeat(100000)+'EXACT DIAGNOSTIC TAIL token=owner /tmp/context\n';
     assert.equal(context.verification.stdout, fullOutput);
     const checkpoint = jobId => JSON.parse(fs.readFileSync(path.join(root,'queue/tasks/running',jobId+'.json')));
-    assert.equal(checkpoint(id).r1.verification.stdout,fullOutput);
+    assert.equal(checkpoint(id).r1, undefined, 'new queue records must not duplicate the authoritative delivery checkpoint');
+    assert.equal(checkpoint(id).phases, undefined, 'delivery phases belong to Autopilot only');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(project.stateDir, 'issue-1.json'))).verification.stdout, fullOutput);
     assert.equal((await get(second)).phase, 'queued');
+    assert.equal((await request(port, '/api/cancel', { id: second })).status, 200, 'queued cancellation does not require a child loop');
     fs.writeFileSync(path.join(root, 'review-release'), '');
     const completed = await until(async () => { const job = await get(id); return job.status === 'passed' && job; });
     assert.equal(completed.evidence.review.commit, completed.evidence.commit);
+    assert.equal(fs.existsSync(path.join(root, 'queue/results', id + '.json')), false, 'no duplicated delivery result file');
+    const dashboard = (await request(port, '/api/state')).value;
+    assert.ok(JSON.stringify(dashboard).includes('passed'), 'dashboard derives the canonical terminal projection');
     assert.match(completed.evidence.commit, /^[a-f0-9]{40}$/);
     assert.equal(completed.evidence.reviewHistory[0].status, 'completed');
     for (const phase of ['queued', 'preparing', 'implementation', 'verification', 'delivering', 'ci', 'review', 'completed']) assert.ok(completed.phases.some(p => p.phase === phase), phase);
@@ -134,6 +140,8 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const { recordDelivery, recordCiState } = require('../src/autopilot-state');
     const original = JSON.parse(fs.readFileSync(path.join(root, 'queue/tasks/done', id + '.json')));
     const seeded = structuredClone(original);
+    delete seeded.autopilotStateDir; // historical read-only fixture
+    seeded.r1 = JSON.parse(fs.readFileSync(path.join(project.stateDir, 'issue-1.json')));
     seeded.id = 't-ffff0149';
     seeded.status = 'running'; seeded.phase = 'ci';
     seeded.failure = 'Owner failure: token=owner /tmp/context';
@@ -192,7 +200,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.deepEqual([generic.value.id, generic.value.status, generic.value.project, generic.value.phases], [id, 'passed', 'demo', undefined]);
     const r1Shaped = await request(port, '/api/jobs', { project: 'demo', issue: 1 });
     assert.deepEqual([r1Shaped.status, r1Shaped.value.error], [404, 'Not found.']);
-    await until(async () => (await get(second)).status === 'passed');
+    await until(async () => (await get(second)).status === 'cancelled');
     fs.writeFileSync(path.join(root, 'review-error'), '');
     const third = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 3 })).value.id;
     const failed = await until(async () => { const job = await get(third); return job.status === 'blocked' && job; });
@@ -220,7 +228,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.equal(recovered.evidence.reviewHistory[0].status, 'interrupted');
     assert.equal(fs.readFileSync(path.join(root, 'reviews'), 'utf8'), recorded);
     const recoveredTask=JSON.parse(fs.readFileSync(path.join(root,'queue/tasks/done',interrupted+'.json')));
-    assert.equal(recoveredTask.r1.verification.stdout,fullOutput);
+    assert.equal(recoveredTask.r1, undefined);
     const persistedJob=JSON.parse(fs.readFileSync(path.join(project.stateDir,'issue-4.json')));
     assert.equal(persistedJob.verification.stdout,fullOutput);
 
@@ -302,4 +310,64 @@ test('R1 navigation summaries retain bounded failure facts alongside the complet
     stdout: 'ℹ pass 100000\nℹ fail 900001', stderr: '' }), 'different controlled numbers in the same category yield the same public message');
   assert.equal(verificationFailureSummary({ passed: false, timedOut: false, exitCode: null, stdout: '', stderr: '' }),
     'deterministic verification failed (terminated by signal).');
+});
+
+test('new job inspection follows the durable delivery checkpoint and leaves stale queue data untouched', t => {
+  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createJob, createJobStore, markTerminal } = require('../src/autopilot-state');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-authority-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const id = 't-0000abcd';
+  const queue = { id, workflow: 'r1', project: 'demo', issue: 1, status: 'passed', phase: 'completed',
+    autopilotStateDir: directory, createdAt: '2026-11-22T00:00:00.000Z', r1: { terminalState: 'merged' } };
+  const before = JSON.stringify(queue);
+  const store = { paths: {}, readTask: () => structuredClone(queue) };
+  const jobs = createR1Jobs(store);
+  const durable = createJobStore(directory);
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue: { number: 1, title: 'One authority' },
+    branch: 'ralph/issue-1', worktreePath: '/tmp/owned', now: () => queue.createdAt });
+  job.r1ParentJobId = id; job.status = 'awaiting_ci';
+  durable.save(job);
+  assert.equal(jobs.read(id).status, 'running', 'stale queue success cannot terminate delivery');
+  assert.equal(jobs.read(id).phase, 'ci');
+  job.status = 'cancelled'; markTerminal(job, 'cancelled'); durable.save(job);
+  assert.equal(jobs.read(id).status, 'cancelled', 'canonical cancellation wins over queue status');
+  assert.equal(JSON.stringify(queue), before, 'inspection never repairs or rewrites history');
+  const restarted = createR1Jobs(store);
+  assert.deepEqual(restarted.read(id), jobs.read(id), 'fresh coordinator observes the same authority');
+  job.r1ParentJobId = 't-0000ffff'; durable.save(job);
+  assert.throws(() => restarted.read(id), /ownership mismatch/, 'another submission cannot inherit evidence');
+});
+
+test('restart reconciles a dead process claim on an already terminal checkpoint before releasing dispatch', async t => {
+  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createJob, createJobStore, markTerminal } = require('../src/autopilot-state');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-terminal-recovery-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const checkout = path.join(root, 'checkout'); fs.mkdirSync(checkout);
+  const configPath = path.join(root, 'owner.json'); fs.writeFileSync(configPath, '{}');
+  const project = { enabled: true, repo: 'owner/demo', checkout, worktreeRoot: path.join(root, 'worktrees'),
+    stateDir: path.join(root, 'jobs'), baseBranch: 'main', worker: 'codex', reviewPolicy: 'always' };
+  const durable = createJobStore(project.stateDir);
+  const task = { id: 't-0000abcd', workflow: 'r1', project: 'demo', issue: 1, title: 'Recover terminal',
+    status: 'running', autopilotStateDir: durable.directory };
+  const job = createJob({ projectName: 'demo', repo: project.repo, issue: { number: 1, title: task.title },
+    branch: 'ralph/issue-1', worktreePath: null, now: durable.now });
+  job.r1ParentJobId = task.id; job.status = 'failed'; markTerminal(job, 'failed');
+  job.agentProcess = { status: 'running', pid: 999999999, startTime: '12345' }; durable.save(job);
+  let archived = false; const events = [];
+  const queue = { paths: { config: configPath },
+    config: { allowedProjects: require('../src/project-registry').configuredProjects({ demo: { root: checkout, worktreeRoot: project.worktreeRoot } }, configPath) },
+    readTask: () => structuredClone(task), listR1ChildLoops: () => [], appendLogLine() {}, appendExecution(id, event) { events.push(event); },
+    moveTask() { archived = true; },
+  };
+  const jobs = createR1Jobs(queue, { autopilotDependencies: { loadProjectConfig: () => project,
+    discoverReadyIssues: async () => [], createRalphTaskService() { throw new Error('Terminal work must never replay'); } } });
+  jobs.advance(task);
+  const deadline = Date.now() + 1000;
+  while (!archived && Date.now() < deadline) await delay(10);
+  assert.equal(archived, true, JSON.stringify(events));
+  assert.equal(durable.load(1).agentProcess, null);
+  assert.equal(durable.load(1).terminalState, 'failed');
+  await jobs.stop(() => {});
 });

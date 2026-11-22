@@ -422,6 +422,7 @@ function recordDelivery(job, { branch = job.branch, commit, pushed = true }) {
     job.review = null;
     job.reviewSkip = null;
     job.ci = null;
+    delete job.ciWaitSince;
   }
   job.delivery = { branch, commit, pushed };
   // Bind the freshly checkpointed verifier result once. A later delivery
@@ -681,8 +682,12 @@ function createJobStore(stateDir, options = {}) {
     return validateJob(job, filePath);
   }
 
-  function load(issueNumber) {
-    return readJobFile(jobPath(issueNumber));
+  function load(issueNumber, parentId) {
+    const job = readJobFile(jobPath(issueNumber));
+    if (parentId !== undefined && (!job || job.r1ParentJobId !== parentId)) {
+      throw new Error('Autopilot checkpoint does not belong to this parent.');
+    }
+    return job;
   }
 
   function list() {
@@ -710,6 +715,11 @@ function createJobStore(stateDir, options = {}) {
   function save(job) {
     validateJob(job, jobPath(job && job.issue && job.issue.number));
     job.updatedAt = now();
+    if (job.r1ParentJobId) {
+      const phase = require('./r1-status').deliveryPhase(job);
+      job.phases ||= [{ phase: 'queued', at: job.createdAt }];
+      if (job.phases.at(-1)?.phase !== phase) job.phases.push({ phase, at: job.updatedAt });
+    }
     const file = jobPath(job.issue.number).replace(/\.json$/, '.execution.ndjson');
     const summary = snapshot(job.issue.number, job, record => journal.append(file, { ...record, timestamp: now() }));
     summary.executionJournal = { file };

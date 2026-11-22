@@ -1,0 +1,16 @@
+{
+  "baseline": {
+    "source_modules": 79,
+    "source_lines": 16392,
+    "test_js_files": 77,
+    "test_js_lines": 20534,
+    "r1_jobs_lines": 631
+  },
+  "current": {
+    "source_modules": 79,
+    "source_lines": 16401,
+    "test_js_files": 77,
+    "test_js_lines": 20737,
+    "r1_jobs_lines": 458
+  }
+}

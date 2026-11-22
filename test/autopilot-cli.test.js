@@ -2544,3 +2544,68 @@ test('a checkpointed fifth-round PASS is recovered without a sixth review', asyn
   assert.equal(saved.review.verdict, 'PASS');
   assert.equal(saved.terminalState, 'ready_for_human_merge');
 });
+
+test('restart holds an unidentified delivery process without cleanup or another worker', async () => {
+  const store = temporaryStore();
+  const issue = { number: 204, title: 'Recover one owner', body: 'Exact authorized requirements' };
+  saveJob(store, issue.number, { r1ParentJobId: 't-0000abcd', status: 'running',
+    agentProcess: { status: 'launching' }, workspaceState: 'prepared' });
+  let work = 0;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [issue],
+    cleanupIssueWorkspace: async () => { work++; },
+    prepareIssueWorkspace: async () => { work++; throw new Error('duplicate preparation'); },
+    createRalphTaskService: () => { work++; throw new Error('duplicate worker'); },
+  }));
+  assert.equal(work, 0);
+  assert.equal(result.outcome.status, 'ownership_blocked');
+  assert.equal(createJobStore(store.directory).load(issue.number).terminal, false);
+  assert.deepEqual(createJobStore(store.directory).load(issue.number).agentProcess, { status: 'launching' });
+});
+
+test('missing discovery resumes a delivered parent from its existing exact checkpoint', async () => {
+  const store = temporaryStore();
+  const issue = { number: 205, title: 'Delivered job', body: 'Exact approved requirements' };
+  saveJob(store, issue.number, { r1ParentJobId: 't-0000abcd', status: 'awaiting_ci', originalIssue: issue,
+    pr: { number: 99, url: 'https://example.invalid/pull/99' },
+    delivery: { branch: 'ralph/issue-205-issue-205', commit: 'abc123', pushed: true } });
+  let observations = 0;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    requestedIssue: { number: issue.number, title: issue.title }, discoverReadyIssues: async () => [],
+    prepareIssueWorkspace: async () => { throw new Error('duplicate worker workspace'); },
+    observePullRequestCi: async () => { observations++; return { state: 'pending', headCommit: 'abc123', prNumber: 99 }; },
+  }));
+  assert.equal(observations, 1);
+  assert.equal(result.job.terminal, false);
+  assert.equal(createJobStore(store.directory).load(issue.number).status, 'awaiting_ci');
+});
+
+test('owner cancellation during CI is durable without an implementation child or new delivery', async () => {
+  const store = temporaryStore();
+  saveJob(store, 206, { r1ParentJobId: 't-0000abcd', status: 'awaiting_ci',
+    pr: { number: 99, url: 'https://example.invalid/pull/99' },
+    delivery: { branch: 'ralph/issue-206-issue-206', commit: 'abc123', pushed: true } });
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [{ number: 206, title: 'Cancel delivery' }],
+    environmentIsCancelled: () => true,
+    observePullRequestCi: async () => { throw new Error('cancelled delivery observed CI'); },
+    prepareIssueWorkspace: async () => { throw new Error('cancelled delivery started work'); },
+  }));
+  const saved = createJobStore(store.directory).load(206);
+  assert.equal(saved.terminalState, 'cancelled');
+  assert.equal(saved.delivery.commit, 'abc123');
+});
+
+test('supervisor shutdown preserves a delivered checkpoint for restart without owner cancellation', async () => {
+  const store = temporaryStore();
+  saveJob(store, 207, { status: 'awaiting_ci', pr: { number: 99, url: 'https://example.invalid/pull/99' },
+    delivery: { branch: 'ralph/issue-207-issue-207', commit: 'abc123', pushed: true } });
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [{ number: 207, title: 'Stop safely' }], isStopping: () => true,
+    observePullRequestCi: async () => { throw new Error('shutdown continued delivery'); },
+  }));
+  assert.equal(result.outcome.status, 'stopping');
+  const saved = createJobStore(store.directory).load(207);
+  assert.equal(saved.terminal, false);
+  assert.equal(saved.status, 'awaiting_ci');
+});

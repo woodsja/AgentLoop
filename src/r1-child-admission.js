@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { createJobStore } = require('./autopilot-state');
 const { resolveProject, resolveWorkerScope } = require('./project-registry');
 const { deriveWorktreePath } = require('./autopilot-workspace');
 const { loadProjectConfig } = require('./autopilot-config');
@@ -21,7 +22,8 @@ function authorizeR1Child(child, {
     throw new Error('Invalid R1 child execution claim.');
   }
   const parent = store.readTask(claim.parentJobId, 'running');
-  const job = parent.r1;
+  const job = parent.autopilotStateDir
+    ? createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id) : parent.r1;
   if (parent.id !== claim.parentJobId || parent.workflow !== 'r1' || parent.status !== 'running'
     || parent.cancelRequested || parent.issue !== claim.issue || parent.project !== child.project
     || !job || job.terminal || job.status !== 'running' || job.workspaceState !== 'prepared'

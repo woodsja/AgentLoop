@@ -581,3 +581,14 @@ test('five-round state preserves all correction cycles and rejects corrupt budge
     assert.throws(() => createJobStore(store.directory).load(147), /invalid/);
   }
 });
+
+test('a corrective head gets its own CI deadline while same-head checkpoints retain the wait', () => {
+  const job = createJob({ projectName: 'demo', repo: 'owner/demo', issue: { number: 204, title: 'Correction' },
+    branch: 'ralph/issue-204', worktreePath: null, now: () => '2026-11-22T00:00:00.000Z' });
+  recordDelivery(job, { commit: 'old-head' });
+  job.ciWaitSince = '2026-11-22T00:01:00.000Z';
+  recordDelivery(job, { commit: 'old-head' });
+  assert.equal(job.ciWaitSince, '2026-11-22T00:01:00.000Z');
+  recordDelivery(job, { commit: 'corrected-head' });
+  assert.equal(job.ciWaitSince, undefined);
+});

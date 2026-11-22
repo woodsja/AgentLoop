@@ -163,7 +163,7 @@ function plannedWorktreePath(project, issue) {
 async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write, captureFailedWork) {
   const cleaned = [];
   for (const listed of store.list()) {
-    if (listed.authorizationBlocked || listed.environmentProcess || !listed.terminal || listed.workspaceState !== 'prepared' || !listed.worktreePath) continue;
+    if (listed.authorizationBlocked || listed.environmentProcess || listed.agentProcess || !listed.terminal || listed.workspaceState !== 'prepared' || !listed.worktreePath) continue;
     let lock;
     try {
       lock = store.acquire(listed.issue.number);
@@ -173,7 +173,7 @@ async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write
     }
     try {
       const job = store.load(listed.issue.number);
-      if (!job || job.authorizationBlocked || job.environmentProcess || !job.terminal || job.workspaceState !== 'prepared' || !job.worktreePath) continue;
+      if (!job || job.authorizationBlocked || job.environmentProcess || job.agentProcess || !job.terminal || job.workspaceState !== 'prepared' || !job.worktreePath) continue;
       try {
         if (typeof captureFailedWork === 'function') {
           await captureFailedWork({ job, workspace: { worktreePath: job.worktreePath, branch: job.branch }, store });
@@ -204,6 +204,11 @@ async function run(argv, dependencies = {}) {
   const project = loadConfig(projectName);
   const store = dependencies.jobStore
     || createJobStore(resolveStateDir(projectName, project, dependencies.stateRoot));
+  const createBoundJob = args => {
+    const newJob = createJob(args);
+    if (dependencies.parentJobId) newJob.r1ParentJobId = dependencies.parentJobId;
+    return newJob;
+  };
   let job;
   const authorizeMilestoneRaw = (issue = candidate, existing = job) => project.milestoneAuthorization !== true ? Promise.resolve(null) : dependencies.checkMilestoneAuthorization
     ? dependencies.checkMilestoneAuthorization(issue, existing)
@@ -211,7 +216,31 @@ async function run(argv, dependencies = {}) {
       ...dependencies.milestoneOptions, execFile: dependencies.execFile, jobs: () => store.list(),
       expectedAuthorization: existing?.milestoneAuthorization, expectedIssue: issue,
     });
+  const assertProcessStopped = () => {
+    if (!job?.agentProcess) return;
+    const claim = job.agentProcess;
+    if (claim.status !== 'running' || !require('./r1-process-claim').terminatePriorR1Worker({
+      r1Child: true, workerPid: claim.pid, workerStartTime: claim.startTime,
+    })) {
+      const error = new Error('Previous delivery process could not be confirmed stopped; workspace and raw evidence retained.');
+      error.code = 'AUTOPILOT_PROCESS_UNCONFIRMED'; throw error;
+    }
+    job.agentProcess = null; delete job.ownershipBlocked; store.save(job);
+  };
+  const assertNotCancelled = () => {
+    assertProcessStopped();
+    if (dependencies.isStopping?.()) {
+      const error = new Error('Delivery supervisor is stopping; checkpoint retained.');
+      error.code = 'AUTOPILOT_STOPPING'; throw error;
+    }
+    if (dependencies.environmentIsCancelled?.()) {
+      const error = new Error('Owner requested delivery cancellation.');
+      error.code = 'AUTOPILOT_CANCELLED';
+      throw error;
+    }
+  };
   const authorizeMilestone = async (issue = candidate, existing = job) => {
+    assertNotCancelled();
     const decision = existing?.architectureDecisionHistory?.at(-1);
     if (decision?.resumedAt) {
       try {
@@ -229,13 +258,47 @@ async function run(argv, dependencies = {}) {
     },
     record: (event, details) => { store.appendIntegrationEvent?.(job, { event, ...details }); },
   });
+  // Persist a launch intent before spawning: a crash in the PID checkpoint
+  // window must hold the job instead of assuming no process was started.
+  const spawnAgent = (file, args, options) => {
+    if (!dependencies.parentJobId) return (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, options);
+    assertNotCancelled();
+    job.agentProcess = { status: 'launching' }; store.save(job);
+    const child = (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, { ...options, detached: true });
+    const claim = { status: 'running', pid: child.pid, startTime: require('./r1-process-claim').startTime(child.pid) };
+    job.agentProcess = claim;
+    try {
+      if (!claim.startTime) throw new Error('Delivery agent identity unavailable; job held.');
+      store.save(job);
+    } catch (error) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      throw error;
+    }
+    child.once('close', () => {
+      // Retain a claim if descendants still own the process group.
+      try {
+        if (!require('./r1-process-claim').hasLiveClaim({ workerPid: claim.pid, workerStartTime: claim.startTime })) {
+          job.agentProcess = null; store.save(job);
+        }
+      } catch (error) { write(`Autopilot: agent exit checkpoint failed: ${errorMessage(error)}`); }
+    });
+    return child;
+  };
   const attemptOptions = () => ({ ...dependencies.ralphOptions,
+    ...(dependencies.parentJobId ? { spawnImpl: spawnAgent } : {}),
+    onPhaseChange: async phase => {
+      assertNotCancelled();
+      job.phase = phase;
+      store.save(job);
+      await dependencies.ralphOptions?.onPhaseChange?.(phase);
+    },
     ...(project.milestoneAuthorization === true && !dependencies.ralphOptions?.recordExecution ? {
       recordExecution: (event, details) => store.appendIntegrationEvent?.(job, { event, ...details }),
     } : {}),
     beforeAttempt: async () => {
     await authorizeMilestone(); await dependencies.ralphOptions?.beforeAttempt?.();
   } });
+  const parentReviewAdapter = dependencies.parentJobId ? createClaudeReviewAdapter({ spawn: spawnAgent }) : realReviewAdapter;
   const cleanupWorkspace = dependencies.cleanupIssueWorkspace || cleanupIssueWorkspace;
   // A scheduled pass over a disabled project is a successful no-op: nothing is
   // discovered, locked, prepared, or cleaned.
@@ -273,7 +336,12 @@ async function run(argv, dependencies = {}) {
   for (const saved of requestedDecisions) {
     if (!admitted.some(i => i.number === saved.issue.number)) admitted.push(resumeSource(saved));
   }
-  const selection = selectIssueForJobs(admitted, recorded, choose);
+  const selection = selectIssueForJobs(admitted, recorded, choose)
+    || (dependencies.requestedIssue ? {
+      issue: recorded.find(saved => saved.issue.number === dependencies.requestedIssue.number)?.originalIssue || dependencies.requestedIssue,
+      job: recorded.find(saved => saved.issue.number === dependencies.requestedIssue.number) || null,
+      unavailable: !recorded.some(saved => saved.issue.number === dependencies.requestedIssue.number),
+    } : null);
 
   if (!selection) {
     const prefix = dryRun ? 'Dry run' : 'Autopilot';
@@ -361,6 +429,7 @@ async function run(argv, dependencies = {}) {
   // retargeted afterwards, so the merge path always reads the PR immediately
   // before deciding whether to merge or recover a prior merge.
   const finishApprovedMerge = async () => {
+    assertNotCancelled();
     if (!project.autoMerge) {
       job.status = 'ready_for_human_merge';
       markTerminal(job, 'ready_for_human_merge');
@@ -425,7 +494,10 @@ async function run(argv, dependencies = {}) {
       }
       phase = 'merge';
       try { await authorizeMilestone(); }
-      catch (error) { holdAuthorization(error); return; }
+      catch (error) {
+        if (error.code?.startsWith('AUTOPILOT_')) throw error;
+        holdAuthorization(error); return;
+      }
       const merge = dependencies.mergePullRequest || mergePullRequest;
       let result;
       try {
@@ -461,6 +533,7 @@ async function run(argv, dependencies = {}) {
       return;
     }
     phase = 'merge';
+    assertNotCancelled();
     const closeIssue = dependencies.reconcileIssueClosure || reconcileIssueClosure;
     const closure = await closeIssue(project, candidate.number, { execFile: dependencies.execFile });
     if (closure?.reconciledAfterError instanceof Error) {
@@ -486,6 +559,7 @@ async function run(argv, dependencies = {}) {
   try {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
+    assertProcessStopped();
     if (job?.architectureDecision?.resumeRequested) {
       const d = job.architectureDecision;
       try {
@@ -542,8 +616,8 @@ async function run(argv, dependencies = {}) {
       }
     }
     catch (error) {
-      if (error.code === 'ARCHITECTURE_RESUME_BLOCKED') throw error;
-      job ||= createJob({ projectName, repo: project.repo, issue: candidate, branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
+      if (['ARCHITECTURE_RESUME_BLOCKED', 'AUTOPILOT_CANCELLED', 'AUTOPILOT_STOPPING', 'AUTOPILOT_PROCESS_UNCONFIRMED'].includes(error.code)) throw error;
+      job ||= createBoundJob({ projectName, repo: project.repo, issue: candidate, branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
       holdAuthorization(error); store.save(job);
       return { issue: candidate, job, outcome: { status: 'authorization_blocked', terminal: false, deliverable: false } };
     }
@@ -556,11 +630,28 @@ async function run(argv, dependencies = {}) {
         return { issue: candidate, job, outcome: { status: 'paused_owner_decision', terminal: true, deliverable: false } };
       }
     }
+    if (selection.unavailable || (dependencies.requestedIssue && project.autoMerge && !job
+      && String(candidate.body || '').replace(/\s+/g, '').length < 40)) {
+      job ||= createBoundJob({ projectName, repo: project.repo, issue: candidate,
+        branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
+      const outcome = selection.unavailable ? 'failed' : 'needs_specification';
+      recordFailure(job, 'admission', selection.unavailable
+        ? 'Issue is not ready and has no resumable Autopilot checkpoint.'
+        : 'Issue requires a complete product specification.', store.now);
+      job.status = outcome; markTerminal(job, outcome); store.save(job);
+      return { issue: candidate, job, outcome: { status: outcome, terminal: true, deliverable: false } };
+    }
+    if (job && dependencies.requestedIssue && !admitted.some(issue => issue.number === candidate.number)
+      && !job.originalIssue?.body && !job.delivery?.commit) {
+      job.ownershipBlocked = 'Issue requirements unavailable from discovery; hold existing work for owner reconciliation.';
+      store.save(job);
+      return { issue: candidate, job, outcome: { status: 'ownership_blocked', terminal: false, deliverable: false } };
+    }
     // Before a new job allocates anything, leave an explicitly-closing PR
     // entirely to its existing owner. Recovered Ralph jobs deliberately skip
     // this guard so their established recovery path remains unchanged.
     if (!job) {
-      job = createJob({
+      job = createBoundJob({
         projectName,
         maxReviewRounds,
         repo: project.repo,
@@ -600,6 +691,15 @@ async function run(argv, dependencies = {}) {
       // Serialize integration and final merge; external CI/review calls run
       // without the target lock so other issues can make progress.
       phase = 'ci';
+      if (dependencies.deliveryTimeoutMs !== undefined) {
+        job.ciWaitSince ||= store.now();
+        if (Date.parse(store.now()) - Date.parse(job.ciWaitSince) > dependencies.deliveryTimeoutMs) {
+          handToHuman(job, 'ci', 'Required CI did not reach a final result within the delivery timeout.', store.now);
+          store.save(job);
+          return { issue: candidate, job, outcome: { status: job.terminalState, terminal: true, deliverable: false } };
+        }
+        store.save(job);
+      }
       targetLock = (dependencies.acquireTargetLock || (() => store.acquireTarget(project.repo, project.baseBranch)))();
       const integration = await synchronize();
       if (integration?.changed || integration?.pending) {
@@ -645,9 +745,9 @@ async function run(argv, dependencies = {}) {
             await authorizeMilestone();
             const reviewPullRequest = dependencies.reviewPullRequest
               || dependencies.independentReview || dependencies.independentReviewer
-              || realReviewAdapter;
+              || parentReviewAdapter;
             const model = reviewPullRequest.model || project.reviewModel || 'sonnet';
-            const reviewer = reviewPullRequest.reviewer === 'claude' || reviewPullRequest === realReviewAdapter
+            const reviewer = reviewPullRequest.reviewer === 'claude' || reviewPullRequest === parentReviewAdapter
               ? `claude:${model}` : reviewPullRequest.reviewer || 'independent-review-adapter';
             const reviewContext = {
               project, issue: candidate, pullRequest: { ...job.pr, headCommit: job.delivery.commit },
@@ -719,6 +819,7 @@ async function run(argv, dependencies = {}) {
               store.save(job);
               handToHuman(job, 'review', failed.diagnostics, store.now);
             }
+            assertNotCancelled();
             const reviewEntry = job.reviewHistory?.find(entry => entry.number === attempt.number);
             if (reviewEntry) reviewEntry.rawResult = review ?? null;
             const pass = matchingPass(review, job.delivery.commit);
@@ -936,6 +1037,7 @@ async function run(argv, dependencies = {}) {
         recordFailure(job, 'decision-worker', error, store.now);
         result = { status: 'paused_owner_decision', attempts: [] };
       }
+      assertNotCancelled();
       const proposal = decisions.readProposal(workspace.worktreePath, project.architectureDecisions);
       if (project.architectureDecisions === true && proposal) {
         job.ralph = { ...job.ralph, status: 'paused_owner_decision', attempts: result.attempts?.length || 0, ...(result.childLoopId ? { childLoopId: result.childLoopId } : {}) };
@@ -1071,9 +1173,26 @@ async function run(argv, dependencies = {}) {
       write(`Autopilot: project ${projectName}; issue #${candidate.number}; target busy, deferred.`);
       return { issue: candidate, workspace: null, result: null, outcome: { status: 'deferred' }, job };
     }
+    if (error.code === 'AUTOPILOT_STOPPING') return { issue: candidate, job, outcome: { status: 'stopping' } };
+    if (job && error.code === 'AUTOPILOT_PROCESS_UNCONFIRMED') {
+      job.ownershipBlocked = error.message; store.save(job);
+      return { issue: candidate, job, outcome: { status: 'ownership_blocked', terminal: false, deliverable: false } };
+    }
+    if (job && dependencies.environmentIsCancelled?.()) {
+      recordFailure(job, phase, error, store.now);
+      error.code = 'AUTOPILOT_CANCELLED';
+    }
+    if (!job && error.code === 'AUTOPILOT_CANCELLED') {
+      job = createBoundJob({ projectName, repo: project.repo, issue: candidate,
+        branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
+    }
     if (job) {
       try {
-        if (error.code === 'MILESTONE_AUTHORIZATION_BLOCKED') {
+        if (error.code === 'AUTOPILOT_CANCELLED') {
+          recordFailure(job, 'cancellation', error, store.now);
+          job.status = 'cancelled'; markTerminal(job, 'cancelled'); store.save(job);
+          return { issue: candidate, job, outcome: { status: 'cancelled', terminal: true, deliverable: false } };
+        } else if (error.code === 'MILESTONE_AUTHORIZATION_BLOCKED') {
           holdAuthorization(error);
           store.save(job);
           write(`${error.decision || 'DENY'}: ${error.message}`);
@@ -1129,7 +1248,7 @@ async function run(argv, dependencies = {}) {
           } else {
             job.status = 'failed';
             // Bound automatic retries of a job that keeps failing outside Ralph.
-            if (runLimitReached) markTerminal(job, 'failed');
+            if (runLimitReached || error.code === 'R1_CHILD_CRITIC_EXHAUSTED') markTerminal(job, 'failed');
           }
           store.save(job);
         }
@@ -1140,7 +1259,7 @@ async function run(argv, dependencies = {}) {
     throw error;
   } finally {
     try {
-      if (workspace && !job?.architectureDecision && !job?.authorizationBlocked && !job?.environmentProcess) {
+      if (workspace && !dependencies.isStopping?.() && !job?.architectureDecision && !job?.authorizationBlocked && !job?.environmentProcess && !job?.agentProcess) {
         try {
           if (typeof dependencies.captureFailedWork === 'function') {
             await dependencies.captureFailedWork({ job, workspace, store });

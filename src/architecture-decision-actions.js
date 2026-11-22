@@ -180,7 +180,7 @@ async function decisionCommand(action, id, options = {}) {
         }
         if (!task || !['paused_owner_decision', 'pending', 'running'].includes(task.status)
           || task.workflow !== 'r1' || task.project !== job.project || task.issue !== job.issue.number
-          || task.r1?.createdAt !== job.createdAt) throw new Error('Original owner queue job identity changed or is missing.');
+          || (task.autopilotStateDir ? task.autopilotStateDir !== store.directory : task.r1?.createdAt !== job.createdAt)) throw new Error('Original owner queue job identity changed or is missing.');
       }
       try {
         d.resumeEvidence = await validateResume(project, job, store, options);
@@ -191,7 +191,8 @@ async function decisionCommand(action, id, options = {}) {
       job.terminal = false; job.terminalState = null; job.status = 'decision_resume_pending';
       store.save(job);
       if (task && queueStage === 'done') {
-        task.r1 = structuredClone(job); task.status = 'pending'; task.phase = 'admitted';
+        if (!task.autopilotStateDir) { task.r1 = structuredClone(job); task.phase = 'admitted'; }
+        task.status = 'pending';
         queue.writeTask(task, 'done'); queue.moveTask(task.id, 'done', 'pending');
       }
       return job;
