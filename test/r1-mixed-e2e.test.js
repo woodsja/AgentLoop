@@ -187,6 +187,12 @@ async function runCase(testCase) {
     assert.ok(critics.length>=2 && critics.length<=3,'Critic must reject with a bounded cycle budget');
     assert.ok(critics.every(x=>/VERDICT: FAIL/.test(x.verdict)),'All critic attempts must reject');
     assert.ok(rejectedInvocations.some(x=>x.role==='worker'),'Codex must actually run');
+    const index = fs.readdirSync(path.join(queue,'r1-child-index',created.id)).find(name=>name.endsWith('.json'));
+    const reserved = JSON.parse(fs.readFileSync(path.join(queue,'r1-child-index',created.id,index)));
+    const child = JSON.parse(fs.readFileSync(path.join(queue,'tasks/done', reserved.id+'.json')));
+    assert.ok(child.cycles.length <= 3, 'R1 child must obey its owner-set three-cycle budget');
+    assert.ok(child.blocked.length >= 1, 'repeated FAIL creates a durable blocked-task record');
+    assert.notEqual(child.status, 'passed');
     assert.equal(lines(path.join(root,'delivery')).length,0);
     assert.equal(lines(path.join(root,'ci')).length,0);
     assert.equal(lines(path.join(root,'final-review')).length,0);

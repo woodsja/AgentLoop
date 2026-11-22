@@ -18,7 +18,7 @@ Codex handles implementation; Claude reviews independently. The daemon persists 
 
 ## Why fresh contexts
 
-Each agent invocation starts with a fresh process. Durable job state and the repository carry forward the authorized task and any reviewer findings; no human must copy intermediate results between conversations. Retries are bounded. Historical task and loop records remain readable, but their old admission interfaces are no longer supported. Pre-upgrade pending legacy tasks and classic loops are moved to a durable failed state without starting a retired worker; any interrupted legacy process is recovered without replay.
+Each agent invocation starts with a fresh process. Durable job state and the repository carry forward the authorized task and any reviewer findings; no human must copy intermediate results between conversations. Retries are bounded. Historical task and loop records remain readable, but their old admission interfaces are no longer supported. Pre-upgrade pending legacy tasks and classic loops are failed closed when the scheduler reaches them; if an R1 job holds the execution slot they remain pending but cannot start a retired executor. Interrupted legacy processes are recovered without replay.
 
 ## How it works
 

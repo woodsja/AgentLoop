@@ -212,6 +212,52 @@ test('restart archives an interrupted historical direct task without replay or l
   }
 });
 
+test('restart retires an interrupted classic loop without relaunching either engine', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-classic-restart-'));
+  const project = path.join(directory, 'project'); fs.mkdirSync(project);
+  const config = { dashboardPort: 0, allowedProjects: { demo: project },
+    enginePaths: { codex: '/nonexistent/retired-codex', claude: '/nonexistent/retired-claude' } };
+  let id; let raw;
+  const first = isolatedDaemon(config, directory);
+  let started = false;
+  try {
+    const loop = first.store.enqueueLoop({ project: 'demo', projectPath: project, status: 'running',
+      workerEngine: 'codex', criticEngine: 'claude', maxCycles: 3,
+      cycles: [{ n: 1, status: 'running', phase: 'worker' }] });
+    id = loop.id; first.store.moveTask(id, 'pending', 'running');
+    first.store.appendExecution(id, { event: 'output', role: 'worker', stream: 'stdout',
+      base64: Buffer.from('captured classic worker output\n').toString('base64') });
+    raw = fs.readFileSync(first.store.executionPath(id));
+    first.daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+    started = true;
+    const done = first.store.readTask(id, 'done');
+    assert.equal(done.status, 'failed');
+    assert.equal(done.reason, 'daemon_restarted');
+    assert.equal(done.cycles[0].status, 'failed');
+    assert.deepEqual(fs.readFileSync(first.store.executionPath(id)).subarray(0, raw.length), raw);
+    assert.deepEqual(first.store.listTasks('running'), []);
+  } finally {
+    if (started) { await first.daemon.stop(() => {}); first.daemon.resetStopping(); }
+    first.restore();
+  }
+  const second = isolatedDaemon(config, directory);
+  started = false;
+  try {
+    const before = fs.readFileSync(second.store.executionPath(id));
+    second.daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+    started = true;
+    assert.equal(second.store.readTask(id, 'done').reason, 'daemon_restarted');
+    assert.deepEqual(fs.readFileSync(second.store.executionPath(id)), before,
+      'a second restart cannot append another historical terminal transition');
+    assert.deepEqual(second.store.listTasks('running'), []);
+    assert.deepEqual(second.store.listTasks('pending'), []);
+  } finally {
+    if (started) { await second.daemon.stop(() => {}); second.daemon.resetStopping(); }
+    second.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('legacy archival failure cannot prevent other queued jobs from being retired', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-archive-fail-'));
   const project = path.join(directory, 'project');
@@ -278,6 +324,37 @@ test('partial legacy archival resumes once after a fresh daemon without replay o
     assert.equal(restarted.store.readTask(id, 'done').prompt, 'Retired work cannot run.');
   } finally {
     restarted.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a failed terminal journal append cannot undo an already durable retired archive', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-journal-failure-'));
+  const project = path.join(directory, 'project'); fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project } }, directory);
+  const oldAppend = isolated.store.appendExecution;
+  const oldError = console.error;
+  const diagnostics = [];
+  try {
+    const legacy = isolated.store.enqueueTask({ project: 'demo', prompt: 'Do not run this old task' });
+    isolated.store.appendExecution = (id, record) => {
+      if (record.event === 'legacy_job_terminal') throw new Error('simulated ENOSPC while recording audit');
+      return oldAppend(id, record);
+    };
+    console.error = line => { diagnostics.push(String(line)); };
+    isolated.daemon.fillSlots();
+    assert.equal(isolated.store.readTask(legacy.id, 'done').reason, 'legacy_execution_retired');
+    assert.equal(isolated.store.listTasks('pending').length, 0);
+    assert.equal(isolated.store.listTasks('running').length, 0);
+    assert.ok(isolated.store.readLogLines(legacy.id).some(line => line.includes('Legacy execution admission retired')), 'owner still has a readable archived summary');
+    assert.ok(diagnostics.some(line => /Execution log persistence failed/.test(line)), 'the existing recorder reports failed audit persistence');
+    assert.ok(!diagnostics.some(line => /could not be archived/.test(line)), 'do not claim the already-completed state move failed');
+    isolated.daemon.fillSlots();
+    assert.equal(isolated.store.readTask(legacy.id, 'done').status, 'failed');
+  } finally {
+    console.error = oldError;
+    isolated.store.appendExecution = oldAppend;
+    isolated.restore();
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

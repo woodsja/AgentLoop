@@ -1587,6 +1587,8 @@ function closeRetiredJob(task, stage, reason = 'legacy_execution_retired') {
   store.writeResult(result);
   store.writeTask(ended, stage);
   store.moveTask(task.id, stage, 'done');
+  // recorder handles journal write errors as best-effort evidence, recording
+  // the failed append to stderr without undoing the already durable archive.
   recorder(store, task.id)('legacy_job_terminal', { reason, stage, summary });
   try { store.appendLogLine(task.id, summary); }
   catch (error) { console.error('Failed to append archived job log: ' + error.message); }
