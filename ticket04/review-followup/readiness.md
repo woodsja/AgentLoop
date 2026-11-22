@@ -1,3 +1,5 @@
+> **HISTORICAL PRE-COMMIT EVIDENCE, NOT CURRENT ACCEPTANCE.** This document records the second correction worktree before commit `00910fb` and its sandbox tests. The final candidate and native VM verification are recorded in `ticket04/readiness-current.md` and in the durable VM report directory. This historical record is retained for audit only; the separately archived snapshot hashes and sandbox-only test summary are not exact-final-commit verification.
+
 # Ticket 04 second correction loop — readiness
 
 **Not accepted for merge or deployment.** Source/test corrections are uncommitted in the existing worktree and branch `simplify/highlander-one-coordinator-20261122`; HEAD remains `e99b626dd8d20a317a458c9af1bf9cb5ca0fbccd`. The pre-existing terminal setup-claim change in `src/r1-jobs.js` is preserved. Existing untracked `review-corrections/` and `vm-tests/` were preserved. No branch, PR, issue, E2E job, deployment, merge, push, production configuration, Windows or Finance Dashboard action was performed. All existing PRs retain their remote state, including draft status.

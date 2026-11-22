@@ -223,3 +223,26 @@ test('unknown worker ownership keeps cancellation held without outcome actions o
   assert.equal(f.commands.length, 0);
   assert.equal(f.jobs.read(task.id).nextAction.action, 'owner_decision');
 });
+
+test('exhausted PR inspection during held cancellation frees dispatch without unsafe remote cleanup', async t => {
+  const f = fixture(t), { task, job } = f.saved('awaiting_ci');
+  job.pr = { number: 9, url: 'https://github.com/owner/demo/pull/9' };
+  job.delivery = { branch: job.branch, commit: 'a'.repeat(40), pushed: true }; f.durable.save(job);
+  f.deps.execFile = (_file, args, _opts, cb) => {
+    f.commands.push(['gh', ...args]);
+    cb(new Error('GitHub temporarily unavailable'), '', 'GitHub 503 RAW');
+  };
+  task.cancelRequested = true;
+  for (let i = 0; i < 5 && task.stage !== 'done'; i++) await f.tick(task);
+  assert.equal(task.stage, 'done', 'bounded failure cannot occupy the global dispatch slot forever');
+  const result = f.jobs.read(task.id);
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.nextAction.action, 'owner_decision');
+  assert.equal(result.evidence.outcomeActions['inspect-pr'].attempts, 3);
+  assert.equal(result.evidence.outcomeActions['inspect-pr'].ok, false);
+  assert.match(result.evidence.outcomeActions['inspect-pr'].error, /GitHub 503 RAW/);
+  assert.deepEqual(f.commands.map(c => c.slice(1, 3)), Array(3).fill(null).map(() => ['pr', 'view']),
+    'unknown PR state must prohibit PR closing, branch deletion and owner notification');
+  f.issues([{ number: 2, title: 'Next job', body: 'Implement the next explicitly scoped owner-approved feature and verify it with deterministic acceptance tests.' }]);
+  assert.equal((await f.jobs.admit()).issue, 2);
+});

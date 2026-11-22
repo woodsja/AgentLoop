@@ -389,6 +389,8 @@ function createR1Jobs(store, options = {}) {
         .then(cancelled => {
           finish(task, cancelled);
           if (!cancelled.terminal && cancelled.ownershipBlocked) nextAdvance.set(task.id, Infinity);
+          else if (!cancelled.terminal && cancelled.outcomeActions?.['inspect-pr']?.ok === false)
+            nextAdvance.set(task.id, Date.now() + ciPollMs);
         })
         .catch(error => holdSupervision(task, error))
         .finally(() => active.delete(task.id));

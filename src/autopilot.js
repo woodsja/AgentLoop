@@ -230,8 +230,17 @@ async function cancelHeldDelivery(task, store, loadProject, dependencies = {}) {
       job[key] = null;
     }
     if (!job.terminal && job.pr) {
+      const terminalizeUnverifiedCancellation = () => {
+        // The owner requested cancellation, but the remote PR state remains
+        // unverified. End local dispatch without authorizing remote cleanup.
+        // The failed inspection remains attached to the canonical job.
+        store.appendIntegrationEvent(job, { event: 'owner_cancelled', remotePrState: 'unverified',
+          reason: 'PR inspection retries exhausted; remote outcomes require owner reconciliation.' });
+        job.status = 'cancelled'; markTerminal(job, 'cancelled'); store.save(job);
+        return job;
+      };
       const prior = job.outcomeActions?.['inspect-pr'];
-      if (prior?.attempts >= 3 && !prior.ok) return job;
+      if (prior?.attempts >= 3 && !prior.ok) return terminalizeUnverifiedCancellation();
       job.outcomeActions ||= {};
       const entry = { attempts: (prior?.attempts || 0) + 1, at: store.now(), ok: false };
       job.outcomeActions['inspect-pr'] = entry; store.save(job);
@@ -247,7 +256,8 @@ async function cancelHeldDelivery(task, store, loadProject, dependencies = {}) {
         store.appendIntegrationEvent(job, { event: 'outcome_action_failed', action: 'inspect-pr', error: error.message });
       }
       store.save(job);
-      if (!entry.ok || job.outcomePrState === 'MERGED') return job;
+      if (!entry.ok) return entry.attempts >= 3 ? terminalizeUnverifiedCancellation() : job;
+      if (job.outcomePrState === 'MERGED') return job;
     }
     if (!job.terminal) {
       store.appendIntegrationEvent(job, { event: 'owner_cancelled', supervision: task.supervisionBlocked || null });
@@ -537,7 +547,12 @@ async function run(argv, dependencies = {}) {
   for (const saved of requestedDecisions) {
     if (!admitted.some(i => i.number === saved.issue.number)) admitted.push(resumeSource(saved));
   }
-  const selection = selectIssueForJobs(admitted, recorded, choose)
+  // Corrected terminal specifications require a new R1 parent reservation
+  // (and immutable archival). The legacy timer cannot make that reservation;
+  // do not repeatedly select one and starve unrelated ready issues.
+  const timerEligible = dependencies.requestedIssue ? admitted : admitted.filter(issue =>
+    recorded.find(saved => saved.issue.number === issue.number)?.terminalState !== 'needs_specification');
+  const selection = selectIssueForJobs(timerEligible, recorded, choose)
     || (dependencies.requestedIssue ? {
       issue: recorded.find(saved => saved.issue.number === dependencies.requestedIssue.number)?.originalIssue || dependencies.requestedIssue,
       job: recorded.find(saved => saved.issue.number === dependencies.requestedIssue.number) || null,
@@ -854,7 +869,9 @@ async function run(argv, dependencies = {}) {
       return { issue: candidate, job, outcome: { status: outcome, terminal: true, deliverable: false } };
     }
     if (job && dependencies.requestedIssue && !admitted.some(issue => issue.number === candidate.number)
-      && !job.originalIssue?.body && !job.delivery?.commit) {
+      && !job.originalIssue?.body
+      && (!job.delivery?.commit || ['correction_eligible', 'review_correction_eligible'].includes(job.status)
+        || job.correction?.status === 'eligible' || job.reviewCorrection?.status === 'eligible')) {
       job.ownershipBlocked = 'Issue requirements unavailable from discovery; hold existing work for owner reconciliation.';
       job.ownershipBlockSource = 'discovery';
       store.save(job);

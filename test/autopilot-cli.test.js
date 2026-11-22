@@ -2745,10 +2745,11 @@ test('timer corrected specification cannot overwrite terminal checkpoint or raw 
   store.appendIntegrationEvent(store.load(218), { event: 'original', text: 'RAW immutable attempt' });
   const before = fs.readFileSync(store.jobPath(218), 'utf8');
   const journal = fs.readFileSync(store.jobPath(218).replace('.json', '.execution.ndjson'), 'utf8');
-  await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+  const selection = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
     discoverReadyIssues: async () => [{ number: 218, title: 'Spec', body: 'Implement the corrected full specification with deterministic acceptance criteria.' }],
     createRalphTaskService: () => assert.fail('timer must not overwrite history'),
-  })), /already needs_specification/);
+  }));
+  assert.equal(selection, null, 'the timer skips terminal rearm candidates instead of throwing each pass');
   assert.equal(fs.readFileSync(store.jobPath(218), 'utf8'), before);
   assert.equal(fs.readFileSync(store.jobPath(218).replace('.json', '.execution.ndjson'), 'utf8'), journal);
 });
@@ -2766,4 +2767,43 @@ test('exhausted child critic retains the owner cycle budget without another pare
   assert.equal(store.load(219).terminalState, 'failed'); assert.equal(workers, 1);
   await runAutopilot(['--project', 'demo'], { ...deps, parentJobId: 't-0000abcd', requestedIssue: { number: 219 } });
   assert.equal(workers, 1);
+});
+
+test('missing discovery requirements hold an otherwise eligible delivered correction without a worker or synthetic title', async () => {
+  const store = temporaryStore();
+  const issue = { number: 220, title: 'Original requirement title' };
+  saveJob(store, issue.number, { r1ParentJobId: 't-0000abcd', status: 'review_correction_eligible',
+    issue: { number: 220, title: issue.title }, reviewCorrectiveCycles: 1,
+    reviewCorrection: { cycle: 1, status: 'eligible', reviewCommit: 'abc123', reviewer: 'claude:sonnet', findings: 'Correct this defect', commit: null },
+    pr: { number: 99, url: 'https://example.invalid/pull/99' },
+    delivery: { branch: 'ralph/issue-220-original', commit: 'abc123', pushed: true } });
+  let prepared = 0, launched = 0;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    requestedIssue: { number: 220, title: 'R1 issue #220' }, discoverReadyIssues: async () => [],
+    prepareIssueWorkspace: async () => { prepared++; throw new Error('missing requirements must not prepare'); },
+    createRalphTaskService: () => { launched++; throw new Error('missing requirements must not start a worker'); },
+  }));
+  const saved = createJobStore(store.directory).load(220);
+  assert.equal(result.outcome.status, 'ownership_blocked');
+  assert.equal(saved.ownershipBlockSource, 'discovery');
+  assert.equal(saved.issue.title, 'Original requirement title');
+  assert.equal(saved.runs, 1, 'no additional corrective worker run');
+  assert.equal(prepared, 0); assert.equal(launched, 0);
+});
+
+test('scheduled Autopilot skips corrected-specification rearm reserved for R1 admission', async () => {
+  const store = temporaryStore();
+  const old = createJob({ projectName: 'demo', repo: 'example/repo',
+    issue: { number: 221, title: 'Previously insufficient' },
+    branch: 'ralph/issue-221', worktreePath: null, now: store.now });
+  old.originalIssue = { number: 221, title: 'Previously insufficient', body: 'short' };
+  old.status = 'needs_specification'; require('../src/autopilot-state').markTerminal(old, 'needs_specification');
+  store.save(old);
+  const available = [{ number: 221, title: 'Now specified', body: 'Fully specified work with deterministic tests and acceptance criteria for the corrected issue.' },
+    { number: 222, title: 'Independent ready issue', body: 'Implement other required behavior safely with deterministic tests and acceptance criteria.' }];
+  const selected = await runAutopilot(['--project', 'demo', '--dry-run'], enabledDependencies(store, {
+    discoverReadyIssues: async () => available,
+  }));
+  assert.equal(selected.number, 222, 'timer must not repeatedly select a terminal correction reserved for R1');
+  assert.equal(store.load(221).terminalState, 'needs_specification');
 });
