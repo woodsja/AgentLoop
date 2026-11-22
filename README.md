@@ -143,7 +143,7 @@ Claude Code can connect to the local bridge directly, no tunnel needed:
 claude mcp add --transport http agentloop "http://127.0.0.1:5758/mcp?key=<token-from-Connector>"
 ```
 
-The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `submit_job`, `get_job_status`, `get_job_result`, `submit_r1_job`, `get_r1_job_status`, `get_r1_job_result`, `dispatch_task`, `start_loop`, and `send_message`. Job and dispatch submission require a registered project name; `dispatch_task` and `start_loop` both take an optional `engine`.
+The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `submit_job`, `get_job_status`, `get_job_result`, `submit_r1_job`, `get_r1_job_status`, `get_r1_job_result`, `dispatch_task`, `start_loop`, and `send_message`. Job and dispatch submission require a registered project name; `dispatch_task` and `start_loop` both take an optional `engine`. For new direct-task integrations, use `dispatch_task`; `submit_job` remains a supported legacy alias (without a `worktree` selector). Both MCP names now submit through `POST /api/dispatch`, while direct HTTP clients can continue using either `POST /api/dispatch` or `POST /api/jobs`. No public entry has been removed.
 
 ## Try the demo loop
 

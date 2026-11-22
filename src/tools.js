@@ -209,7 +209,7 @@ const tools = [
   },
   {
     name: 'submit_job',
-    description: 'Queue a job for a registered AgentLoop project.',
+    description: 'Legacy compatibility alias for dispatch_task; queues a direct task for a registered project. Prefer dispatch_task for new integrations.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -398,24 +398,12 @@ async function callTool(params, options = {}) {
       ? toolResult(response.value) : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
   }
 
-  if (name === 'dispatch_task') {
+  // Preserve both externally advertised tool names but admit through one
+  // existing daemon interface. The HTTP /api/jobs route remains compatible.
+  if (name === 'dispatch_task' || name === 'submit_job') {
     const response = await requestDaemon(options, '/api/dispatch', {
       project: args.project,
-      ...(args.worktree !== undefined ? { worktree: args.worktree } : {}),
-      title: args.title,
-      prompt: args.prompt,
-      engine: args.engine,
-      source: 'mcp',
-    });
-
-    return response && response.statusCode >= 200 && response.statusCode < 300
-      ? toolResult({ id: response.value?.id })
-      : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
-  }
-
-  if (name === 'submit_job') {
-    const response = await requestDaemon(options, '/api/jobs', {
-      project: args.project,
+      ...(name === 'dispatch_task' && args.worktree !== undefined ? { worktree: args.worktree } : {}),
       title: args.title,
       prompt: args.prompt,
       engine: args.engine,

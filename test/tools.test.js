@@ -259,12 +259,32 @@ test('submit_job queues a registered project and returns its persisted id withou
   });
 
   assert.deepEqual(calls, [{
-    requestPath: '/api/jobs',
+    requestPath: '/api/dispatch',
     body: {
       project: 'demo', title: 'Add coverage', prompt: 'Write one focused test.', engine: 'codex', source: 'mcp',
     },
   }]);
   assert.deepEqual(result.structuredContent, { id: 't-queued' });
+});
+
+test('legacy submit_job succeeds through the canonical direct admission endpoint', async () => {
+  const routes = [];
+  const result = await tools.callTool({
+    name: 'submit_job',
+    arguments: { project: 'demo', title: 'Compatible client', prompt: 'Run a task' },
+  }, {
+    async daemonRequest(requestPath, body) {
+      routes.push(requestPath);
+      if (requestPath !== '/api/dispatch') return { statusCode: 404, value: { error: 'Legacy ingress disabled.' } };
+      assert.deepEqual(body, {
+        project: 'demo', title: 'Compatible client', prompt: 'Run a task', engine: undefined, source: 'mcp',
+      });
+      return { statusCode: 201, value: { id: 't-canonical' } };
+    },
+  });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent, { id: 't-canonical' });
+  assert.deepEqual(routes, ['/api/dispatch']);
 });
 
 test('job tools read compact status and completed result without worker-private fields', async () => {
@@ -332,7 +352,7 @@ test('submit_job rejects unknown projects and reports a down daemon', async () =
     arguments: { project: '/arbitrary/path', title: 'Nope', prompt: 'Nope' },
   }, {
     async daemonRequest(requestPath, body) {
-      assert.equal(requestPath, '/api/jobs');
+      assert.equal(requestPath, '/api/dispatch');
       assert.equal(body.project, '/arbitrary/path');
       return { statusCode: 400, value: { error: 'Unknown project.' } };
     },
