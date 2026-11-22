@@ -445,3 +445,76 @@ test('invalid state callback is rejected before any worker runs', async () => {
   }), /options\.onStateChange must be a function/);
   assert.equal(calls, 0);
 });
+
+test('public task loop trusts deterministic verification instead of a worker status claim', async () => {
+  await inProject(async projectPath => {
+    const failed = await runTask(projectPath, task({ maxAttempts: 1 }), {
+      runWorker: async () => ({ status: 'passed', verification: { passed: true } }),
+    });
+    assert.equal(failed.status, 'needs_planning');
+    assert.equal(failed.attempts[0].status, 'failed');
+    assert.equal(failed.attempts[0].verification.exitCode, 1);
+
+    const passed = await runTask(projectPath, task({ maxAttempts: 1 }), {
+      runWorker: async () => {
+        fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+        return { status: 'failed', verification: { passed: false } };
+      },
+    });
+    assert.equal(passed.status, 'passed');
+    assert.equal(passed.attempts[0].verification.passed, true);
+  });
+});
+
+test('worker mutation cannot change the next attempt contract', async () => {
+  await inProject(async projectPath => {
+    let calls = 0;
+    const result = await runTask(projectPath, task({ maxAttempts: 2 }), {
+      runWorker: async (_cwd, workerTask) => {
+        calls++;
+        assert.equal(workerTask.goal, 'Create result.txt');
+        assert.deepEqual(workerTask.acceptance, ['result.txt exists']);
+        if (calls === 1) {
+          workerTask.goal = 'malicious mutation';
+          workerTask.acceptance.push('unapproved requirement');
+          workerTask.verification = 'exit 0';
+        }
+      },
+    });
+    assert.equal(calls, 2);
+    assert.equal(result.task.goal, 'Create result.txt');
+    assert.deepEqual(result.task.acceptance, ['result.txt exists']);
+    assert.equal(result.status, 'needs_planning');
+    assert.ok(result.attempts.every(attempt => attempt.status === 'failed'));
+  });
+});
+
+test('a failed worker never runs verification as a side effect', async () => {
+  await inProject(async projectPath => {
+    const marker = 'node -e "require(\'node:fs\').writeFileSync(\'verification-ran\', \'yes\')"';
+    const result = await runTask(projectPath, task({ verification: marker, maxAttempts: 1 }), {
+      runWorker: async () => { throw new Error('worker failed'); },
+    });
+    assert.equal(result.status, 'needs_planning');
+    assert.equal(result.attempts[0].status, 'worker_error');
+    assert.equal(fs.existsSync(path.join(projectPath, 'verification-ran')), false);
+  });
+});
+
+test('verification runs only after the worker finishes', async () => {
+  await inProject(async projectPath => {
+    let releaseWorker;
+    const gate = new Promise(resolve => { releaseWorker = resolve; });
+    const execution = runTask(projectPath, task({ maxAttempts: 1 }), {
+      runWorker: async () => {
+        await gate;
+        fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+      },
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fs.existsSync(path.join(projectPath, 'result.txt')), false);
+    releaseWorker();
+    const result = await execution;
+    assert.equal(result.status, 'passed');
+  });
+});
