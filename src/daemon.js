@@ -1671,7 +1671,10 @@ function fillSlots() {
     if (task.r1Child) {
       let parent;
       try { parent = store.readTask(task.r1Child.parentJobId, 'running'); } catch {}
-      if (!parent?.autopilotStateDir) continue;
+      if (!parent?.autopilotStateDir) {
+        failUnauthorizedR1Child(task, new Error('Canonical parent is no longer running.'));
+        continue;
+      }
     }
     if (task.r1Child || task.workflow === 'r1') {
       canonical.push(entry);

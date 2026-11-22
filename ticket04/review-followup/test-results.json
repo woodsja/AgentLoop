@@ -1,0 +1,194 @@
+{
+  "architecture-decision-actions": {
+    "exit": 0,
+    "tests": 96,
+    "pass": 96,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "dd7bb69e48438a4760a5fbe30f7e172ab4d572b301b72809497ef66362e74e0d"
+  },
+  "architecture-decisions": {
+    "exit": 0,
+    "tests": 84,
+    "pass": 84,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "57de1946c6ef7295c4f76fcf28027ab6c8737e52bc79606c1eb3f1adf25cd6e4"
+  },
+  "autopilot-cli": {
+    "exit": 1,
+    "tests": 103,
+    "pass": 102,
+    "fail": 1,
+    "skipped": 0,
+    "log_sha256": "94ca5dd33bdd9af883be5e01036d43f9b46b3d37c81c1fab21abdd6826b27d54"
+  },
+  "autopilot-state": {
+    "exit": 0,
+    "tests": 30,
+    "pass": 30,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "c16a8d58c789f47c9db049148309b4d8ce00c6a4aef014260261621835587bb3"
+  },
+  "child-admission": {
+    "exit": 0,
+    "tests": 6,
+    "pass": 6,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "c8975a7450389262cf0e0c0f6c69fb0bf83fc3ae914ecb1d60a64b7d7c28e179"
+  },
+  "child-recover": {
+    "exit": 0,
+    "tests": 3,
+    "pass": 3,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "bed7abb37d500178bd0895f41664b1f13bc0d357a0d6887032bc7505f4801652"
+  },
+  "daemon": {
+    "exit": 0,
+    "tests": 45,
+    "pass": 40,
+    "fail": 0,
+    "skipped": 5,
+    "log_sha256": "ac78c33aa914252d1015c8d237fed80b2726788bef3d2e267a9f8dbcc0a75483"
+  },
+  "diff-check": {
+    "exit": 0,
+    "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "final-cli": {
+    "exit": 1,
+    "tests": 104,
+    "pass": 103,
+    "fail": 1,
+    "skipped": 0,
+    "log_sha256": "de0f4aabc1695874a9d94cd436e946b7f7b99cd45b330d9a998f4fc59a210e01"
+  },
+  "final-r1-focused": {
+    "exit": 0,
+    "tests": 5,
+    "pass": 5,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "a9b4a82cad322d22238c04c66cf6fb6db20d6d645b9ddd244af83ff3c0f7c73b"
+  },
+  "final-recovery": {
+    "exit": 0,
+    "tests": 19,
+    "pass": 19,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "8c7a7775286153be7b85a262f62f3e29962e8def63addb5e44a9e67f07709630"
+  },
+  "final-scheduler-focused": {
+    "exit": 0,
+    "tests": 1,
+    "pass": 1,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "6a03450ae34b3ca99ba502dc6dbf81e0218528958d577a620df361d1a5995304"
+  },
+  "node-preflight": {
+    "exit": 1,
+    "tests": 25,
+    "pass": 2,
+    "fail": 23,
+    "skipped": 0,
+    "log_sha256": "8bf34be9082edcb4028d962b0f69f2fec1ac2f47ddd40b010191cb42e5350ac6"
+  },
+  "process-claim": {
+    "exit": 0,
+    "tests": 4,
+    "pass": 4,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "4f4b4499ab567f0ca2125b762e81b2928320a1c445df27f0643ab27d0faef824"
+  },
+  "python-preflight": {
+    "exit": 1,
+    "tests": 16,
+    "pass": 0,
+    "fail": 16,
+    "skipped": 0,
+    "log_sha256": "5d0707aded6290d97b7b2cb82fc88353209568a903020c56d9b1a7f9b91ff8d8"
+  },
+  "r1-child-handoff": {
+    "exit": 1,
+    "tests": 11,
+    "pass": 0,
+    "fail": 11,
+    "skipped": 0,
+    "log_sha256": "a15eef5d35a2531f30344b2421515329047d0d1069e72c44d89cc5a46b10c43c"
+  },
+  "r1-child-scheduler": {
+    "exit": 1,
+    "tests": 5,
+    "pass": 2,
+    "fail": 3,
+    "skipped": 0,
+    "log_sha256": "47f8721bdec156c055d649fc429b88013ec2ea9dd7e9c37ccd3e0d62006eba86"
+  },
+  "r1-jobs": {
+    "exit": 1,
+    "tests": 9,
+    "pass": 7,
+    "fail": 2,
+    "skipped": 0,
+    "log_sha256": "e4104e3a9ede6a3e70a5332d9dbfd5a401611e8ad00d2c5beb673a474fba99f3"
+  },
+  "r1-milestone-admission": {
+    "exit": 1,
+    "tests": 31,
+    "pass": 30,
+    "fail": 1,
+    "skipped": 0,
+    "log_sha256": "974d1b31e6d0caa75d0071b96f7d87632a4f0bd084569538cc86026bc3cd7d38"
+  },
+  "r1-mixed-e2e": {
+    "exit": 1,
+    "tests": 9,
+    "pass": 0,
+    "fail": 9,
+    "skipped": 0,
+    "log_sha256": "5469e93a5da163802a167ee300b4d8b727c3054cf1b5d9a722e4fcec5ece2a9b"
+  },
+  "r1-review-recovery": {
+    "exit": 0,
+    "tests": 11,
+    "pass": 11,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "00a3cc3c6e080dcc9fb2cea770a57f629ac64072ac1c2cd4c12fdffcffe1553e"
+  },
+  "r1-runner": {
+    "exit": 1,
+    "tests": 1,
+    "pass": 0,
+    "fail": 1,
+    "skipped": 0,
+    "log_sha256": "fd1590b5e280c437f566c9a1367cbe5d50f0a691b467a6e9acc87bdd14c572e6"
+  },
+  "state": {
+    "exit": 0,
+    "tests": 15,
+    "pass": 15,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "8b1fce27bd0420db4910c2c0dec9bf9f442824f90a8d69e94ac6a30b5f8a3d4d"
+  },
+  "syntax": {
+    "exit": 0,
+    "log_sha256": "766801a73e90985fe58b1061254b279f38a97053b9c23afbb0e9e76b02264b32"
+  },
+  "final-cli-corrections": {
+    "exit": 0,
+    "tests": 4,
+    "pass": 4,
+    "fail": 0,
+    "skipped": 0,
+    "log_sha256": "2bbdc3faaedab46bc92edcabf2b243ec1bd10cef8759f280d8e130d3a1a34bee"
+  }
+}

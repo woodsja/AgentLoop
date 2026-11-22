@@ -1,0 +1,21 @@
+{
+  "counting_rule": "Physical lines including comments and blank lines in src/**/*.js; no logs, fixtures, docs or tests.",
+  "baseline_ticket03": {
+    "source_modules": 79,
+    "source_lines": 16392,
+    "r1_jobs_lines": 631
+  },
+  "starting_e99b626": {
+    "source_modules": 79,
+    "source_lines": 16718,
+    "r1_jobs_lines": 534
+  },
+  "current_uncommitted": {
+    "source_modules": 79,
+    "source_lines": 16814,
+    "r1_jobs_lines": 573
+  },
+  "delivery_coordinators": 1,
+  "active_delivery_state_writers": 1,
+  "active_delivery_checkpoint_copies": 1
+}

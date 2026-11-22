@@ -2708,3 +2708,62 @@ test('restart after recorded merge reconciles closure despite a later cancellati
   }));
   assert.equal(store.load(215).terminalState, 'merged'); assert.equal(closed, 1);
 });
+
+test('supervisor stop during preparation before a worker preserves a resumable checkpoint', async () => {
+  const store = temporaryStore(); let stopping = false;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [{ number: 216, title: 'Stop preparation' }],
+    isStopping: () => stopping,
+    prepareRepositoryEnvironment: async () => { stopping = true; throw new Error('supervisor interrupted preparation'); },
+  }));
+  assert.equal(result.outcome.status, 'stopping');
+  assert.equal(store.load(216).status, 'interrupted');
+  assert.equal(store.load(216).terminal, false);
+  assert.equal(store.load(216).failures.length, 0);
+});
+
+test('exact-head green CI survives an elapsed deadline while review continues', async () => {
+  const store = temporaryStore();
+  saveJob(store, 217, { status: 'awaiting_ci', ciWaitSince: '2000-01-01T00:00:00.000Z',
+    pr: { number: 99, url: 'https://github.com/example/repo/pull/99' },
+    delivery: { branch: 'ralph/issue-217-issue-217', commit: 'abc123', pushed: true },
+    ci: { state: 'green', headCommit: 'abc123', prNumber: 99, checkedAt: store.now(), details: null } });
+  let observed = 0;
+  await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    deliveryTimeoutMs: 1,
+    discoverReadyIssues: async () => [{ number: 217, title: 'Green' }],
+    observePullRequestCi: async () => { observed++; return { state: 'green', headCommit: 'abc123', prNumber: 99, details: null }; },
+  }));
+  assert.equal(observed, 1);
+  assert.equal(store.load(217).terminalState, 'ready_for_human_merge');
+});
+
+test('timer corrected specification cannot overwrite terminal checkpoint or raw history', async () => {
+  const store = temporaryStore();
+  saveJob(store, 218, { status: 'needs_specification', terminal: true, terminalState: 'needs_specification',
+    originalIssue: { number: 218, title: 'Spec', body: 'fix it' } });
+  store.appendIntegrationEvent(store.load(218), { event: 'original', text: 'RAW immutable attempt' });
+  const before = fs.readFileSync(store.jobPath(218), 'utf8');
+  const journal = fs.readFileSync(store.jobPath(218).replace('.json', '.execution.ndjson'), 'utf8');
+  await assert.rejects(runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [{ number: 218, title: 'Spec', body: 'Implement the corrected full specification with deterministic acceptance criteria.' }],
+    createRalphTaskService: () => assert.fail('timer must not overwrite history'),
+  })), /already needs_specification/);
+  assert.equal(fs.readFileSync(store.jobPath(218), 'utf8'), before);
+  assert.equal(fs.readFileSync(store.jobPath(218).replace('.json', '.execution.ndjson'), 'utf8'), journal);
+});
+
+test('exhausted child critic retains the owner cycle budget without another parent worker', async () => {
+  const store = temporaryStore(); let workers = 0;
+  const deps = enabledDependencies(store, {
+    maxJobRuns: 2,
+    loadProjectConfig: () => ({ ...project, enabled: true, autoMerge: true, checkout: '/tmp', worktreeRoot: '/tmp/worktrees', humanLabel: 'human', verification: 'check' }),
+    discoverReadyIssues: async () => [{ number: 219, title: 'Bounded correction' }],
+    createRalphTaskService: () => ({ run: async () => { workers++; throw Object.assign(new Error('critic exhausted'), { code: 'R1_CHILD_CRITIC_EXHAUSTED' }); } }),
+    execFile: (_file, args, _options, cb) => cb(null, args.includes('--json') ? '{"comments":[]}' : '', ''),
+  });
+  await assert.rejects(runAutopilot(['--project', 'demo'], deps), /critic exhausted/);
+  assert.equal(store.load(219).terminalState, 'failed'); assert.equal(workers, 1);
+  await runAutopilot(['--project', 'demo'], { ...deps, parentJobId: 't-0000abcd', requestedIssue: { number: 219 } });
+  assert.equal(workers, 1);
+});

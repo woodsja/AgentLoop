@@ -1,5 +1,5 @@
-const { deliveryPhase } = require('./autopilot-state');
 'use strict';
+const { deliveryPhase } = require('./autopilot-state');
 
 // Preserve owner-visible evidence; sanitize only the new CI display fields.
 // Owner text is verbatim, with escaping left to the rendering layer.

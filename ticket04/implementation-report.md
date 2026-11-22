@@ -1,3 +1,5 @@
+> **Superseded historical evidence.** Current uncommitted corrections from e99b626, owner outcome policy, measurements and validation are recorded in [review-followup/readiness.md](review-followup/readiness.md). Earlier claims below do not validate this snapshot; deleted outcome actions have been restored in the canonical coordinator.
+
 # Highlander Ticket 04 implementation
 
 Status: isolated draft PR #195, further post-review changes; **not ready or complete**. Baseline: `b56ad5876b1ceca4a67ea90f123d4301fd0b094a`. Branch: `simplify/highlander-one-coordinator-20261122`. No push, PR change, merge, deployment, production configuration/service change or Windows-host access.

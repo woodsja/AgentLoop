@@ -218,3 +218,31 @@ test('cancelling an R1 parent cancels its pending reserved child before any work
     }
   }
 });
+
+test('pending historical child of a finished parent is denied during dispatch without execution', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-orphan-dispatch-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configPath = path.join(root, 'owner.json');
+  fs.writeFileSync(configPath, JSON.stringify({ maxConcurrent: 1, allowedProjects: {} }));
+  const old = { config: process.env.AGENTLOOP_CONFIG_PATH, state: process.env.AGENTLOOP_STATE_DIR };
+  process.env.AGENTLOOP_CONFIG_PATH = configPath; process.env.AGENTLOOP_STATE_DIR = path.join(root, 'state');
+  const keys = ['../src/store', '../src/daemon'];
+  const modules = keys.map(key => require.cache[require.resolve(key)]);
+  for (const key of keys) delete require.cache[require.resolve(key)];
+  const store = require('../src/store'), daemon = require('../src/daemon');
+  try {
+    store.ensureDirs();
+    const parent = store.enqueueTask({ workflow: 'r1', project: 'demo', issue: 1 });
+    store.moveTask(parent.id, 'pending', 'done');
+    const child = store.enqueueLoop({ source: 'r1', project: 'demo', type: 'loop', status: 'queued',
+      r1Child: { parentJobId: parent.id, attempt: 1, issue: 1 } });
+    daemon.fillSlots();
+    assert.equal(store.readTask(child.id, 'done').reason, 'r1_child_unauthorized');
+    assert.equal(store.listTasks('running').length, 0);
+  } finally {
+    for (const [key, value] of [['AGENTLOOP_CONFIG_PATH', old.config], ['AGENTLOOP_STATE_DIR', old.state]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    keys.forEach((key, i) => { delete require.cache[require.resolve(key)]; if (modules[i]) require.cache[require.resolve(key)] = modules[i]; });
+  }
+});

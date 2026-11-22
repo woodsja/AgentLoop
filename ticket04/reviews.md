@@ -1,3 +1,5 @@
+> **Superseded historical evidence.** Current uncommitted corrections from e99b626, owner outcome policy, measurements and validation are recorded in [review-followup/readiness.md](review-followup/readiness.md). Earlier claims below do not validate this snapshot; deleted outcome actions have been restored in the canonical coordinator.
+
 # Independent code reviews
 
 Two independent read-only agents reviewed the baseline-to-working-tree diff; neither changed files. These are code assessments, not CI or E2E approval.

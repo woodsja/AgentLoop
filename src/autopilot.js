@@ -195,14 +195,24 @@ async function cleanupTerminalWorkspaces(project, store, cleanupWorkspace, write
   return cleaned;
 }
 
+function outcomeCommand(project, dependencies) {
+  return (file, args) => new Promise((resolve, reject) => {
+    (dependencies.outcomeExecFile || dependencies.execFile || require('./execution-log').execFile)(file, args,
+      { cwd: project.checkout, encoding: 'utf8', shell: false, timeout: 60000,
+        env: { ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' } },
+      (error, stdout, stderr) => error ? reject(Object.assign(new Error(String(stderr || error.message)), { cause: error })) : resolve(String(stdout)));
+  });
+}
+
 // Cancellation of an operator-held reservation never needs executor admission.
 // Unknown process ownership remains held with a durable cancellation request.
-function cancelHeldDelivery(task, store) {
+async function cancelHeldDelivery(task, store, loadProject, dependencies = {}) {
   const lock = store.acquire(task.issue);
   try {
     let job = store.load(task.issue);
     if (job && job.r1ParentJobId !== task.id) throw new Error('Cancellation checkpoint belongs to another parent.');
-    job ||= { ...createJob({ projectName: task.project, repo: task.repo || `unknown:${task.project}`,
+    if (!job && !task.repo) throw new Error('Cancellation requires the recorded repository identity.');
+    job ||= { ...createJob({ projectName: task.project, repo: task.repo,
       issue: { number: task.issue, title: task.title || `Issue ${task.issue}` },
       branch: deriveBranchName({ number: task.issue, title: task.title || `Issue ${task.issue}` }),
       worktreePath: null, now: store.now }), r1ParentJobId: task.id };
@@ -219,12 +229,47 @@ function cancelHeldDelivery(task, store) {
       }
       job[key] = null;
     }
+    if (!job.terminal && job.pr) {
+      const prior = job.outcomeActions?.['inspect-pr'];
+      if (prior?.attempts >= 3 && !prior.ok) return job;
+      job.outcomeActions ||= {};
+      const entry = { attempts: (prior?.attempts || 0) + 1, at: store.now(), ok: false };
+      job.outcomeActions['inspect-pr'] = entry; store.save(job);
+      try {
+        const project = loadProject(task.project);
+        if (project.repo !== job.repo) throw new Error('Outcome repository no longer matches owner configuration.');
+        const observed = JSON.parse(await outcomeCommand(project, dependencies)('gh',
+          ['pr', 'view', String(job.pr.number), '--repo', job.repo, '--json', 'state']));
+        if (!['OPEN', 'CLOSED', 'MERGED'].includes(observed.state)) throw new Error('PR state unavailable; cancellation held.');
+        job.outcomePrState = observed.state; entry.ok = true;
+      } catch (error) {
+        entry.error = error.message;
+        store.appendIntegrationEvent(job, { event: 'outcome_action_failed', action: 'inspect-pr', error: error.message });
+      }
+      store.save(job);
+      if (!entry.ok || job.outcomePrState === 'MERGED') return job;
+    }
     if (!job.terminal) {
       store.appendIntegrationEvent(job, { event: 'owner_cancelled', supervision: task.supervisionBlocked || null });
       delete job.ownershipBlocked; delete job.authorizationBlocked;
       job.status = 'cancelled'; markTerminal(job, 'cancelled');
     }
-    store.save(job); return job;
+    store.save(job);
+    const policy = job.outcomeActions?.['outcome-policy'];
+    if (task.autonomous && (!policy || policy.ok || policy.attempts < 3)) {
+      try {
+        const project = loadProject(task.project);
+        if (project.repo !== job.repo || !project.autoMerge) throw new Error('Owner configuration no longer authorizes outcome policy.');
+        if (policy) { policy.ok = true; store.save(job); }
+        await publishOutcome(project, job, store, dependencies);
+      } catch (error) {
+        job.outcomeActions ||= {};
+        job.outcomeActions['outcome-policy'] = { ok: false, attempts: (policy?.attempts || 0) + 1, error: error.message, at: store.now() };
+        store.appendIntegrationEvent(job, { event: 'outcome_policy_failed', error: error.message });
+        store.save(job);
+      }
+    }
+    return job;
   } finally { lock.release(); }
 }
 
@@ -235,10 +280,10 @@ function rearmCorrectedSpecification(projectName, project, store, issue, reserve
   const lock = store.acquire(issue.number);
   try {
     const old = store.load(issue.number);
-    if (!old?.terminal || old.terminalState !== 'needs_specification' || old.agentProcess
+    if (!old?.terminal || !(old.terminalState === 'needs_specification' || old.admissionUnavailable === true) || old.agentProcess
       || old.environmentProcess || old.architectureDecision || old.integrationActive
       || String(issue.body || '').replace(/\s+/g, '').length < 40
-      || issue.body === old.originalIssue?.body) return null;
+      || (!old.admissionUnavailable && issue.body === old.originalIssue?.body)) return null;
     store.archive(old);
     const task = reserve(old);
     const job = createJob({ projectName, repo: project.repo, issue,
@@ -258,12 +303,7 @@ async function publishOutcome(project, job, store, dependencies) {
   if (!job?.r1ParentJobId || !project.autoMerge || !job.terminal || job.architectureDecision
     || job.authorizationBlocked || job.ownershipBlocked || job.agentProcess || job.environmentProcess
     || job.workspaceState === 'integration_retained' || job.integrationActive) return;
-  const command = (file, args) => new Promise((resolve, reject) => {
-    (dependencies.outcomeExecFile || dependencies.execFile || require('./execution-log').execFile)(file, args,
-      { cwd: project.checkout, encoding: 'utf8', shell: false, timeout: 60000,
-        env: { ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' } },
-      (error, stdout, stderr) => error ? reject(Object.assign(new Error(String(stderr || error.message)), { cause: error })) : resolve(String(stdout)));
-  });
+  const command = outcomeCommand(project, dependencies);
   job.outcomeActions ||= {};
   const action = async (name, work) => {
     const prior = job.outcomeActions[name];
@@ -285,6 +325,10 @@ async function publishOutcome(project, job, store, dependencies) {
     if (!job.outcomeActions['inspect-pr']?.ok) return;
     merged = job.outcomePrState === 'MERGED';
   }
+  if (merged && job.terminalState === 'cancelled') {
+    job.terminal = false; job.terminalState = null; job.status = 'awaiting_ci'; store.save(job);
+    return;
+  }
   const marker = `<!-- ralph-outcome:${job.r1ParentJobId} -->`;
   const reason = (job.terminalState === 'needs_specification'
     ? `Ralph needs a product specification before it can start: describe the required behaviour and acceptance criteria, then re-apply \`${project.readyLabel}\`.`
@@ -296,7 +340,12 @@ async function publishOutcome(project, job, store, dependencies) {
       if (current === 'OPEN') await command('gh', ['pr', 'close', String(job.pr.number), '--repo', project.repo, '--comment', reason]);
       else if (current !== 'CLOSED') throw new Error('PR state unavailable.');
     });
-    if (job.outcomePrState === 'MERGED') return;
+    if (job.outcomePrState === 'MERGED') {
+      if (job.terminalState === 'cancelled') {
+        job.terminal = false; job.terminalState = null; job.status = 'awaiting_ci'; store.save(job);
+      }
+      return;
+    }
     await action('comment-issue', async () => {
       const response = JSON.parse(await command('gh', ['issue', 'view', String(job.issue.number), '--repo', project.repo, '--json', 'comments']));
       if (!Array.isArray(response.comments)) throw new Error('Issue comments unavailable; refusing duplicate notification.');
@@ -304,8 +353,11 @@ async function publishOutcome(project, job, store, dependencies) {
         await command('gh', ['issue', 'comment', String(job.issue.number), '--repo', project.repo, '--body', reason]);
       }
     });
-    await action('relabel-issue', () => command('gh', ['issue', 'edit', String(job.issue.number), '--repo', project.repo,
-      '--remove-label', project.readyLabel, '--add-label', project.humanLabel]));
+    await action('relabel-issue', () => {
+      if (!project.readyLabel || !project.humanLabel) throw new Error('Owner outcome labels are not configured.');
+      return command('gh', ['issue', 'edit', String(job.issue.number), '--repo', project.repo,
+        '--remove-label', project.readyLabel, '--add-label', project.humanLabel]);
+    });
   }
   if (/^ralph\/issue-\d+-[A-Za-z0-9._-]+$/.test(job.branch)) {
     if (job.delivery?.pushed) await action('delete-remote-branch', async () => {
@@ -579,7 +631,7 @@ async function run(argv, dependencies = {}) {
   // before deciding whether to merge or recover a prior merge.
   const finishApprovedMerge = async () => {
     // A GitHub merge already recorded durably must be reconciled, not cancelled.
-    if (!job.merge) assertNotCancelled();
+    if (!job.merge && job.outcomePrState !== 'MERGED') assertNotCancelled();
     if (!project.autoMerge) {
       job.status = 'ready_for_human_merge';
       markTerminal(job, 'ready_for_human_merge');
@@ -711,7 +763,7 @@ async function run(argv, dependencies = {}) {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
     assertProcessStopped();
-    if (job?.merge && !job.terminal) {
+    if ((job?.merge || job?.outcomePrState === 'MERGED') && !job.terminal) {
       await finishApprovedMerge(); store.save(job);
       return { issue: candidate, job, outcome: { status: job.terminalState || job.status, terminal: job.terminal } };
     }
@@ -793,6 +845,7 @@ async function run(argv, dependencies = {}) {
       job ||= createBoundJob({ projectName, repo: project.repo, issue: candidate,
         branch: deriveBranchName(candidate), worktreePath: plannedWorktreePath(project, candidate), now: store.now });
       job.originalIssue = structuredClone(candidate);
+      if (selection.unavailable) job.admissionUnavailable = true;
       const outcome = selection.unavailable ? 'failed' : 'needs_specification';
       recordFailure(job, 'admission', selection.unavailable
         ? 'Issue is not ready and has no resumable Autopilot checkpoint.'
@@ -856,7 +909,8 @@ async function run(argv, dependencies = {}) {
       // Serialize integration and final merge; external CI/review calls run
       // without the target lock so other issues can make progress.
       phase = 'ci';
-      if (dependencies.deliveryTimeoutMs !== undefined) {
+      if (dependencies.deliveryTimeoutMs !== undefined
+        && !(job.ci?.state === 'green' && job.ci.headCommit === job.delivery.commit && job.ci.prNumber === job.pr.number)) {
         if (!job.ciWaitSince) { job.ciWaitSince = store.now(); store.save(job); }
         if (Date.parse(store.now()) - Date.parse(job.ciWaitSince) > dependencies.deliveryTimeoutMs) {
           handToHuman(job, 'ci', 'Required CI did not reach a final result within the delivery timeout.', store.now);
@@ -1346,7 +1400,7 @@ async function run(argv, dependencies = {}) {
             if (correction?.status === 'running') correction.status = 'eligible';
           }
           job.status = 'interrupted';
-          job.ralph.status = 'interrupted';
+          if (job.ralph) job.ralph.status = 'interrupted';
         }
         store.save(job);
       }
@@ -1356,7 +1410,7 @@ async function run(argv, dependencies = {}) {
       job.ownershipBlocked = error.message; store.save(job);
       return { issue: candidate, job, outcome: { status: 'ownership_blocked', terminal: false, deliverable: false } };
     }
-    if (job && !job.merge && dependencies.environmentIsCancelled?.()) {
+    if (job && !job.merge && job.outcomePrState !== 'MERGED' && dependencies.environmentIsCancelled?.()) {
       recordFailure(job, phase, error, store.now);
       error.code = 'AUTOPILOT_CANCELLED';
     }

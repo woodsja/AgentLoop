@@ -146,7 +146,7 @@ function createR1Jobs(store, options = {}) {
           }
           throw new Error('Existing delivery history requires owner reconciliation; it cannot be reassigned.');
         };
-        if (existing.terminalState === 'needs_specification') {
+        if (existing.terminalState === 'needs_specification' || existing.admissionUnavailable === true) {
           return Promise.resolve(discover(project)).then(issues => {
             const issue = issues.find(issue => issue.number === body.issue);
             if (issue) {
@@ -168,6 +168,23 @@ function createR1Jobs(store, options = {}) {
       return reserve(authorization);
     };
     const reserve = (authorization, rearmFrom) => {
+      if (rearmFrom && typeof store.listTasks === 'function') {
+        if (store.listTasks('done').some(task => task.workflow === 'r1' && task.project === body.project
+          && task.issue === body.issue && task.rearmFrom === rearmFrom)) {
+          throw new Error('Rearm reservation mismatch: abandoned terminal reservation requires owner reconciliation.');
+        }
+        const matches = ['pending', 'running'].flatMap(stage => store.listTasks(stage))
+          .filter(task => task.workflow === 'r1' && task.project === body.project && task.issue === body.issue);
+        if (matches.length) {
+          if (matches.length !== 1 || matches[0].rearmFrom !== rearmFrom
+            || matches[0].autopilotStateDir !== resolveStateDir(body.project, project)
+            || matches[0].cancelRequested || matches[0].supervisionBlocked
+            || JSON.stringify(matches[0].milestoneAuthorization || null) !== JSON.stringify(authorization || null)) {
+            throw new Error('Rearm reservation mismatch; owner reconciliation required.');
+          }
+          return matches[0];
+        }
+      }
       const task = store.enqueueTask({
         ...(rearmFrom ? { rearmFrom } : {}), repo: project.repo,
         workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
@@ -194,7 +211,15 @@ function createR1Jobs(store, options = {}) {
   // Queue movement releases the dispatch slot; all delivery outcomes remain
   // in the existing Autopilot issue checkpoint. No result/evidence copy.
   function finish(task, job) {
-    if (!job?.terminal || (!job.cancelRequested && Object.values(job.outcomeActions || {}).some(action => !action.ok)) || job.agentProcess || job.environmentProcess || (job.architectureDecision && job.architectureDecision.publication !== 'complete')) return;
+    // A confirmed terminal infrastructure block may retain an unidentifiable
+    // setup-process claim. Release only its queue slot; keep the claim and the
+    // fail-closed canonical verdict for owner inspection. Never relaunch it.
+    const blockedSetupClaim = job?.terminalState === 'blocked_infrastructure'
+      && job.environmentPreflight?.reason === 'prior_process_unresolved'
+      && job.environmentProcess && !job.agentProcess;
+    if (!job?.terminal || Object.values(job.outcomeActions || {}).some(action => !action.ok && action.attempts < 3)
+      || job.agentProcess || (job.environmentProcess && !blockedSetupClaim)
+      || (job.architectureDecision && job.architectureDecision.publication !== 'complete')) return;
     store.moveTask(task.id, 'running', 'done');
     logTransition(task, `terminal:${job.terminalState}`, `terminal outcome: ${deliveryStatus(job, task.autonomous)}.`);
   }
@@ -358,17 +383,24 @@ function createR1Jobs(store, options = {}) {
     let saved;
     try { saved = canonical.load(task.issue); }
     catch (error) { holdSupervision(task, error); return; }
-    if (task.cancelRequested && !saved?.merge && !(store.listR1ChildLoops?.(task.id) || []).some(child => child.stage !== 'done')) {
-      try {
-        const cancelled = cancelHeldDelivery(task, canonical);
-        finish(task, cancelled);
-        if (!cancelled.terminal && cancelled.ownershipBlocked) nextAdvance.set(task.id, Infinity);
-      }
-      catch (error) { holdSupervision(task, error); }
+    if (task.cancelRequested && !saved?.merge && saved?.outcomePrState !== 'MERGED' && !(store.listR1ChildLoops?.(task.id) || []).some(child => child.stage !== 'done')) {
+      const promise = withExecution((event, details) => recorder(store, task.id, { parentId: task.id })(event, details),
+        () => cancelHeldDelivery(task, canonical, load, { ...dependencies, outcomeExecFile: dependencies.outcomeExecFile || options.execFile }))
+        .then(cancelled => {
+          finish(task, cancelled);
+          if (!cancelled.terminal && cancelled.ownershipBlocked) nextAdvance.set(task.id, Infinity);
+        })
+        .catch(error => holdSupervision(task, error))
+        .finally(() => active.delete(task.id));
+      active.set(task.id, promise);
       return;
     }
-    if (task.supervisionBlocked || saved?.ownershipBlocked
-      || Object.values(saved?.outcomeActions || {}).some(action => !action.ok && action.attempts >= 3)) return;
+    if (saved?.terminal && saved.r1ParentJobId === task.id && Object.values(saved.outcomeActions || {}).some(action => !action.ok && action.attempts >= 3)
+      && Object.values(saved.outcomeActions || {}).every(action => action.ok || action.attempts >= 3)) {
+      finish(task, saved);
+      return;
+    }
+    if (task.supervisionBlocked || (saved?.ownershipBlocked && saved.ownershipBlockSource !== 'discovery')) return;
     if (task.status !== 'running') {
       task.status = 'running';
       store.writeTask(task, 'running');
@@ -402,6 +434,13 @@ function createR1Jobs(store, options = {}) {
         // racing this scanner would prematurely fail and unlabel blocked issues.
         if (!autonomous(project) || project.dependencyFormat === 'household-blocked-by') continue;
         const projectStore = createJobStore(resolveStateDir(name, project));
+        await require('./architecture-decisions').reconcile(project, projectStore, {
+          execFile: dependencies.execFile || options.execFile,
+          withJobExecution: (job, work) => withExecution((event, details) => {
+            projectStore.appendIntegrationEvent(job, { event, ...details });
+            if (job.r1ParentJobId) recorder(store, job.r1ParentJobId)(event, details);
+          }, work),
+        });
         const jobs = projectStore.list();
         const issues = await discover(project);
         const authorized = [];
