@@ -132,7 +132,8 @@ function createJob({ projectName, repo, issue, branch, worktreePath, now, maxRev
   const timestamp = now();
   return {
     schemaVersion: SCHEMA_VERSION,
-    ...(maxReviewRounds !== undefined ? { maxReviewRounds, originalIssue: structuredClone(issue) } : {}),
+    ...(maxReviewRounds !== undefined ? { maxReviewRounds } : {}),
+    originalIssue: structuredClone(issue),
     project: projectName,
     repo,
     issue: { number: issue.number, title: issue.title },

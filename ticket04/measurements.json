@@ -10,12 +10,19 @@
     "source_lines": 16718,
     "r1_jobs_lines": 534
   },
-  "current_uncommitted": {
-    "source_modules": 79,
-    "source_lines": 16814,
-    "r1_jobs_lines": 573
-  },
   "delivery_coordinators": 1,
   "active_delivery_state_writers": 1,
-  "active_delivery_checkpoint_copies": 1
+  "active_delivery_checkpoint_copies": 1,
+  "current_candidate": {
+    "source_modules": 79,
+    "source_lines": 16835,
+    "r1_jobs_lines": 575
+  },
+  "delta_since_ticket03": {
+    "source_modules": 0,
+    "source_lines": 443,
+    "r1_jobs_lines": -56,
+    "delivery_coordinators": -1,
+    "active_delivery_checkpoint_copies": -2
+  }
 }

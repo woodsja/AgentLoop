@@ -2807,3 +2807,36 @@ test('scheduled Autopilot skips corrected-specification rearm reserved for R1 ad
   assert.equal(selected.number, 222, 'timer must not repeatedly select a terminal correction reserved for R1');
   assert.equal(store.load(221).terminalState, 'needs_specification');
 });
+
+test('new canonical job persists the complete admitted issue requirements without an optional review-round override', () => {
+  const issue = { number: 223, title: 'Approved issue', body: 'Implement the specifically accepted owner behavior and deterministic tests.', labels: ['ready'] };
+  const store = temporaryStore();
+  const job = createJob({ projectName: 'demo', repo: 'example/repo', issue,
+    branch: 'ralph/issue-223', worktreePath: '/tmp/issue-223', now: store.now });
+  store.save(job);
+  assert.deepEqual(store.load(issue.number).originalIssue, issue,
+    'review and any recovered correction must have the original owner requirements');
+});
+
+test('historical delivered checkpoint without original requirements cannot autonomously review or merge while undiscovered', async () => {
+  const store = temporaryStore();
+  saveJob(store, 224, { r1ParentJobId: 't-0000abcd', status: 'awaiting_ci',
+    originalIssue: null,
+    pr: { number: 99, url: 'https://github.com/example/repo/pull/99' },
+    delivery: { branch: 'ralph/issue-224', commit: 'abc123', pushed: true } });
+  let observed = 0, reviewed = 0;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    requestedIssue: { number: 224, title: 'Synthetic R1 issue #224' }, discoverReadyIssues: async () => [],
+    loadProjectConfig: () => ({ ...project, enabled: true, reviewPolicy: 'always', autoMerge: true, verification: 'check' }),
+    observePullRequestCi: async () => { observed++; return { state: 'green', headCommit: 'abc123', prNumber: 99 }; },
+    reviewPullRequest: async () => { reviewed++; throw new Error('must never review without requirements'); },
+    prepareIssueWorkspace: async () => assert.fail('must not prepare a worker without requirements'),
+  }));
+  const saved = store.load(224);
+  assert.equal(result.outcome.status, 'ownership_blocked');
+  assert.equal(saved.ownershipBlockSource, 'discovery');
+  assert.equal(saved.status, 'awaiting_ci');
+  assert.equal(saved.issue.title, 'Issue 224');
+  assert.equal(observed, 0, 'avoid downstream delivery effects while missing original owner requirements');
+  assert.equal(reviewed, 0);
+});

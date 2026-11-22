@@ -868,10 +868,11 @@ async function run(argv, dependencies = {}) {
       job.status = outcome; markTerminal(job, outcome); store.save(job);
       return { issue: candidate, job, outcome: { status: outcome, terminal: true, deliverable: false } };
     }
+    // An approved delivery can keep its original authorization and requirements
+    // through transient GitHub discovery gaps. Older checkpoints that did not
+    // retain the requirements must not enter review, corrective work or merge.
     if (job && dependencies.requestedIssue && !admitted.some(issue => issue.number === candidate.number)
-      && !job.originalIssue?.body
-      && (!job.delivery?.commit || ['correction_eligible', 'review_correction_eligible'].includes(job.status)
-        || job.correction?.status === 'eligible' || job.reviewCorrection?.status === 'eligible')) {
+      && !job.originalIssue?.body) {
       job.ownershipBlocked = 'Issue requirements unavailable from discovery; hold existing work for owner reconciliation.';
       job.ownershipBlockSource = 'discovery';
       store.save(job);
