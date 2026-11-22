@@ -566,3 +566,38 @@ test('worker cannot opt into an architecture pause by rewriting its task copy', 
     assert.equal(result.task.architectureDecisions, undefined);
   });
 });
+
+test('worker cannot disable an authorized owner pause or rewrite its proposal policy', async () => {
+  await inProject(async projectPath => {
+    const decisions = require('../src/architecture-decisions');
+    const proposal = {
+      key: 'owner-pause-required', problem: 'Select persistent state format',
+      options: [
+        { name: 'Journal', tradeoffs: 'Write amplification' },
+        { name: 'SQLite', tradeoffs: 'Schema migrations' },
+      ],
+      recommendation: 'Journal', consequences: 'Compaction needed',
+      conflicts: 'No existing decision', grantImplications: 'No new grant',
+      newEvidence: '', settledDecision: false,
+      expensiveToReverse: true, surprisingWithoutContext: true, genuineTradeoff: true,
+    };
+    const input = task({ maxAttempts: 1, architectureDecisions: true });
+    const result = await runTask(projectPath, input, {
+      runWorker: async (cwd, workerTask) => {
+        const file = path.join(cwd, decisions.FILE);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(proposal));
+        workerTask.architectureDecisions = false;
+        workerTask.acceptance.push('worker-provided condition');
+        workerTask.verification = 'exit 0';
+      },
+    });
+    assert.equal(result.status, 'paused_owner_decision');
+    assert.equal(result.attempts[0].status, 'paused_owner_decision');
+    assert.equal(result.proposal.key, proposal.key);
+    assert.equal(result.task.architectureDecisions, true);
+    assert.notStrictEqual(result.task, input);
+    assert.deepEqual(input.acceptance, ['result.txt exists']);
+    assert.equal(result.attempts[0].verification, undefined);
+  });
+});
