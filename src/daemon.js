@@ -1645,13 +1645,17 @@ function fillSlots() {
   const pending = sortPending(store.listTasks('pending', { dashboard: true }).filter(task => !task.unreadable));
   const canonical = [];
   for (const entry of pending) {
-    const task = store.readTask(entry.id, 'pending');
+    // A record can disappear or become unreadable between listing and reading.
+    // Never start a retired worker or block unrelated jobs on that failure.
+    let task;
+    try { task = store.readTask(entry.id, 'pending'); }
+    catch (error) {
+      console.error(`Queued job ${entry.id} could not be read; no worker started: ${error.message}`);
+      continue;
+    }
     if (task.r1Child || task.workflow === 'r1') {
       canonical.push(entry);
     } else {
-      // A damaged legacy record cannot starve authorized R1 jobs. No retired
-      // executor is started; a failed terminal write leaves the original for
-      // explicit recovery, while the scheduler continues with other entries.
       try { closeRetiredJob(task, 'pending'); }
       catch (error) {
         console.error(`Legacy job ${task.id} could not be archived; no worker started: ${error.message}`);

@@ -152,6 +152,31 @@ test('retired pending direct tasks are closed without launching a worker', async
   }
 });
 
+test('a disappearing pre-upgrade queue record cannot starve other retired jobs', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-disappearing-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project }, maxConcurrent: 2 }, directory);
+  const realRead = isolated.store.readTask;
+  try {
+    const missing = isolated.store.enqueueTask({ project: 'demo', priority: 1, prompt: 'disappeared' });
+    const intact = isolated.store.enqueueTask({ project: 'demo', priority: 2, prompt: 'retire me' });
+    isolated.store.readTask = (id, stage) => {
+      if (id === missing.id && stage === 'pending') {
+        const error = new Error('record vanished during scan'); error.code = 'ENOENT'; throw error;
+      }
+      return realRead(id, stage);
+    };
+    isolated.daemon.fillSlots();
+    assert.equal(realRead(intact.id, 'done').reason, 'legacy_execution_retired');
+    assert.equal(isolated.store.listTasks('running').length, 0);
+  } finally {
+    isolated.store.readTask = realRead;
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('restart archives an interrupted historical direct task without replay or lost evidence', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-restart-'));
   const project = path.join(directory, 'project');
