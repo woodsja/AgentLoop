@@ -506,17 +506,20 @@ test('verification runs only after the worker finishes', async () => {
   await inProject(async projectPath => {
     let releaseWorker;
     const gate = new Promise(resolve => { releaseWorker = resolve; });
-    const execution = runTask(projectPath, task({ maxAttempts: 1 }), {
+    const marker = 'node -e "const fs=require(\'node:fs\'); fs.writeFileSync(\'verification-ran\', \'yes\'); process.exit(fs.existsSync(\'result.txt\') ? 0 : 1)"';
+    const execution = runTask(projectPath, task({ maxAttempts: 1, verification: marker }), {
       runWorker: async () => {
         await gate;
         fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
       },
     });
-    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setTimeout(resolve, 90));
     assert.equal(fs.existsSync(path.join(projectPath, 'result.txt')), false);
+    assert.equal(fs.existsSync(path.join(projectPath, 'verification-ran')), false);
     releaseWorker();
     const result = await execution;
     assert.equal(result.status, 'passed');
+    assert.equal(fs.readFileSync(path.join(projectPath, 'verification-ran'), 'utf8'), 'yes');
   });
 });
 
