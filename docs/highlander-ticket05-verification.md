@@ -32,9 +32,11 @@ The first Ticket 05 implementation required corrections identified by independen
 5. Worker/critic identity is passed explicitly to the execution recorder, rather than inferred from CLI arguments. CONTINUE feedback describes remaining work, not a rejection. Three exhausted critic cycles remain terminal even if the outer retry budget is larger.
 6. Restored tests cover real Git index/commit/add-remove tampering, real authorized-worktree linkage, forged checkout/alien repository, changed registration, stale attempts, cancelled parents, historical child inspection, orphan pending child recovery, corrected restart and proposal-pause behavior.
 
-Second-round independent Opus reviews of commit 9a663776f67c1dfb9c589a0918aba0bf48fdf65e returned spec PASS and standards NOT PASS, specifically on confirmed-stopped failed-work capture, process-group cancellation, and a default reviewer role. The follow-up source changes correct those findings: a stopped child has terminal failed/cancelled evidence; ambiguous process ownership remains interrupted, including during cancellation; and canonical capture derives a stable owner-bound provenance identifier from the existing checkpoint without adding a child queue. Explicit role propagation no longer defaults missing roles to worker. The actual detached process group is signalled on cancellation and timeout. New tests cover a real subprocess grandchild, one- and two-attempt Git recovery capture, and unknown-process cancellation. Red/green logs are retained with the existing Ticket 05 records.
+Second-round independent Opus reviews of commit 9a663776f67c1dfb9c589a0918aba0bf48fdf65e returned spec PASS and standards NOT PASS, specifically on confirmed-stopped failed-work capture, process-group cancellation, and a default reviewer role. The follow-up source changes correct those findings: a stopped child has terminal failed/cancelled evidence; ambiguous process ownership remains interrupted, including during cancellation; and canonical capture derives a stable owner-bound provenance identifier from the existing checkpoint without adding a child queue. Explicit role propagation no longer defaults missing roles to worker. The actual detached process group is signalled on cancellation and timeout; cancellation now escalates to SIGKILL after a short grace period even when the leader and grandchild ignore SIGTERM. The authoritative process-claim reconciler independently verifies the process group before allowing cleanup. New tests cover a real subprocess grandchild, a stubborn parent and grandchild, one- and two-attempt Git recovery capture, and unknown-process cancellation. Red/green logs are retained with the existing Ticket 05 records.
 
 The same prior commit passed the full GitHub Actions CI run https://github.com/woodsja/AgentLoop/actions/runs/45103206383 using verification-only draft PR #197, which targets ralph-dev while authoritative PR #196 remains stacked. That historical PASS does not verify any subsequent fixes; CI must run again against the new final commit.
+
+The independent third-round specification review of commit bd98f2be80c02798472cb6e68f81f9e42be0e647 returned PASS with no blocking or major findings. Its standards review found one remaining major: cancellation of a SIGTERM-resistant worker could wait for the normal worker timeout. The bounded escalation and real stubborn-process regression were added after that review; both axes must review the exact new commit before final acceptance.
 
 The temporary tests and raw red-green logs (including original failures) are preserved under the durable Ticket 05 verification root. No model thoughts are claimed beyond the events actually exported by the CLI.
 
@@ -48,9 +50,9 @@ The temporary tests and raw red-green logs (including original failures) are pre
 | Public development submission interfaces | 1 | 1 | 1 |
 | Active classic-loop-only modules | 4 | 0 | 0 |
 | JS source modules | 79 | 77 | 77 |
-| Source JS lines | 16,835 | 14,787 | 14,839 |
+| Source JS lines | 16,835 | 14,787 | 14,855 |
 | Top-level test files | 69 | 65 | 66 |
-| Textual test declarations | 975 | 916 | 934 |
+| Textual test declarations | 975 | 916 | 935 |
 
 Corrected working-tree metrics were measured after the second review fixes; final commit SHA, full test pass and independent review remain unverified. These counts include blank/comment lines. The decrease of 2,048 source LOC at the first Ticket 05 commit is real deletion, not an added compatibility coordinator.
 

@@ -104,17 +104,32 @@ function createCliWorker(options = {}) {
 
         // Canonical R1 workers run in a detached process group. Cancelling
         // only the CLI leader leaves its subprocesses free to edit the worktree.
+        let abortFallback;
         const signalProcess = signal => {
           if (options.killProcessGroup && process.platform === 'linux'
             && Number.isSafeInteger(child.pid) && child.pid > 0) {
             try { process.kill(-child.pid, signal); return; }
-            catch (error) { if (error.code !== 'ESRCH') throw error; }
+            catch (error) {
+              if (error.code !== 'ESRCH') {
+                options.recordExecution?.('signal_error', { message: error.message });
+              }
+              // Preserve leader termination even when signalling the group fails.
+            }
           }
           child.kill(signal);
         };
         const abort = () => {
           try { signalProcess('SIGTERM'); }
           catch (error) { options.recordExecution?.('signal_error', { message: error.message }); }
+          if (options.killProcessGroup) {
+            // A CLI or descendant may ignore SIGTERM. Escalate the whole
+            // detached group rather than waiting for the normal worker timeout.
+            abortFallback = setTimeout(() => {
+              try { signalProcess('SIGKILL'); }
+              catch (error) { options.recordExecution?.('signal_error', { message: error.message }); }
+            }, 1000);
+            abortFallback.unref?.();
+          }
         };
         options.signal?.addEventListener('abort', abort, { once: true });
         if (options.signal?.aborted) abort();
@@ -141,6 +156,7 @@ function createCliWorker(options = {}) {
           options.signal?.removeEventListener('abort', abort);
           clearTimeout(timeout);
           clearTimeout(timeoutFallback);
+          clearTimeout(abortFallback);
           if (error) {
             reject(error);
             return;
