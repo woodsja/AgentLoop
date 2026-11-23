@@ -96,7 +96,7 @@ function createCliWorker(options = {}) {
             stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: true,
             env: engine.env ? engine.env(process.env) : process.env,
-          });
+          }, { role: options.role || 'worker' });
         } catch (error) {
           reject(error);
           return;

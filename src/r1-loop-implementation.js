@@ -57,12 +57,17 @@ function createR1LoopImplementation(options = {}) {
   const cancellation = new AbortController();
   const { recordExecution = () => {}, onImplementationEvidence = () => {},
     beforeAttempt = async () => {}, verify = verifyTask } = options;
-  const invoke = (cwd, role, prompt, task, number) => createCliWorker({
-    ...options, signal: cancellation.signal, role,
+  const invoke = async (cwd, role, prompt, task, number) => {
+    await beforeAttempt();
+    if (cancellation.signal.aborted) throw cancellation.signal.reason;
+    return createCliWorker({
+    config: options.config, spawnImpl: options.spawnImpl, timeoutMs: options.timeoutMs,
+    tempDir: options.tempDir, registryPath: options.registryPath, signal: cancellation.signal, role,
     buildPrompt: () => prompt,
     recordExecution: (event, details) => recordExecution(event, { ...details, role, cycle: number }),
   })(cwd, { ...task, worker: role === 'critic' ? 'claude' : 'codex',
     model: role === 'critic' ? options.config?.models?.claude : options.config?.models?.codex });
+  };
   return {
     cancel(reason) { cancellation.abort(new Error(reason)); return { requested: true }; },
     async run(cwd, inputTask) {
@@ -75,7 +80,9 @@ function createR1LoopImplementation(options = {}) {
       gitCommand(cwd, 'merge-base', '--is-ancestor', original, 'HEAD');
       for (const name of FILES) {
         if (gitCommand(cwd, 'ls-files', '--', name)) throw new Error(`R1 temporary instruction file ${name} is already tracked; refusing to overwrite.`);
-        if (fs.existsSync(path.join(cwd, name)) && fs.readFileSync(path.join(cwd, name), 'utf8') !== files[name]) {
+        const resumedState = name === 'STATE.md' && fs.existsSync(path.join(cwd, name))
+          && fs.readFileSync(path.join(cwd, name), 'utf8').startsWith('# R1 implementation progress\n');
+        if (fs.existsSync(path.join(cwd, name)) && fs.readFileSync(path.join(cwd, name), 'utf8') !== files[name] && !resumedState) {
           throw new Error('R1 temporary instruction files collide with project content; owner reconciliation required.');
         }
       }
@@ -83,8 +90,17 @@ function createR1LoopImplementation(options = {}) {
       const attempts = [];
       let feedback = '';
       let safeToClean = false;
+      let primaryError;
+      let cleanupAttempted = false;
+      const clean = () => {
+        cleanupAttempted = true;
+        for (const name of FILES) fs.rmSync(path.join(cwd, name), { force: true });
+        verifyNoSyntheticHistory(cwd, original, gitCommand);
+      };
       try {
-        for (const [name, contents] of Object.entries(files)) fs.writeFileSync(path.join(cwd, name), contents);
+        for (const [name, contents] of Object.entries(files)) {
+          if (!fs.existsSync(path.join(cwd, name))) fs.writeFileSync(path.join(cwd, name), contents);
+        }
         await onImplementationEvidence(evidence);
         recordExecution('capabilities', { internalReasoning: 'Only CLI-exported events are available; non-exported model thoughts are unavailable.' });
         // The owner-set child correction budget was three. It remains bounded
@@ -117,8 +133,8 @@ function createR1LoopImplementation(options = {}) {
             verdict: valid ? verdict.verdict : null, feedback: critic.resultText });
           await onImplementationEvidence(evidence);
           if (valid && verdict.verdict === 'PASS') {
-            for (const name of FILES) fs.rmSync(path.join(cwd, name), { force: true });
-            verifyNoSyntheticHistory(cwd, original, gitCommand);
+            await options.assertProcessStopped?.();
+            clean();
             await options.onPhaseChange?.('verification');
             const tested = await verify(cwd, task, undefined, recordExecution);
             attempts.push({ number, status: tested.status, verification: tested.verification });
@@ -132,16 +148,23 @@ function createR1LoopImplementation(options = {}) {
         evidence.status = 'failed'; safeToClean = true;
         return { task, status: 'needs_planning', attempts };
       } catch (error) {
+        primaryError = error;
         evidence.status = cancellation.signal.aborted ? 'cancelled' : 'interrupted';
-        // beforeAttempt checks the canonical process claim. If it cannot prove
-        // exit, preserve the workspace and let existing canonical recovery hold.
-        try { await beforeAttempt(); safeToClean = true; } catch { /* retained */ }
+        // Process ownership is independent of permission to do more work.
+        // Revocation/cancellation must not strand our files after confirmed exit.
+        try {
+          if (options.assertProcessStopped) await options.assertProcessStopped();
+          else await beforeAttempt();
+          safeToClean = true;
+        } catch { /* Unknown/alive process: retain files and fail closed. */ }
         throw error;
       } finally {
-        await onImplementationEvidence(evidence);
-        if (safeToClean) {
-          for (const name of FILES) fs.rmSync(path.join(cwd, name), { force: true });
-          verifyNoSyntheticHistory(cwd, original, gitCommand);
+        try {
+          await onImplementationEvidence(evidence);
+          if (safeToClean && !cleanupAttempted) clean();
+        } catch (error) {
+          if (!primaryError) throw error;
+          recordExecution('cleanup_error', { message: error.message, stack: error.stack });
         }
       }
     },

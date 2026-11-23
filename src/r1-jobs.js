@@ -224,11 +224,11 @@ function createR1Jobs(store, options = {}) {
 
   async function execute(task) {
     const record = recorder(store, task.id, { parentId: task.id });
-    const spawnForTask = (file, args, options) => {
+    const spawnForTask = (file, args, options, execution) => {
       const current = original.load(task.issue);
       const stage = deliveryPhase(current);
       return captureProcess((...args) => trackedSpawn(task.id, ...args), file, args, options,
-        recorder(store, task.id, { parentId: task.id, role: args.includes('--restricted') ? 'critic' : stage === 'review' ? 'reviewer' : 'worker', attempt: current.runs, stage }));
+        recorder(store, task.id, { parentId: task.id, role: execution?.role || (stage === 'review' ? 'reviewer' : 'worker'), attempt: current.runs, stage }));
     };
     const project = load(task.project);
     const scope = resolveProject(store.config, task.project, undefined, store.paths.config);
@@ -301,22 +301,31 @@ function createR1Jobs(store, options = {}) {
           return (dependencies.createIntegrationTaskService || createRalphTaskService)(serviceOptions);
         },
         ...(mixedEnabled ? { createRalphTaskService: options => {
+          const attempt = original.load(task.issue)?.runs;
           const mixed = createR1LoopImplementation({
             ...options,
             beforeAttempt: async () => {
               await options.beforeAttempt?.();
               const current = store.readTask(task.id, 'running');
+              const checkpoint = original.load(task.issue);
               const latestProject = load(task.project);
               const latestScope = resolveProject(store.config, task.project, undefined, store.paths.config);
               const worktree = deriveWorktreePath(latestProject, { number: task.issue, title: task.title });
               if (closing || current.cancelRequested || !latestProject.enabled || latestProject.worker !== 'codex'
+                || current.workflow !== 'r1' || current.project !== task.project || current.issue !== task.issue
+                || checkpoint?.r1ParentJobId !== task.id || checkpoint?.runs !== attempt || checkpoint?.terminal
+                || checkpoint?.project !== task.project || latestProject.repo !== checkpoint?.repo || current.repo !== checkpoint?.repo
                 || !['always', 'risk'].includes(latestProject.reviewPolicy)
                 || fs.realpathSync(latestProject.checkout) !== latestScope.cwd
-                || worktree !== original.load(task.issue)?.worktreePath
+                || worktree !== checkpoint?.worktreePath
                 || (task.worktree !== undefined
                   ? store.config.allowedProjects[task.project]?.worktrees?.[task.worktree] !== worktree
                   : !managesWorktree(store.config.allowedProjects[task.project], worktree))) {
                 throw new Error('Canonical worker authorization changed; workspace retained.');
+              }
+              const actual = resolveProject(store.config, task.project, task.worktree ?? path.basename(worktree), store.paths.config);
+              if (!actual.isolatedWorktree || actual.cwd !== worktree) {
+                throw new Error('Canonical worker worktree is not linked to the registered repository.');
               }
             },
             verify: (cwd, inputTask) => verifyTask(cwd, inputTask, undefined, recorder(store, task.id, { parentId: task.id, role: 'verification', attempt: original.load(task.issue)?.runs ?? 1, stage: 'verification' })),

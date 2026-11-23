@@ -1,195 +1,71 @@
-# Ticket05 implementation and verification
+# Ralph Highlander — Ticket 05: classic-loop retirement and review corrections
 
-Source base: `9accff6526a47aabc1ab36eea8fed57747fd7865`, branch
-`simplify/highlander-retire-classic-20261122`. Development worktree only.
-The deletion map was created before source edits.
+**Status: implementation and regression corrections prepared; final acceptance pending.**
 
-## Subsequent native-VM verification (supersedes Codex sandbox-only results)
+## Source and authorization
 
-The original Codex workspace-write sandbox blocked synchronous captured
-subprocesses and loopback sockets. Retesting through Ralph's normal
-unprivileged Linux VM resolved those environment restrictions.
-Exact native commands/results:
+- Repository: woodsja/AgentLoop.
+- Authoritative draft PR: https://github.com/woodsja/AgentLoop/pull/196
+- Correct PR base: simplify/highlander-one-coordinator-20261122 (Ticket 04 PR #195).
+- Accepted base commit: 9accff6526a47aabc1ab36eea8fed57747fd7865.
+- First Ticket 05 implementation commit: 8bad621dd7ff602e2114cae22053e78a2c97a617.
+- Corrected head: use the exact current PR #196 commit; verification and review must refer to that SHA.
+- Isolated worktree: /home/woodsja/worktrees/ralph/highlander-retire-classic-20261122.
+- Owner scope: implement and verify Ticket 05 only; no PR merges, production deployment, daemon restart, production configuration, Windows host, Finance Dashboard, autonomous merging, or Ticket 06. New real external E2E issue/execution needs separate owner authorization.
 
-| Command | Result |
-| --- | --- |
-| node test/r1-jobs.test.js | PASS, 9/9; exit 0 |
-| node test/r1-failed-work.test.js | PASS, 11/11; exit 0 |
-| node test/r1-mixed-e2e.test.js | PASS, 9/9; exit 0 |
-| node test/daemon.test.js | PASS, 16/16; no skips; exit 0 |
-| node test/r1-runner.test.js | PASS, 1/1; exit 0 |
-| git diff --check | PASS; exit 0 |
+The durable Ticket 05 specification under the 2026-11-22 Highlander verification root is authoritative. The deletion map in docs/highlander-ticket05-deletion-map.md records the actual call graph and deleted responsibilities.
 
-The native mixed-engine E2E exercised Codex correction, Claude FAIL/PASS
-gating, invalid verdict rejection, source-verification veto, interruption
-recovery, active cancellation, raw transcript replay, and full feedback
-propagation. The HTTP cases previously skipped now pass. Logs are retained
-in the VM durable Ticket05 evidence directory as *-native.log (the r1-jobs
-and r1-failed-work command outputs were observed and summarized directly
-rather than separately persisted); the first execution's raw Codex log also
-preserves the original sandbox-failure diagnostics.
+## Removed versus retained
 
-These focused/integration passes do NOT replace complete npm test in
-GitHub CI or independent Claude review at the precise final commit. No real
-post-Ticket05 externally authorized GitHub demonstration has been executed.
-This addendum supersedes the earlier environment-blocker assessment below;
-the original failed/skipped results remain preserved as historical evidence.
+**Removed:** competing classic-loop daemon cycle scheduling, queue admission and child handoff, independent child task/result lifecycle writers, plan/polish scheduler, pass latches, checkpoint commits, obsolete classic-only submission and execution paths. Removed, not moved to another coordinator.
 
-## Result and limits
+**Retained:** one canonical Autopilot development-job coordinator and durable issue checkpoint; Codex implementation and independent Claude critic; PASS, FAIL, CONTINUE and malformed-verdict handling; deterministic verification veto; bounded correction and parent attempts; explicit cancellation, worktree and milestone authorization, safe process-claim recovery, owner decision holds; complete raw output and historical read-only GET by job ID. No new queue, scheduler, lifecycle store, custom skill runner, or classic execution admission was added.
 
-Implemented deletion; **acceptance remains incomplete**. Local engine/Git/HTTP
-integration cannot be verified in this execution environment. No push, PR,
-merge, production restart/configuration change, host write or real issue
-execution was performed. Ticket06 has not started and is not acceptance-ready.
-Final real E2E acceptance gate: **PENDING OWNER AUTHORIZATION**.
-Independent Claude review and full native GitHub CI at the final head are pending.
+The first Ticket 05 implementation required corrections identified by independent Opus standards/specification reviews. Reviews of initial commit 8bad621 did **not** pass. Their original complete outputs are preserved in the durable VM verification root as standards-authenticated-review.json and spec-authenticated-review.json.
 
-## Responsibilities removed and retained
+## Corrections made after independent review
 
-Removed daemon worker/cycle scheduling, plan advancement, blocked-task streaks,
-polish, pass latches, checkpoint commits and loop completion/result handling.
-Deleted r1-child-handoff.js and r1-child-admission.js. Removed enqueueLoop,
-child reservation publication and the child's separately writable queue state.
-Deleted dead polish/blocked-item prompts and unused plan-cursor parsing.
-These responsibilities were deleted, not copied to another coordinator.
+1. Milestone pause, revocation and authorization drift are rechecked immediately before each actual worker or critic process launch. Current project registration, repository identity, worktree linkage, owner scope, parent identity, attempt and cancellation are also checked at the canonical worker interface.
+2. Recovery distinguishes a passed implementation child (which may continue PR/CI delivery) from an interrupted child. Confirmed-stopped processes use the existing bounded recovery mechanism, without inventing a permanent owner hold or duplicating a worker; ambiguous process ownership continues to fail closed.
+3. Cancellation/revocation cleanup uses proof of process exit rather than the continued validity of the owner's authorization, preserving the original cancellation error; temporary instruction files are validated and removed only when safe.
+4. Legitimate unfinished STATE.md progress is retained across interrupted execution if it still matches the generated R1 instruction context. Existing unrelated files, tracked instruction files and insertion into Git history are rejected.
+5. Worker/critic identity is passed explicitly to the execution recorder, rather than inferred from CLI arguments. CONTINUE feedback describes remaining work, not a rejection. Three exhausted critic cycles remain terminal even if the outer retry budget is larger.
+6. Restored tests cover real Git index/commit/add-remove tampering, real authorized-worktree linkage, forged checkout/alien repository, changed registration, stale attempts, cancelled parents, historical child inspection, orphan pending child recovery, corrected restart and proposal-pause behavior.
 
-The existing implementation bridge now awaits Codex and read-only Claude through
-createCliWorker inside the canonical attempt. Three implementation/review rounds
-remain bounded; FAIL/CONTINUE carry full feedback, malformed/signalled reviews
-cannot PASS, and deterministic verification vetoes an incorrect Claude PASS.
-Autopilot alone owns process claims, attempt evidence, cancellation, delivery,
-GitHub CI and final review. Synthetic instruction/index/history protection stays.
-Normal installed skill tooling is unchanged; exported CLI skill events are
-retained verbatim. The skill-output regression uses a simulated exported CLI
-event: it is **not evidence of a real worker invoking an installed skill**.
-The TDD skill was actually read by this development agent in the captured session.
+The temporary tests and raw red-green logs (including original failures) are preserved under the durable Ticket 05 verification root. No model thoughts are claimed beyond the events actually exported by the CLI.
 
-Old task/results/raw logs and cycle-log filenames remain readable by ID. The old
-child-index module is now read-only. Explicit offline historical process recovery
-remains available; it cannot admit or execute a worker. Legacy archive writes
-only close already-existing records and retain captured cycles verbatim.
+## Architectural measurements
 
-A restarted canonical implementation with interrupted evidence holds the existing
-issue checkpoint and workspace for owner reconciliation. It does not launch a
-replacement attempt, create a recovery queue, or infer completion from a partial
-critic result. Unknown process ownership uses the pre-existing fail-closed claim
-mechanism. This conservative hold needs an owner recovery decision; successful
-automatic continuation of an interrupted implementation is not claimed.
+| Measure | Ticket 04 baseline | First Ticket 05 commit | Corrected working tree |
+| --- | ---: | ---: | ---: |
+| Lifecycle coordinator implementations | 2 | 1 | 1 |
+| Active lifecycle writer families | 2 | 1 | 1 |
+| Active job-state representations | 2 | 1 | 1 |
+| Public development submission interfaces | 1 | 1 | 1 |
+| Active classic-loop-only modules | 4 | 0 | 0 |
+| JS source modules | 79 | 77 | 77 |
+| Source JS lines | 16,835 | 14,787 | 14,821 |
+| Top-level test files | 69 | 65 | 66 |
+| Textual test declarations | 975 | 916 | 931 |
 
-## Measurements
+Corrected working-tree metrics were measured after the review fixes; final commit SHA, full test pass and independent review remain unverified. These counts include blank/comment lines. The decrease of 2,048 source LOC at the first Ticket 05 commit is real deletion, not an added compatibility coordinator.
 
-Counts use top-level src/*.js and test/*.test.js, including blank/comment lines.
-Lifecycle counts concern the canonical worker/critic development path; generic
-transport reservation writes and historical archival are not active coordinators.
+## Verification evidence and distinction between environments
 
-| Measure | Before | After |
-| --- | ---: | ---: |
-| Delivery + competing classic execution coordinators | 2 | 1 |
-| Active lifecycle writer families | 2 | 1 |
-| Active authoritative job-state representations | 2 | 1 |
-| Supported public development submission interfaces | 1 | 1 |
-| Public classic admissions | 0 | 0 |
-| Modules containing active classic lifecycle/bridge logic, excluding mixed daemon | 4 | 0 |
-| JS source modules | 79 | 77 |
-| JS source LOC | 16,835 | 14,787 |
-| Top-level test files | 69 | 65 |
-| Textual test( occurrences, including parameterized declarations | 975 | 916 |
+The first Codex workspace-write sandbox failed synchronous Git subprocess setup with EPERM and skipped socket tests. Those failed/skipped runs were **not** counted as passes. Under the ordinary unprivileged Linux VM with normal process, Git, sockets and PATH access, the initial Ticket 05 commit passed the mixed-engine E2E, daemon HTTP, continuous runner, R1 job and failed-work integration suites. First native full npm test still failed during Python preflight because a supervised shell did not expose installed uv on PATH; a normal-VM rerun of the Python suite passed all 16 tests.
 
-Test call sites retained/added/removed: **902 / 14 / 73** (textual occurrences,
-not expanded runtime cases). Four removed files exclusively exercised deleted
-child queue/reservation/handoff/admission mechanics. Other private daemon cycle,
-checkpoint and polish tests were retired with their deleted code. Public recovery,
-HTTP inspection, authorization, raw evidence and mixed-engine integration tests
-remain; mixed integration assertions now inspect canonical evidence.
+The corrected source was separately tested with actual Git and VM subprocesses. The normal-VM test log files in the durable Ticket 05 directory use the names corrections-native-<suite>.log, including r1-mixed-e2e. The new repository authorization suite initially used an overly narrow error-message assertion despite all process launches being denied; that assertion was corrected to inspect the canonical durable checkpoint's denial evidence. Its final normal-VM rerun passed 5/5. The first failed suite run remains preserved rather than erased.
 
-## Test evidence
+Corrected normal-VM focused/integration results (before final full suite): R1 implementation 33/33, R1 review recovery 21/21, R1 milestone admission 32/32, daemon HTTP 18/18, R1 jobs 9/9, CLI worker 11/11, process claim 4/4, prompts 10/10, failed work 11/11, R1 mixed-engine E2E 9/9, repository authorization final rerun 5/5. Individual raw outputs are in the durable Ticket 05 verification directory. Final full native npm test uses the VM's installed uv on PATH and writes corrections-native-fullsuite.log and corrections-native-fullsuite.exit.
 
-Each row is the exact command `node test/<name>.test.js`, with native Node and
-without a preload or test-output normalization. These are focused suites, not
-full native npm test. No timed-out run is counted as passing.
+**Do not claim the full suite, GitHub Actions CI or a final independent review passed until their exact results are verified.**
 
-| Name | Exit | Passed / failed / skipped |
-| --- | ---: | --- |
-| r1-loop-implementation | 0 | 16 / 0 / 0 |
-| r1-review-recovery | 0 | 21 / 0 / 0 |
-| daemon | 0 | 11 / 0 / 5 |
-| r1-process-claim | 0 | 4 / 0 / 0 |
-| r1-child-recover | 0 | 3 / 0 / 0 |
-| cli-worker | 0 | 11 / 0 / 0 |
-| autopilot-state | 0 | 30 / 0 / 0 |
-| r1-milestone-admission | 0 | 30 / 0 / 0 |
-| tools | 0 | 6 / 0 / 0 |
-| ui | 0 | 4 / 0 / 0 |
-| prompts | 0 | 10 / 0 / 0 |
-| r1-mixed-requirements | 0 | 1 / 0 / 0 |
-| r1-jobs | 1 | 7 / 2 / 0 |
-| r1-failed-work | 1 | 0 / 11 / 0 |
-| r1-mixed-e2e | 1 | 0 / 9 / 0 |
+## Final acceptance gates
 
-`node --test-name-pattern='eight critic retry cycles' test/execution-log.test.js`:
-exit 0, one passed. Full diagnostic bytes survive reload and reach the worker.
-`node --check` on changed coordinator/facility source and `git diff --check`:
-exit 0.
+- Final source correctness and complete native npm test: PENDING final result.
+- Full GitHub Actions CI on exact final head commit: PENDING. Current workflow triggers pull requests targeting main or ralph-dev, while PR #196 must remain stacked on PR #195's branch; satisfy the exact-head CI requirement without mutating the existing stack or merging.
+- Fresh independent Opus standards and specification reviews of the exact corrected head: PENDING.
+- New real one-start external E2E demonstration, including actual skill invocation evidence when one is used: PENDING SEPARATE OWNER AUTHORIZATION. Ticket 04 E2E does not substitute for post-Ticket 05 proof.
+- PR #196 must remain draft and unmerged, based on PR #195; production must remain unchanged and Ticket 06 must not start.
 
-Red-to-green slices (exact command prefix `node --test-name-pattern='<pattern>'`):
-
-- `pending cancellation`, test/r1-loop-implementation.test.js: exit 1, then 0;
-  cancellation now precedes filesystem preparation and child evidence.
-- `canonical authorization denial`, same file: exit 1, then 0; authorization
-  precedes preparation and launch.
-- `signalled critic`, same file: exit 1, then 0; an interrupted PASS cannot deliver.
-- `canonical restart holds`, test/r1-review-recovery.test.js: exit 1, then 0;
-  interrupted implementation preserves the workspace without another worker.
-
-Raw development check outputs are in /tmp/ticket05-final-*.log and red/green
-slice outputs in /tmp/ticket05-*-red.log /tmp/ticket05-*-green.log for this session.
-The source suite retains regression coverage; /tmp is not production job history.
-
-## Environment blockers and remaining gates
-
-Native Node synchronous captured subprocesses report `spawnSync git EPERM`
-(and even `spawnSync true EPERM`) here. All 22 failed integration/Git cases hit
-this boundary before their assertions; they are failures, not passes. Five socket-based HTTP
-cases explicitly skip because loopback listen is unavailable. Additional real HTTP
-request-listener tests run without sockets and prove pending/running cancellation,
-historical direct/loop/R1 GET-by-ID, full raw cycle records, and closed admissions. An exploratory
-/tmp-only file-stdio preload avoided the first Git capture error but the daemon
-fixture then timed out at startup; that attempt is not validation and no preload
-is committed. No repository sandbox/CLI policy was weakened.
-
-Remaining: rerun all failed/skipped suites on an authorized normal Linux runner,
-then full native npm test in GitHub CI, real installed-skill invocation evidence
-when used, independent Claude review and exact-final-head CI. Large raw transcript
-paging/restart, active process-group cancellation and real Git/worktree isolation
-remain unverified end-to-end for this patch despite retained regression cases.
-
-After those gates pass, the only authorized publication is a DRAFT stacked PR
-against `simplify/highlander-one-coordinator-20261122` (#195), never main or
-release/auth190. No merge/deployment or additional E2E is authorized.
-
-## Local commit blocker and operator commands
-
-`git add package.json src test docs/highlander-ticket05-deletion-map.md docs/highlander-ticket05-verification.md`
-exited **128**: `Unable to create '/home/woodsja/tools/ralph/.git/worktrees/highlander-retire-classic-20261122/index.lock': Read-only file system`.
-The sandbox permits source writes here but mounts the linked Git metadata outside
-its writable roots. Approval escalation is unavailable. No index/commit write,
-branch update or push succeeded. HEAD remains the required Ticket04 base.
-
-From an owner-authorized shell with writable metadata, after reviewing the diff:
-
-```bash
-cd /home/woodsja/worktrees/ralph/highlander-retire-classic-20261122
-git diff --check
-git add package.json src test docs/highlander-ticket05-deletion-map.md docs/highlander-ticket05-verification.md
-git commit -m "Retire classic loop scheduling from canonical development jobs"
-```
-
-After the failed/skipped focused suites pass, publication commands are:
-
-```bash
-git push -u origin simplify/highlander-retire-classic-20261122
-gh pr create --draft --base simplify/highlander-one-coordinator-20261122 --head simplify/highlander-retire-classic-20261122 --title "Retire classic loop scheduling" --body-file docs/highlander-ticket05-verification.md
-```
-
-The full native GitHub CI and independent review must then be verified on the
-precise resulting head. The commands above do not authorize merge or deployment.
+Any failed, skipped, timed-out or unexecuted test is not a pass. No actual raw execution record may be discarded, truncated for owner inspection, or replaced by an invented summary.

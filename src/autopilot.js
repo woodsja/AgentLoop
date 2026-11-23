@@ -449,13 +449,13 @@ async function run(argv, dependencies = {}) {
   });
   // Persist a launch intent before spawning: a crash in the PID checkpoint
   // window must hold the job instead of assuming no process was started.
-  const spawnAgent = (file, args, options) => {
-    if (!dependencies.parentJobId) return (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, options);
+  const spawnAgent = (file, args, options, execution) => {
+    if (!dependencies.parentJobId) return (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, options, execution);
     assertNotCancelled();
     job.agentProcess = { status: 'launching' }; store.save(job);
     let child;
     try {
-      child = (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, { ...options, detached: true });
+      child = (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, { ...options, detached: true }, execution);
     } catch (error) {
       job.agentProcess = null; store.save(job); // spawn threw before returning a process
       throw error;
@@ -496,6 +496,7 @@ async function run(argv, dependencies = {}) {
     return child;
   };
   const attemptOptions = () => ({ ...dependencies.ralphOptions,
+    assertProcessStopped,
     ...(dependencies.parentJobId ? { spawnImpl: spawnAgent } : {}),
     onPhaseChange: async phase => {
       assertNotCancelled();
@@ -778,15 +779,16 @@ async function run(argv, dependencies = {}) {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
     assertProcessStopped();
-    const interruptedImplementation = job?.implementationChildren?.find(child => child.attempt === job.runs);
-    if (!job?.terminal && !job?.merge && job?.outcomePrState !== 'MERGED'
-      && interruptedImplementation && ['running', 'interrupted'].includes(job.ralph?.status)
-      && !job.architectureDecision?.resumeRequested) {
-      if (interruptedImplementation.status === 'running') interruptedImplementation.status = 'interrupted';
-      job.ownershipBlocked = 'Canonical interrupted implementation requires owner reconciliation; workspace and raw evidence retained without duplicate execution.';
-      job.ownershipBlockSource = 'implementation';
+    const interruptedImplementation = job?.implementationChildren?.find(child => child.attempt === job.runs
+      && ['running', 'interrupted'].includes(child.status));
+    if (!job?.terminal && interruptedImplementation && ['running', 'interrupted'].includes(job.ralph?.status)) {
+      // assertProcessStopped above proved the previous group has ended. Retain
+      // its evidence, then use the existing bounded attempt recovery below.
+      interruptedImplementation.status = 'interrupted';
+      if (job.ownershipBlockSource === 'implementation') {
+        delete job.ownershipBlocked; delete job.ownershipBlockSource;
+      }
       store.save(job);
-      return { issue: candidate, job, outcome: { status: 'ownership_blocked', terminal: false, deliverable: false } };
     }
     if ((job?.merge || job?.outcomePrState === 'MERGED') && !job.terminal) {
       await finishApprovedMerge(); store.save(job);

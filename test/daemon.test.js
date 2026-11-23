@@ -650,3 +650,63 @@ test('historical GET-by-ID preserves classic results and raw cycle records witho
   assert.equal(s.enqueueR1ChildLoopOnce, undefined);
   for (const route of ['/api/loop', '/api/jobs', '/api/dispatch']) assert.equal((await invoke('POST', route)).status, 404);
 });
+
+test('historical child index stays read-only through GET-by-ID; orphan pending child fails closed on restart', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-historical-child-'));
+  const isolated = isolatedDaemon({ dashboardPort: 0, enginePaths: { codex: '/nonexistent/retired-worker' } }, directory);
+  const s = isolated.store, d = isolated.daemon;
+  t.after(async () => { await d.stop(() => {}); d.resetStopping(); isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const parentId = 't-12345678', attempt = 1;
+  const hash = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
+  const id = `t-${hash(`${parentId}:${attempt}`).slice(0, 24)}`;
+  const child = { id, project: 'demo', projectPath: '/tmp/historical', source: 'r1', type: 'loop',
+    engine: 'codex', workerEngine: 'codex', criticEngine: 'claude', autoCommit: false, maxCycles: 3, taskRetries: 3,
+    r1Child: { parentJobId: parentId, attempt, issue: 5 }, status: 'pending' };
+  s.writeTask(child, 'pending');
+  const stable = { project: child.project, projectPath: child.projectPath, source: child.source,
+    engine: child.engine, workerEngine: child.workerEngine, criticEngine: child.criticEngine,
+    autoCommit: child.autoCommit, maxCycles: child.maxCycles, taskRetries: child.taskRetries, r1Child: child.r1Child };
+  const indexDir = path.join(s.paths.state, 'r1-child-index', parentId); fs.mkdirSync(indexDir, { recursive: true });
+  const index = path.join(indexDir, 'attempt-1.json');
+  fs.writeFileSync(index, JSON.stringify({ schemaVersion: 1, parentJobId: parentId, attempt, id, fingerprint: hash(JSON.stringify(stable)) }));
+  const indexBytes = fs.readFileSync(index), pendingBytes = fs.readFileSync(path.join(s.paths.pending, `${id}.json`));
+  d.testing.initializeRuntime(); const server = d.createHttpServer();
+  const get = () => new Promise(resolve => server.emit('request', { method: 'GET', url: `/api/jobs/${id}`,
+    headers: { host: 'localhost:5769' }, socket: { localPort: 5769 } }, {
+    writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); },
+  }));
+  assert.equal(s.listR1ChildLoops(parentId)[0].id, id);
+  assert.equal((await get()).status, 200); assert.equal((await get()).status, 200);
+  assert.deepEqual(fs.readFileSync(index), indexBytes);
+  assert.deepEqual(fs.readFileSync(path.join(s.paths.pending, `${id}.json`)), pendingBytes);
+  d.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+  const done = s.readTask(id, 'done');
+  assert.equal(done.reason, 'r1_child_unauthorized'); assert.equal(done.status, 'failed');
+  assert.equal(s.listR1ChildLoops(parentId)[0].stage, 'done');
+  const found = await get(); assert.equal(found.status, 200); assert.equal(found.body.result.reason, 'r1_child_unauthorized');
+  assert.deepEqual(fs.readFileSync(index), indexBytes);
+  assert.equal(s.listTasks('pending').length, 0); assert.equal(s.listTasks('running').length, 0);
+});
+
+test('historical child with unknown process ownership remains held and inspectable after restart', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-ambiguous-child-'));
+  const isolated = isolatedDaemon({ dashboardPort: 0, enginePaths: { codex: '/nonexistent/retired-worker' } }, directory);
+  const s = isolated.store, d = isolated.daemon;
+  t.after(async () => { await d.stop(() => {}); d.resetStopping(); isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const child = { id: 't-0123456789abcdef01234567', type: 'loop', source: 'r1', status: 'running',
+    r1Child: { parentJobId: 't-12345678', attempt: 1, issue: 5 } };
+  s.writeTask(child, 'running');
+  s.appendExecution(child.id, { event: 'output', role: 'worker', base64: Buffer.from('captured before restart\n').toString('base64') });
+  const before = fs.readFileSync(s.executionPath(child.id));
+  d.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+  const held = s.readTask(child.id, 'running');
+  assert.equal(held.recoveryBlocked, true); assert.equal(held.status, 'running');
+  assert.deepEqual(s.listTasks('pending'), []); assert.deepEqual(s.listTasks('done'), []);
+  assert.deepEqual(fs.readFileSync(s.executionPath(child.id)).subarray(0, before.length), before);
+  const server = d.createHttpServer();
+  const response = await new Promise(resolve => server.emit('request', {
+    method: 'GET', url: `/api/jobs/${child.id}`, headers: { host: 'localhost:5769' }, socket: { localPort: 5769 },
+  }, { writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); } }));
+  assert.equal(response.status, 200); assert.equal(response.body.status, 'running'); assert.equal(response.body.id, child.id);
+  assert.equal(response.body.result, undefined, 'unknown process exit cannot invent a terminal result');
+});

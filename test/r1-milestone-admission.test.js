@@ -257,3 +257,53 @@ test('expiration during the final GitHub read fails closed', async t => {
   try { await assert.rejects(async () => f.jobs.submit({ project: 'demo', issue: 106 }), /expired during authorization/); }
   finally { Date.now = realNow; }
 });
+
+for (const phase of ['implementation', 'implementation_review']) test(`canonical mixed launch rechecks milestone after ${phase} transition`, async t => {
+  const f = await r1Fixture(t); await f.approve(); await f.run('release');
+  f.project.autoMerge = false; f.project.verification = 'true';
+  const cwd = f.project.checkout, launches = [];
+  let transitions = 0;
+  const deps = {
+    milestoneOptions: f.options,
+    jobStore: require('../src/autopilot-state').createJobStore(f.project.stateDir),
+    loadProjectConfig: () => f.project,
+    discoverReadyIssues: async () => [f.issue],
+    checkMilestoneAuthorization: () => require('../src/milestone-admission').checkMilestoneAdmission('demo', f.project, 106, f.options),
+    prepareIssueWorkspace: async () => ({ worktreePath: cwd, branch: 'ralph/issue-106', baseRef: 'main' }),
+    cleanupIssueWorkspace: async () => {}, readRepositoryInstructions: async () => [],
+    prepareRepositoryEnvironment: async () => {}, findOpenIssuePullRequests: async () => [],
+    write() {},
+    ralphOptions: { onPhaseChange: async current => {
+      if (current !== phase) return;
+      transitions++;
+      if (phase === 'implementation_review' || transitions === 2) {
+        const db = f.db(); db.grants.g1.state = 'revoked';
+        fs.writeFileSync(path.join(f.root, 'milestone-grants.json'), JSON.stringify(db));
+      }
+    } },
+    createRalphTaskService: options => require('../src/r1-loop-implementation').createR1LoopImplementation({
+      ...options,
+      config: { allowedProjects: { demo: cwd }, enginePaths: { codex: '/usr/bin/true', claude: '/usr/bin/true' } },
+      execFileSync: (_file, args) => args[0] === 'rev-parse' ? 'a'.repeat(40) : '',
+      // Only the external CLI is simulated; grant storage and the canonical
+      // authorization/phase/implementation path are real.
+      spawnImpl: (_file, args) => {
+        const child = new (require('node:events').EventEmitter)();
+        const { PassThrough } = require('node:stream');
+        child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+        launches.push(args);
+        child.stdin.on('finish', () => {
+          if (args.includes('--output-last-message')) fs.writeFileSync(args[args.indexOf('--output-last-message') + 1],
+            'LOOP_RESULT {"status":"' + (phase === 'implementation' ? 'failed' : 'done') + '","summary":"implementation"}');
+          child.stdout.end(); child.stderr.end();
+          queueMicrotask(() => child.emit('close', 0, null));
+        });
+        return child;
+      },
+    }),
+  };
+  const result = await require('../src/autopilot').run(['--project', 'demo'], deps);
+  assert.match(result.job.authorizationBlocked?.message || '', /revoked/);
+  assert.equal(launches.length, 1, 'revocation must veto the next actual process');
+  for (const name of ['PLAN.md', 'GUIDELINES.md', 'STATE.md']) assert.equal(fs.existsSync(path.join(cwd, name)), false);
+});

@@ -1,4 +1,4 @@
- 'use strict';
+'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -15,20 +15,22 @@ function fixture(t, verdicts, verificationPassed = true, hooks = {}) {
   let criticNumber = 0;
   const service = createR1LoopImplementation({
     beforeAttempt: hooks.beforeAttempt,
+    assertProcessStopped: hooks.assertProcessStopped,
     config: { allowedProjects: { fixture: cwd }, enginePaths: { codex: '/usr/bin/true', claude: '/usr/bin/true' } },
-    // Git is an external command boundary. Real Git/worktree behavior remains
-    // covered by the daemon integration suite, not simulated here.
+    // Most facility cases isolate external Git. The history and resumed-state
+    // regressions below use actual temporary Git repositories.
     execFileSync: hooks.execFileSync || ((_file, args) => args[0] === 'rev-parse' ? 'a'.repeat(40) : ''),
     recordExecution: (event, details) => events.push({ event, ...details }),
     onImplementationEvidence: value => evidence.push(structuredClone(value)),
-    spawnImpl: (file, args) => {
+    spawnImpl: (file, args, spawnOptions, execution) => {
       const child = new EventEmitter();
       child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
       child.kill = signal => queueMicrotask(() => child.emit('close', null, signal));
       let prompt = ''; child.stdin.on('data', chunk => { prompt += chunk; });
       child.stdin.on('finish', () => {
         const critic = args.includes('--restricted');
-        invocations.push({ critic, args, prompt });
+        invocations.push({ critic, args, prompt, execution });
+        if (!critic) hooks.afterWorker?.(cwd);
         if (!critic && hooks.blockWorker) { hooks.blockWorker(); return; }
         const text = critic ? verdicts[Math.min(criticNumber++, verdicts.length - 1)]
           : 'LOOP_RESULT {"status":"done","summary":"implemented"}';
@@ -39,8 +41,8 @@ function fixture(t, verdicts, verificationPassed = true, hooks = {}) {
       });
       return child;
     },
-    verify: async () => ({ status: verificationPassed ? 'passed' : 'failed',
-      verification: { passed: verificationPassed, exitCode: verificationPassed ? 0 : 7, timedOut: false, stdout: 'actual checks', stderr: '' } }),
+    verify: hooks.verify || (async () => ({ status: verificationPassed ? 'passed' : 'failed',
+      verification: { passed: verificationPassed, exitCode: verificationPassed ? 0 : 7, timedOut: false, stdout: 'actual checks', stderr: '' } })),
   });
   const task = { id: 'task-1', goal: 'Implement answer', acceptance: ['Answer is 42'], worker: 'codex', verification: 'true', maxAttempts: 2 };
   return { cwd, task, service, evidence, events, invocations };
@@ -164,7 +166,7 @@ test('exported normal skill tool events remain verbatim in owner raw output', as
 test('unknown process ownership holds the workspace without launching a replacement worker', async t => {
   let checks = 0;
   const f = fixture(t, ['VERDICT: PASS'], true, { beforeAttempt: async () => {
-    if (++checks >= 3) throw Object.assign(new Error('process ownership unknown'), { code: 'AUTOPILOT_PROCESS_UNCONFIRMED' });
+    if (++checks >= 4) throw Object.assign(new Error('process ownership unknown'), { code: 'AUTOPILOT_PROCESS_UNCONFIRMED' });
   } });
   await assert.rejects(f.service.run(f.cwd, f.task), { code: 'AUTOPILOT_PROCESS_UNCONFIRMED' });
   assert.equal(f.invocations.length, 1);
@@ -185,4 +187,129 @@ test('tracked synthetic instructions refuse worker admission', async t => {
     args[0] === 'rev-parse' ? 'a'.repeat(40) : args[0] === 'ls-files' ? 'PLAN.md' : '' });
   await assert.rejects(f.service.run(f.cwd, f.task), /already tracked/);
   assert.equal(f.invocations.length, 0);
+});
+
+
+test('revocation after confirmed worker exit removes temporary instructions and preserves the original error', async t => {
+  let checks = 0;
+  const f = fixture(t, ['VERDICT: PASS'], true, {
+    beforeAttempt: async () => { if (++checks >= 4) throw new Error('milestone revoked'); },
+    assertProcessStopped: () => {},
+    execFileSync: (_file, args) => {
+      if (args[0] === 'rev-parse') return 'a'.repeat(40);
+      if (checks >= 4 && args[0] === 'ls-files') throw new Error('cleanup history check failed');
+      return '';
+    },
+  });
+  await assert.rejects(f.service.run(f.cwd, f.task), /milestone revoked/);
+  assert.equal(f.invocations.length, 1);
+  for (const name of ['PLAN.md', 'STATE.md', 'GUIDELINES.md']) assert.equal(fs.existsSync(path.join(f.cwd, name)), false);
+  assert.ok(f.events.some(e => e.event === 'cleanup_error' && /history check failed/.test(e.message)));
+});
+
+
+for (const retained of ['STATE only', 'all instructions']) test(`legitimate resumed STATE progress (${retained}) is retained for the worker and cleaned after PASS`, async t => {
+  const f = fixture(t, ['VERDICT: PASS'], true, { afterWorker: cwd => {
+    assert.match(fs.readFileSync(path.join(cwd, 'STATE.md'), 'utf8'), /Completed parser; next tests/);
+  } });
+  const files = syntheticPlan(f.task);
+  for (const [name, content] of Object.entries(files)) {
+    if (retained === 'all instructions' || name === 'STATE.md') fs.writeFileSync(path.join(f.cwd, name), content);
+  }
+  fs.appendFileSync(path.join(f.cwd, 'STATE.md'), '\nCompleted parser; next tests\n');
+  assert.equal((await f.service.run(f.cwd, f.task)).status, 'passed');
+  assert.equal(fs.existsSync(path.join(f.cwd, 'STATE.md')), false);
+});
+
+for (const name of ['PLAN.md', 'GUIDELINES.md', 'STATE.md']) {
+  for (const mode of ['index', 'commit', 'commit then remove']) {
+    test(`real Git rejects ${name} smuggled through ${mode}`, async t => {
+      const git = (cwd, ...args) => require('node:child_process').execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' }).trim();
+      let verified = false;
+      const f = fixture(t, ['VERDICT: PASS'], true, {
+        verify: async () => { verified = true; throw new Error('Synthetic instructions reached verification'); },
+        execFileSync: require('node:child_process').execFileSync,
+        afterWorker: cwd => {
+          git(cwd, 'add', name);
+          if (mode !== 'index') git(cwd, 'commit', '-m', 'smuggled instruction');
+          if (mode === 'commit then remove') { git(cwd, 'rm', name); git(cwd, 'commit', '-m', 'remove instruction'); }
+        },
+      });
+      git(f.cwd, 'init', '-b', 'main'); git(f.cwd, 'config', 'user.name', 'Fixture'); git(f.cwd, 'config', 'user.email', 'fixture@example.invalid');
+      fs.writeFileSync(path.join(f.cwd, 'README'), 'baseline'); git(f.cwd, 'add', 'README'); git(f.cwd, 'commit', '-m', 'baseline');
+      // A PASS must still be vetoed before the deterministic verifier/delivery.
+      await assert.rejects(f.service.run(f.cwd, f.task), mode === 'commit then remove' ? /entered Git history/ : /Git index/);
+      assert.equal(verified, false);
+      assert.notEqual(f.evidence.at(-1).status, 'passed');
+    });
+  }
+}
+
+test('a supported architecture proposal pauses before critic or verification and cleans instructions', async t => {
+  const proposal = { key: 'storage-choice', problem: 'Choose durable storage', options: [
+    { name: 'one', tradeoffs: 'simple' }, { name: 'two', tradeoffs: 'flexible' }],
+    recommendation: 'one', consequences: 'migration', conflicts: 'none', grantImplications: 'none', newEvidence: '',
+    settledDecision: false, expensiveToReverse: true, surprisingWithoutContext: true, genuineTradeoff: true };
+  const f = fixture(t, ['VERDICT: PASS'], true, { afterWorker: cwd => {
+    fs.mkdirSync(path.join(cwd, '.ralph')); fs.writeFileSync(path.join(cwd, '.ralph/architecture-decision.json'), JSON.stringify(proposal));
+  } });
+  f.task.architectureDecisions = true;
+  const result = await f.service.run(f.cwd, f.task);
+  assert.equal(result.status, 'paused_owner_decision'); assert.deepEqual(result.proposal, proposal);
+  assert.equal(f.invocations.length, 1); assert.equal(result.attempts.length, 0);
+  for (const name of ['PLAN.md', 'GUIDELINES.md', 'STATE.md']) assert.equal(fs.existsSync(path.join(f.cwd, name)), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.cwd, '.ralph/architecture-decision.json'))), proposal);
+});
+
+
+test('executor supplies explicit worker and critic identity independently of CLI flags', async t => {
+  const f = fixture(t, ['VERDICT: PASS']);
+  await f.service.run(f.cwd, f.task);
+  assert.deepEqual(f.invocations.map(x => x.execution?.role), ['worker', 'critic']);
+  for (const role of ['worker', 'critic']) {
+    const raw = f.events.filter(x => x.event === 'output' && x.role === role && x.stream === 'stderr');
+    assert.equal(Buffer.concat(raw.map(x => Buffer.from(x.base64, 'base64'))).toString(), 'full raw diagnostic\n');
+  }
+});
+
+test('inner critic exhaustion is terminal across repeated Autopilot passes despite a larger outer budget', async t => {
+  const f = fixture(t, ['VERDICT: FAIL - missing tests']);
+  const store = require('../src/autopilot-state').createJobStore(path.join(f.cwd, 'jobs'));
+  const project = { enabled: true, repo: 'fixture/demo', worker: 'codex', verification: 'true', maxAttempts: 9, reviewPolicy: 'always' };
+  const deps = { jobStore: store, maxJobRuns: 10, loadProjectConfig: () => project,
+    discoverReadyIssues: async () => [{ number: 5, title: 'Implement', body: '## Acceptance criteria\n- Correct source and tests' }],
+    prepareIssueWorkspace: async () => ({ worktreePath: f.cwd, branch: 'ralph/issue-5', baseRef: 'main' }),
+    readRepositoryInstructions: async () => [], prepareRepositoryEnvironment: async () => {},
+    findOpenIssuePullRequests: async () => [], cleanupIssueWorkspace: async () => {},
+    createRalphTaskService: () => f.service, write() {},
+    deliverPassedWork: async () => assert.fail('Exhausted child cannot deliver'),
+  };
+  const run = () => require('../src/autopilot').run(['--project', 'demo'], deps);
+  const first = await run();
+  assert.equal(first.job.terminal, true); assert.equal(first.job.terminalState, 'needs_planning');
+  assert.equal(first.job.runs, 1); assert.equal(f.invocations.length, 6);
+  await run(); await run();
+  assert.equal(store.load(5).runs, 1); assert.equal(f.invocations.length, 6);
+  assert.equal(f.evidence.at(-1).cycles.length, 3);
+});
+
+test('CONTINUE feedback asks for remaining work without claiming critic rejection', async t => {
+  const f = fixture(t, ['VERDICT: CONTINUE - done: parser; next: tests', 'VERDICT: PASS']);
+  await f.service.run(f.cwd, f.task);
+  const next = f.invocations.filter(x => !x.critic)[1].prompt;
+  assert.match(next, /done: parser; next: tests/);
+  assert.doesNotMatch(next, /critic rejected/);
+});
+
+test('real Git admits untracked resumed STATE without losing progress or leaving instructions', async t => {
+  const exec = require('node:child_process').execFileSync;
+  const f = fixture(t, ['VERDICT: PASS'], true, { execFileSync: exec, afterWorker: cwd => {
+    assert.match(fs.readFileSync(path.join(cwd, 'STATE.md'), 'utf8'), /Completed implementation/);
+  } });
+  const git = (...args) => exec('git', args, { cwd: f.cwd, encoding: 'utf8', stdio: 'pipe' }).trim();
+  git('init', '-b', 'main'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+  fs.writeFileSync(path.join(f.cwd, 'README'), 'baseline'); git('add', 'README'); git('commit', '-m', 'baseline');
+  fs.writeFileSync(path.join(f.cwd, 'STATE.md'), '# R1 implementation progress\n\nCompleted implementation; next verify.\n');
+  assert.equal((await f.service.run(f.cwd, f.task)).status, 'passed');
+  assert.equal(git('status', '--porcelain'), '');
 });

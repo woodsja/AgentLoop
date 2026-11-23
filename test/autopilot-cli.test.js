@@ -2840,3 +2840,23 @@ test('historical delivered checkpoint without original requirements cannot auton
   assert.equal(observed, 0, 'avoid downstream delivery effects while missing original owner requirements');
   assert.equal(reviewed, 0);
 });
+
+
+test('restart after implementation PASS continues CI without an ownership hold or another worker', async () => {
+  const store = temporaryStore();
+  const issue = { number: 290, title: 'Passed implementation', body: 'Exact authorized requirements' };
+  saveJob(store, issue.number, { status: 'awaiting_ci', runs: 1,
+    ralph: { status: 'running', attempts: 0, taskId: 'fixture' },
+    implementationChildren: [{ attempt: 1, status: 'passed', cycles: [{ verdict: 'PASS' }] }],
+    pr: { number: 99, url: 'https://example.invalid/pull/99' },
+    delivery: { branch: 'ralph/issue-290', commit: 'abc123', pushed: true } });
+  let observations = 0;
+  const result = await runAutopilot(['--project', 'demo'], enabledDependencies(store, {
+    discoverReadyIssues: async () => [issue],
+    createRalphTaskService: () => assert.fail('passed implementation cannot restart'),
+    observePullRequestCi: async () => { observations++; return { state: 'pending', headCommit: 'abc123', prNumber: 99 }; },
+  }));
+  assert.equal(observations, 1);
+  assert.equal(result.job.ownershipBlocked, undefined);
+  assert.equal(result.job.runs, 1);
+});
