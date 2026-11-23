@@ -263,8 +263,8 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   assert.equal(queued[0].worktree, undefined);
   assert.throws(() => jobs.submit({ project: 'demo', issue: 5, worktree: 'issue5' }), /explicitly authorized/);
   assert.throws(() => jobs.submit({ project: 'demo', issue: 5, worktree: '../unrelated' }), /explicitly authorized/);
-  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, cwd: '/tmp/forged' }), /R1 paths come from owner configuration/);
-  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, projectPath: '/tmp/forged' }), /R1 paths come from owner configuration/);
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, cwd: '/tmp/forged' }), /Development-job paths come from owner configuration/);
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, projectPath: '/tmp/forged' }), /Development-job paths come from owner configuration/);
   assert.throws(() => jobs.submit({ project: 'unregistered', issue: 5 }), /Unknown project/);
   // A worker-writable project file cannot move the worktree outside the owner root.
   current = { ...project, worktreeRoot: path.join(root, 'elsewhere') };

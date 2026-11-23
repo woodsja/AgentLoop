@@ -181,7 +181,7 @@ unchanged; the recovery verifier still checks their original Git blobs.
 
 Decision status and synthetic lifecycle (ADE successor stage 3/3)
 
-`ralph decision inspect PROJECT#ISSUE` and `GET /api/r1/jobs/ID` now expose
+`ralph decision inspect PROJECT#ISSUE` and `GET /api/development/jobs/ID` now expose
 `status` / `evidence.decisions` navigation records, including decision and code
 issue URLs, original job ID, notification owner/attempt/status, proposed ADR
 content SHA-256, accepted ADR merge revision, resolution publication, execution

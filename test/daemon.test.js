@@ -599,6 +599,7 @@ test('HTTP R1 corrected specification retains old status result and raw identity
     req.end(body ? JSON.stringify(body) : '');
   });
   assert.equal((await invoke('POST', '/api/r1/jobs', { project: 'demo', issue: 1 })).status, 404, 'retired public R1 admission must stay closed');
+  assert.equal((await invoke('GET', '/api/r1/jobs/t-retired')).status, 404, 'retired R1 read route must stay closed');
   const submitted = await invoke('POST', '/api/development/jobs', { project: 'demo', issue: 1 });
   assert.equal(submitted.status, 201);
   const oldId = submitted.body.id;
