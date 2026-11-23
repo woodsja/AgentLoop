@@ -7,7 +7,8 @@ const { verifyTask } = require('./task-runner');
 const { normalizeTaskContract } = require('./task-contract');
 
 const FILES = ['PLAN.md', 'GUIDELINES.md', 'STATE.md'];
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const { createCliWorker } = require('./cli-worker');
+const { loopWorkerPrompt, criticPrompt, parseLoopResult, parseCriticVerdict } = require('./prompts');
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 15000 }).trim();
@@ -35,121 +36,114 @@ function syntheticPlan(task) {
   };
 }
 
-function verifyNoSyntheticHistory(cwd, baseline) {
-  const after = git(cwd, 'rev-parse', 'HEAD');
+function verifyNoSyntheticHistory(cwd, baseline, gitCommand = git) {
+  const after = gitCommand(cwd, 'rev-parse', 'HEAD');
   for (const name of FILES) {
-    if (git(cwd, 'ls-files', '--', name)) {
+    if (gitCommand(cwd, 'ls-files', '--', name)) {
       throw new Error(`R1 temporary instruction file ${name} was added to the Git index; refusing delivery.`);
     }
     if (after !== baseline) {
-      const touches = git(cwd, 'log', '--format=', '--name-only', `${baseline}..${after}`, '--', name);
+      const touches = gitCommand(cwd, 'log', '--format=', '--name-only', `${baseline}..${after}`, '--', name);
       if (touches) throw new Error(`R1 temporary instruction file ${name} entered Git history; refusing delivery.`);
     }
   }
 }
 
-function approvedCriticPass(loop) {
-  if (loop?.status !== 'passed' || loop.criticEngine !== 'claude'
-    || !Array.isArray(loop.cycles) || !loop.cycles.length
-    || (Array.isArray(loop.blocked) && loop.blocked.length)) return false;
-  const last = loop.cycles.at(-1);
-  return last?.status === 'passed' && last?.phase === 'critic' && last?.verdict === 'PASS';
-}
-
-function createR1LoopImplementation({
-  ensureChild, childState, cancelChild = async () => {}, isCancelled = () => false,
-  onChildQueued = () => {}, recordBaseline = sha => sha, pollMs = 250, maxWaitMs = 45 * 60 * 1000,
-  cancelWaitMs = 20 * 1000, verify = verifyTask,
-} = {}) {
-  if (typeof ensureChild !== 'function' || typeof childState !== 'function') {
-    throw new TypeError('R1 implementation loop needs parent handoff and durable child status readers.');
-  }
-  let cancellationReason;
+// Awaited worker/review facility. The canonical coordinator supplies checkpoint,
+// authorization and process ownership; this facility owns no queue or recovery.
+function createR1LoopImplementation(options = {}) {
+  const gitCommand = (cwd, ...args) => (options.execFileSync || execFileSync)('git', args,
+    { cwd, encoding: 'utf8', timeout: 15000 }).trim();
+  const cancellation = new AbortController();
+  const { recordExecution = () => {}, onImplementationEvidence = () => {},
+    beforeAttempt = async () => {}, verify = verifyTask } = options;
+  const invoke = (cwd, role, prompt, task, number) => createCliWorker({
+    ...options, signal: cancellation.signal, role,
+    buildPrompt: () => prompt,
+    recordExecution: (event, details) => recordExecution(event, { ...details, role, cycle: number }),
+  })(cwd, { ...task, worker: role === 'critic' ? 'claude' : 'codex',
+    model: role === 'critic' ? options.config?.models?.claude : options.config?.models?.codex });
   return {
-    cancel(reason) { cancellationReason = reason; return { requested: false, reason: 'Child cancellation has not yet been requested; the parent poll will request it through the owning daemon lifecycle.' }; },
+    cancel(reason) { cancellation.abort(new Error(reason)); return { requested: true }; },
     async run(cwd, inputTask) {
+      if (cancellation.signal.aborted) throw cancellation.signal.reason;
+      await beforeAttempt();
       const task = normalizeTaskContract(inputTask);
       const files = syntheticPlan(task);
-      const original = await recordBaseline(git(cwd, 'rev-parse', 'HEAD'));
+      const original = await (options.recordBaseline || (sha => sha))(gitCommand(cwd, 'rev-parse', 'HEAD'));
       if (!/^[a-f0-9]{40}$/.test(original)) throw new Error('R1 baseline SHA checkpoint is invalid.');
-      try { git(cwd, 'merge-base', '--is-ancestor', original, 'HEAD'); }
-      catch { throw new Error('R1 baseline SHA is not an ancestor of the current implementation.'); }
-      const hasOld = FILES.some(name => fs.existsSync(path.join(cwd, name)));
-      // Recovery may encounter an interrupted earlier invocation. Existing
-      // synthetic files are adopted only when their owner-authored content
-      // matches; user files and altered plan/guidelines are never replaced.
-      if (hasOld && (!fs.existsSync(path.join(cwd, 'PLAN.md'))
-        || fs.readFileSync(path.join(cwd, 'PLAN.md'), 'utf8') !== files['PLAN.md']
-        || (fs.existsSync(path.join(cwd, 'GUIDELINES.md'))
-          && fs.readFileSync(path.join(cwd, 'GUIDELINES.md'), 'utf8') !== files['GUIDELINES.md'])
-        || (fs.existsSync(path.join(cwd, 'STATE.md'))
-          && !fs.readFileSync(path.join(cwd, 'STATE.md'), 'utf8').startsWith('# R1 implementation progress')))) {
-        throw new Error('R1 temporary instruction files collide with or differ from project content.');
-      }
+      gitCommand(cwd, 'merge-base', '--is-ancestor', original, 'HEAD');
       for (const name of FILES) {
-        if (git(cwd, 'ls-files', '--', name)) {
-          throw new Error(`R1 temporary instruction file ${name} is already tracked; refusing to overwrite.`);
+        if (gitCommand(cwd, 'ls-files', '--', name)) throw new Error(`R1 temporary instruction file ${name} is already tracked; refusing to overwrite.`);
+        if (fs.existsSync(path.join(cwd, name)) && fs.readFileSync(path.join(cwd, name), 'utf8') !== files[name]) {
+          throw new Error('R1 temporary instruction files collide with project content; owner reconciliation required.');
         }
       }
-      let childId = null;
-      let childTerminal = false;
-      let lastLoop = null;
+      const evidence = { status: 'running', criticEngine: 'claude', cycles: [] };
+      const attempts = [];
+      let feedback = '';
+      let safeToClean = false;
       try {
-        for (const [name, contents] of Object.entries(files)) {
-          if (!fs.existsSync(path.join(cwd, name))) {
-            fs.writeFileSync(path.join(cwd, name), contents, { encoding: 'utf8', flag: 'wx' });
+        for (const [name, contents] of Object.entries(files)) fs.writeFileSync(path.join(cwd, name), contents);
+        await onImplementationEvidence(evidence);
+        recordExecution('capabilities', { internalReasoning: 'Only CLI-exported events are available; non-exported model thoughts are unavailable.' });
+        // The owner-set child correction budget was three. It remains bounded
+        // within this one parent attempt, without a scheduler or plan cursor.
+        for (let number = 1; number <= 3; number++) {
+          await beforeAttempt();
+          if (cancellation.signal.aborted) throw cancellation.signal.reason;
+          await options.onPhaseChange?.('implementation');
+          options.onWorkerStart?.();
+          const worker = await invoke(cwd, 'worker', loopWorkerPrompt({}, feedback), task, number);
+          await beforeAttempt(); // confirms process stopped and current authorization
+          const proposal = require('./architecture-decisions').readProposal(cwd, task.architectureDecisions);
+          if (proposal) {
+            evidence.status = 'paused_owner_decision'; safeToClean = true;
+            return { task, status: evidence.status, proposal, attempts };
           }
-        }
-        const child = ensureChild();
-        childId = child.id;
-        await onChildQueued(childId);
-        const deadline = Date.now() + maxWaitMs;
-        while (Date.now() < deadline) {
-          if (cancellationReason) throw new Error(cancellationReason);
-          if (isCancelled()) throw new Error('R1 parent cancelled during child implementation.');
-          const current = childState(childId);
-          if (current?.stage === 'done') {
-            childTerminal = true;
-            lastLoop = current.task;
-            break;
+          const parsed = parseLoopResult(worker.resultText);
+          if (worker.exitCode !== 0 || worker.signal || worker.timedOut || parsed?.status !== 'done') {
+            feedback = `Worker failed: ${worker.resultText}\n${worker.stderr}`;
+            evidence.cycles.push({ n: number, status: 'failed', reason: 'worker_failed' });
+            await onImplementationEvidence(evidence);
+            continue;
           }
-          await sleep(pollMs);
+          await options.onPhaseChange?.('implementation_review');
+          const critic = await invoke(cwd, 'critic', criticPrompt(worker.resultText), task, number);
+          await beforeAttempt();
+          const verdict = parseCriticVerdict(critic.resultText);
+          const valid = critic.exitCode === 0 && !critic.signal && !critic.timedOut && verdict;
+          evidence.cycles.push({ n: number, status: valid && verdict.verdict === 'PASS' ? 'passed' : 'failed',
+            verdict: valid ? verdict.verdict : null, feedback: critic.resultText });
+          await onImplementationEvidence(evidence);
+          if (valid && verdict.verdict === 'PASS') {
+            for (const name of FILES) fs.rmSync(path.join(cwd, name), { force: true });
+            verifyNoSyntheticHistory(cwd, original, gitCommand);
+            await options.onPhaseChange?.('verification');
+            const tested = await verify(cwd, task, undefined, recordExecution);
+            attempts.push({ number, status: tested.status, verification: tested.verification });
+            evidence.status = tested.status === 'passed' ? 'passed' : 'failed';
+            safeToClean = true;
+            return { task, status: tested.status === 'passed' ? 'passed' : 'needs_planning', attempts,
+              criticEngine: 'claude', criticVerdict: 'PASS' };
+          }
+          feedback = valid ? (verdict.fixes || critic.resultText) : `Malformed or failed critic: ${critic.resultText}`;
         }
-        if (!childTerminal) throw new Error('R1 child loop timed out; implementation cannot be delivered.');
-        const proposal = require('./architecture-decisions').readProposal(cwd, task.architectureDecisions);
-        if (proposal) return { task, status: 'paused_owner_decision', proposal, attempts: [], childLoopId: childId };
-        if (!approvedCriticPass(lastLoop)) {
-          const error = new Error(`R1 child loop lacks a final Claude critic PASS: ${String(lastLoop?.status)}`);
-          // A completed, exhausted child cannot become another parent worker attempt.
-          // Unknown or interrupted child outcomes stay fail-closed for recovery.
-          if (lastLoop?.status === 'maxed') error.code = 'R1_CHILD_CRITIC_EXHAUSTED';
-          throw error;
-        }
+        evidence.status = 'failed'; safeToClean = true;
+        return { task, status: 'needs_planning', attempts };
       } catch (error) {
-        // An exhausted deadline or lost parent must not leave the agent free
-        // to write indefinitely. Cancellation is delegated to the same
-        // daemon lifecycle that owns the child process. Never delete the
-        // workspace while the process has not been observed terminal.
-        if (childId && !childTerminal) {
-          await cancelChild(childId);
-          const deadline = Date.now() + cancelWaitMs;
-          while (Date.now() < deadline) {
-            const current = childState(childId);
-            if (current?.stage === 'done') { childTerminal = true; break; }
-            await sleep(pollMs);
-          }
-        }
+        evidence.status = cancellation.signal.aborted ? 'cancelled' : 'interrupted';
+        // beforeAttempt checks the canonical process claim. If it cannot prove
+        // exit, preserve the workspace and let existing canonical recovery hold.
+        try { await beforeAttempt(); safeToClean = true; } catch { /* retained */ }
         throw error;
       } finally {
-        if (!childId || childTerminal) {
+        await onImplementationEvidence(evidence);
+        if (safeToClean) {
           for (const name of FILES) fs.rmSync(path.join(cwd, name), { force: true });
-          verifyNoSyntheticHistory(cwd, original);
+          verifyNoSyntheticHistory(cwd, original, gitCommand);
         }
       }
-      const tested = await verify(cwd, task);
-      return { task, status: tested.status === 'passed' ? 'passed' : 'needs_planning', attempts: [{
-        number: 1, status: tested.status, verification: tested.verification,
-      }], childLoopId: childId, criticEngine: 'claude', criticVerdict: lastLoop.cycles.at(-1).verdict };
     },
   };
 }

@@ -246,3 +246,29 @@ test('exhausted PR inspection during held cancellation frees dispatch without un
   f.issues([{ number: 2, title: 'Next job', body: 'Implement the next explicitly scoped owner-approved feature and verify it with deterministic acceptance tests.' }]);
   assert.equal((await f.jobs.admit()).issue, 2);
 });
+
+test('canonical restart holds an interrupted implementation without deleting its workspace or duplicating work', async t => {
+  const f = fixture(t), { task, job } = f.saved('running');
+  f.project.implementationStrategy = 'worker-critic-loop';
+  job.runs = 1;
+  job.ralph = { status: 'running', attempts: 0, taskId: 'fixture' };
+  job.workspaceState = 'prepared'; job.worktreePath = path.join(f.project.worktreeRoot, 'issue-1-recovery');
+  fs.mkdirSync(job.worktreePath, { recursive: true });
+  fs.writeFileSync(path.join(job.worktreePath, 'partial-work'), 'retained');
+  job.implementationChildren = [{ parentId: task.id, attempt: 1, status: 'running', criticEngine: 'claude', cycles: [] }];
+  job.agentProcess = { status: 'running', pid: 99999999, startTime: '12345' };
+  f.durable.save(job); f.issues([{ number: 1, title: 'Recovery', body: 'Implement answer' }]);
+  let cleanups = 0;
+  f.deps.cleanupIssueWorkspace = async () => { cleanups++; };
+  f.jobs.recover(task);
+  f.queue.moveTask(task.id, 'pending', 'running');
+  await f.tick(task);
+  const status = f.jobs.read(task.id);
+  assert.match(status.evidence.ownershipBlocked, /interrupted implementation/);
+  assert.equal(status.evidence.implementationChildren[0].status, 'interrupted');
+  assert.equal(f.durable.load(1).runs, 1);
+  assert.equal(cleanups, 0);
+  assert.equal(fs.readFileSync(path.join(job.worktreePath, 'partial-work'), 'utf8'), 'retained');
+  await f.tick(task);
+  assert.equal(f.durable.load(1).runs, 1, 'later ticks cannot launch another attempt');
+});

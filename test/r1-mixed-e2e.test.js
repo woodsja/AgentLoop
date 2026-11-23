@@ -75,16 +75,9 @@ async function runCase(testCase) {
       const workerOutput = Buffer.concat(records.filter(x=>x.event==='output' && x.role==='worker' && x.base64).map(x=>Buffer.from(x.base64,'base64'))).toString();
       return workerOutput.includes(marker);
     }, 20000);
-    const index = fs.readdirSync(path.join(queue, 'r1-child-index', created.id)).find(name=>name.endsWith('.json'));
-    const child = JSON.parse(fs.readFileSync(path.join(queue, 'r1-child-index', created.id, index)));
-    const active = JSON.parse(fs.readFileSync(path.join(queue, 'tasks/running', child.id + '.json')));
-    assert.ok(active.workerPid > 0 && active.workerStartTime, 'the worker was a real identified child process');
+    const active = JSON.parse(fs.readFileSync(path.join(project.stateDir, 'issue-5.json')));
+    assert.ok(active.agentProcess?.pid > 0 && active.agentProcess.startTime, 'canonical process ownership is checkpointed');
     assert.deepEqual(await request(port, '/api/cancel', { id: created.id }), { ok: true });
-    const done = await until(async () => {
-      try { const x = JSON.parse(fs.readFileSync(path.join(queue, 'tasks/done', child.id + '.json'))); return x.status === 'cancelled' && x; }
-      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-    }, 18000);
-    assert.equal(done.r1Child.parentJobId, created.id);
     assert.equal(lines(path.join(root, 'delivery')).length, 0, 'cancelled worker cannot trigger delivery');
     const parent = await until(async () => { const x = await request(port, `/api/r1/jobs/${created.id}`); return ['blocked', 'failed', 'cancelled'].includes(x.status) && x; }, 18000);
     assert.notEqual(parent.status, 'passed');
@@ -143,20 +136,14 @@ async function runCase(testCase) {
     assert.equal(captured('verification','stderr'), 'test: owner failure\nstack line\n');
     assert.ok(records.some(r => r.event === 'command' && r.role === 'verification' && r.command === 'node verify.js'));
     assert.ok(records.some(r => r.event === 'exit' && r.role === 'verification' && r.exitCode === 7));
-    const childRecord = records.find(r => r.role === 'critic' && r.childId);
-    assert.ok(childRecord, 'parent journal correlates actual child engine activity');
-    assert.equal(childRecord.parentId, created.id);
-    assert.ok(childRecord.attempt >= 1 && childRecord.timestamp);
+    assert.ok(records.some(r => r.role === 'critic' && r.parentId === created.id));
     assert.ok(records.some(r => r.event === 'capabilities' && r.internalReasoning === 'Only CLI-exported events are available; non-exported model thoughts are unavailable.'));
-    const childBefore = await retrieve(childRecord.childId);
     git(checkout,'worktree','remove','--force',path.join(worktreeRoot,'issue-5'));
     assert.deepEqual(await retrieve(created.id), before, 'worktree cleanup leaves every captured byte retrievable');
-    assert.ok(childBefore.includes(Buffer.from('"role":"critic"')));
     const ended = new Promise(resolve => daemon.once('exit', resolve)); daemon.kill('SIGKILL'); await ended;
     // Recovery reads the durable state and journals, with no replay of a terminal job.
     port = await launch();
     assert.deepEqual(await retrieve(created.id), before);
-    assert.deepEqual(await retrieve(childRecord.childId), childBefore);
     assert.equal((await request(port, `/api/r1/jobs/${created.id}`)).evidence.verification.stderr, 'test: owner failure\nstack line\n');
     return;
   }
@@ -187,12 +174,9 @@ async function runCase(testCase) {
     assert.ok(critics.length>=2 && critics.length<=3,'Critic must reject with a bounded cycle budget');
     assert.ok(critics.every(x=>/VERDICT: FAIL/.test(x.verdict)),'All critic attempts must reject');
     assert.ok(rejectedInvocations.some(x=>x.role==='worker'),'Codex must actually run');
-    const index = fs.readdirSync(path.join(queue,'r1-child-index',created.id)).find(name=>name.endsWith('.json'));
-    const reserved = JSON.parse(fs.readFileSync(path.join(queue,'r1-child-index',created.id,index)));
-    const child = JSON.parse(fs.readFileSync(path.join(queue,'tasks/done', reserved.id+'.json')));
-    assert.ok(child.cycles.length <= 3, 'R1 child must obey its owner-set three-cycle budget');
-    assert.ok(child.blocked.length >= 1, 'repeated FAIL creates a durable blocked-task record');
-    assert.notEqual(child.status, 'passed');
+    const child = finished.evidence.implementationChildren.at(-1);
+    assert.equal(child.cycles.length, 3, 'correction budget is fixed and bounded');
+    assert.equal(child.status, 'failed');
     assert.equal(lines(path.join(root,'delivery')).length,0);
     assert.equal(lines(path.join(root,'ci')).length,0);
     assert.equal(lines(path.join(root,'final-review')).length,0);
@@ -203,12 +187,9 @@ async function runCase(testCase) {
   const invocations=lines(path.join(mockState,'invocations.ndjson'));
   assert.deepEqual(invocations.map(x=>[x.engine,x.role]),[['codex','worker'],['claude','critic'],['codex','worker'],['claude','critic']]);
   if (testCase === 'continue') {
-    const childId = fs.readdirSync(path.join(queue,'r1-child-index',created.id)).find(x=>x.endsWith('.json'));
-    const index = JSON.parse(fs.readFileSync(path.join(queue,'r1-child-index',created.id,childId)));
-    const loop = JSON.parse(fs.readFileSync(path.join(queue,'tasks','done',index.id+'.json')));
-    assert.deepEqual(loop.cycles.map(x=>x.verdict), ['CONTINUE','PASS']);
-    assert.equal(loop.done.length, 1, 'CONTINUE checkpoints one completed plan item');
-    assert.equal(loop.status, 'passed');
+    const child = finished.evidence.implementationChildren.at(-1);
+    assert.deepEqual(child.cycles.map(x=>x.verdict), ['CONTINUE','PASS']);
+    assert.equal(child.status, 'passed');
   }
   if (testCase === 'large-fix') {
     assert.equal(invocations[2].prompt.split('--- FIXES START ---\n')[1].split('\n--- FIXES END ---')[0],largeFix, 'all critic feedback reaches the next Codex context exactly');
@@ -231,17 +212,15 @@ async function runCase(testCase) {
   const worktree=path.join(worktreeRoot,'issue-5');
   const historical=git(worktree,'log','--format=','--name-only','HEAD').split('\n');
   for(const name of ['PLAN.md','GUIDELINES.md','STATE.md'])assert.equal(historical.includes(name),false);
-  const children=fs.readdirSync(path.join(queue,'r1-child-index',created.id));
-  assert.equal(children.filter(name=>name.endsWith('.json')).length,1);
-  const identity=JSON.parse(fs.readFileSync(path.join(queue,'r1-child-index',created.id,children.find(x=>x.endsWith('.json')))));
-  assert.equal(identity.parentJobId,created.id);
-  const childState=JSON.parse(fs.readFileSync(path.join(queue,'tasks','done',`${identity.id}.json`)));
-  assert.equal(childState.status,'passed');
-  assert.equal(childState.autoCommit,false, 'the canonical parent alone owns delivery commits');
-  assert.equal(childState.criticEngine,'claude');
-  assert.equal(childState.cycles.at(-1).verdict,'PASS');
+  assert.equal(fs.existsSync(path.join(queue, 'r1-child-index', created.id)), false,
+    'canonical execution must not publish a second child lifecycle');
   const parentState=JSON.parse(fs.readFileSync(path.join(root,'r1-jobs','issue-5.json')));
-  assert.equal(parentState.ralph.childLoopId,identity.id);
+  const children = finished.evidence.implementationChildren;
+  assert.equal(children.length, 1);
+  assert.equal(children[0].status, 'passed');
+  assert.equal(children[0].criticEngine, 'claude');
+  assert.equal(children[0].cycles.at(-1).verdict, 'PASS');
+  assert.equal(children[0].parentId, created.id);
   assert.equal(parentState.r1ParentJobId,created.id);
   assert.equal(parentState.verification.commit,delivered.commit);
  }catch(e){e.message+='\nDaemon diagnostic:\n'+output.slice(-6000);throw e;}

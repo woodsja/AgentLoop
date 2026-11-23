@@ -778,6 +778,16 @@ async function run(argv, dependencies = {}) {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
     assertProcessStopped();
+    const interruptedImplementation = job?.implementationChildren?.find(child => child.attempt === job.runs);
+    if (!job?.terminal && !job?.merge && job?.outcomePrState !== 'MERGED'
+      && interruptedImplementation && ['running', 'interrupted'].includes(job.ralph?.status)
+      && !job.architectureDecision?.resumeRequested) {
+      if (interruptedImplementation.status === 'running') interruptedImplementation.status = 'interrupted';
+      job.ownershipBlocked = 'Canonical interrupted implementation requires owner reconciliation; workspace and raw evidence retained without duplicate execution.';
+      job.ownershipBlockSource = 'implementation';
+      store.save(job);
+      return { issue: candidate, job, outcome: { status: 'ownership_blocked', terminal: false, deliverable: false } };
+    }
     if ((job?.merge || job?.outcomePrState === 'MERGED') && !job.terminal) {
       await finishApprovedMerge(); store.save(job);
       return { issue: candidate, job, outcome: { status: job.terminalState || job.status, terminal: job.terminal } };
@@ -1249,6 +1259,14 @@ async function run(argv, dependencies = {}) {
       if (project.architectureDecisions === true) task.goal += `\n\n${decisions.instructions(decisionReferences)}`;
       const service = createService({ config: storeConfig, ...attemptOptions(),
         onWorkerStart: () => { resumePreparation = null; },
+        onImplementationEvidence: evidence => {
+          job.implementationChildren ||= [];
+          const child = { ...structuredClone(evidence), parentId: dependencies.parentJobId, attempt: job.runs };
+          const index = job.implementationChildren.findIndex(item => item.attempt === job.runs);
+          if (index < 0) job.implementationChildren.push(child);
+          else job.implementationChildren[index] = child;
+          store.save(job);
+        },
         recordBaseline: sha => {
           if (!job.ralph.baselineSha) { job.ralph.baselineSha = sha; store.save(job); }
           return job.ralph.baselineSha;

@@ -3,7 +3,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { buildAutopilotTask } = require('../src/autopilot-task');
 const { syntheticPlan } = require('../src/r1-loop-implementation');
-const { parsePlanTasks } = require('../src/prompts');
 
 const issue = {
   number: 75,
@@ -29,7 +28,7 @@ test('original Finance #75 requirements produce one local implementation task wh
   const project = { repo: 'fixture/finance', verification: 'python -m pytest', worker: 'codex' };
   const task = buildAutopilotTask(project, issue, []);
   const plan = syntheticPlan(task);
-  const childTasks = parsePlanTasks(plan['PLAN.md']);
+  const childTasks = plan['PLAN.md'].split('\n').filter(line => line.startsWith('- ')).map(line => line.slice(2));
   assert.equal(childTasks.length, 1);
   assert.match(childTasks[0], /source-scope requirement/);
   assert.doesNotMatch(childTasks[0], /PR|CI|merge|final review/);

@@ -13,8 +13,6 @@ const { discoverReadyIssues, selectReadyIssue } = require('./autopilot-github');
 const { deriveWorktreePath, cleanupIssueWorkspace } = require('./autopilot-workspace');
 const { createJobStore, resolveStateDir, selectIssueForJobs } = require('./autopilot-state');
 const { managesWorktree, resolveProject } = require('./project-registry');
-const { createR1ChildHandoff } = require('./r1-child-handoff');
-const { authorizeR1Child } = require('./r1-child-admission');
 const { createR1LoopImplementation } = require('./r1-loop-implementation');
 const { createRalphTaskService } = require('./ralph-task-service');
 const { captureFailedR1Job, bindR1Parent } = require('./r1-failed-work');
@@ -230,7 +228,7 @@ function createR1Jobs(store, options = {}) {
       const current = original.load(task.issue);
       const stage = deliveryPhase(current);
       return captureProcess((...args) => trackedSpawn(task.id, ...args), file, args, options,
-        recorder(store, task.id, { parentId: task.id, role: stage === 'review' ? 'reviewer' : 'worker', attempt: current.runs, stage }));
+        recorder(store, task.id, { parentId: task.id, role: args.includes('--restricted') ? 'critic' : stage === 'review' ? 'reviewer' : 'worker', attempt: current.runs, stage }));
     };
     const project = load(task.project);
     const scope = resolveProject(store.config, task.project, undefined, store.paths.config);
@@ -281,7 +279,6 @@ function createR1Jobs(store, options = {}) {
       },
     };
     try {
-      const optionsCancelChild = options.cancelChild;
       const mixedEnabled = project.implementationStrategy === 'worker-critic-loop';
       await run(['--project', task.project], {
         ...dependencies, outcomeExecFile: dependencies.outcomeExecFile || options.execFile,
@@ -305,19 +302,23 @@ function createR1Jobs(store, options = {}) {
         },
         ...(mixedEnabled ? { createRalphTaskService: options => {
           const mixed = createR1LoopImplementation({
-            ensureChild: () => ensureChildLoop(task.id),
-            childState: id => store.listR1ChildLoops(task.id).find(item => item.id === id) || null,
-            cancelChild: async id => {
-              if (typeof optionsCancelChild !== 'function') throw new Error('Child cancellation unavailable; workspace retained.');
-              const outcome = optionsCancelChild(id);
-              if (outcome.status !== 200) throw new Error(`R1 child cancellation failed: ${outcome.error || outcome.status}`);
-            },
-            isCancelled: () => store.readTask(task.id, 'running').cancelRequested === true,
-            onChildQueued: id => {
+            ...options,
+            beforeAttempt: async () => {
+              await options.beforeAttempt?.();
               const current = store.readTask(task.id, 'running');
-              if (current.childLoopId !== id) throw new Error('R1 child association changed before implementation.');
+              const latestProject = load(task.project);
+              const latestScope = resolveProject(store.config, task.project, undefined, store.paths.config);
+              const worktree = deriveWorktreePath(latestProject, { number: task.issue, title: task.title });
+              if (closing || current.cancelRequested || !latestProject.enabled || latestProject.worker !== 'codex'
+                || !['always', 'risk'].includes(latestProject.reviewPolicy)
+                || fs.realpathSync(latestProject.checkout) !== latestScope.cwd
+                || worktree !== original.load(task.issue)?.worktreePath
+                || (task.worktree !== undefined
+                  ? store.config.allowedProjects[task.project]?.worktrees?.[task.worktree] !== worktree
+                  : !managesWorktree(store.config.allowedProjects[task.project], worktree))) {
+                throw new Error('Canonical worker authorization changed; workspace retained.');
+              }
             },
-            recordBaseline: options.recordBaseline,
             verify: (cwd, inputTask) => verifyTask(cwd, inputTask, undefined, recorder(store, task.id, { parentId: task.id, role: 'verification', attempt: original.load(task.issue)?.runs ?? 1, stage: 'verification' })),
           });
           return mixed;
@@ -558,18 +559,7 @@ function createR1Jobs(store, options = {}) {
     return Promise.allSettled([...active.values()]);
   }
 
-  // Internal-only handoff, deliberately absent from the public R1 submission route.
-  // Construct lazily: legacy R1 consumers that never invoke the new internal
-  // handoff do not need to implement its optional durable-store interface.
-  const ensureChildLoop = id => createR1ChildHandoff({ store, loadProject: load }).ensure(id);
-  const authorizeChild = task => {
-    const parent = authorizeR1Child(task, { store, loadProject: load });
-    const project = load(parent.project);
-    if (project.milestoneAuthorization !== true) return parent;
-    return authorize(parent.project, project, parent.issue, parent.milestoneAuthorization).then(() =>
-      authorizeR1Child(task, { store, loadProject: load }));
-  };
-  return { submit, advance, admit, recover, read, stop, cancel, ensureChildLoop, authorizeChild };
+  return { submit, advance, admit, recover, read, stop, cancel };
 }
 
 module.exports = { createR1Jobs };

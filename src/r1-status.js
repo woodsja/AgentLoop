@@ -69,6 +69,7 @@ function evidence(job, configuredWorkflow) {
     commit: job.delivery && job.delivery.commit,
     updatedAt: job.updatedAt,
     verification: job.verification && { ...job.verification },
+    implementationChildren: job.implementationChildren || [],
     ci: ciProjection(job, configuredWorkflow),
     review: job.review?.commit === job.delivery?.commit ? review(job.review) : null,
     correction: correction(job.correction), reviewCorrection: correction(job.reviewCorrection),

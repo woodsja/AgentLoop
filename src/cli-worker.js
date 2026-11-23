@@ -84,8 +84,8 @@ function createCliWorker(options = {}) {
     const outputPath = engine.usesOutputFile
       ? path.join(tempDir, `ralph-worker-${randomUUID()}.txt`)
       : null;
-    const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
-    const prompt = buildWorkerPrompt(task, context);
+    const args = engine.args({ model, outputPath, role: options.role, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
+    const prompt = (options.buildPrompt || buildWorkerPrompt)(task, context);
 
     try {
       return await new Promise((resolve, reject) => {
