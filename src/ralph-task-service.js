@@ -12,6 +12,7 @@ function createRalphTaskService(options = {}) {
     signal: cancellation.signal,
     ...(options.recordExecution ? { recordExecution: options.recordExecution } : {}),
     timeoutMs: options.workerTimeoutMs,
+    ...(options.killProcessGroup === undefined ? {} : { killProcessGroup: options.killProcessGroup }),
     ...(options.registryPath ? { registryPath: options.registryPath } : {}),
     ...(options.spawnImpl ? { spawnImpl: options.spawnImpl } : {}),
   });

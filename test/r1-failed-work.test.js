@@ -182,3 +182,28 @@ test('legacy terminal or already attempted jobs cannot acquire a new parent iden
   assert.throws(() => bindR1Parent({ ...f.job, ralph: {}, runs: 1, terminal: false }, 't-12345678'), /previously running or terminal/);
   assert.equal(bindR1Parent({ ...f.job, ralph: {}, runs: 0, terminal: false }, 't-12345678').r1ParentJobId, 't-12345678');
 });
+
+for (const attempts of [1, 2]) {
+  test('canonical stopped implementation after ' + attempts + ' attempt(s) can capture failed work without a child queue', t => {
+    const f = setup(t);
+    const { captureFailedR1Job } = require('../src/r1-failed-work');
+    f.job.runs = attempts;
+    f.job.r1ParentJobId = f.owner.parentJobId;
+    f.job.implementationChildren = Array.from({ length: attempts }, (_, i) => ({
+      parentId: f.owner.parentJobId,
+      attempt: i + 1,
+      status: 'failed',
+      cycles: [],
+    }));
+    const receipt = captureFailedR1Job({
+      project: f.project, job: f.job,
+      workspace: { worktreePath: f.workspace, branch: 'ralph/issue-75-feature' },
+      queueStore: { listR1ChildLoops: () => { throw new Error('retired queue must not be read'); } },
+      stateRoot: f.stateRoot,
+    });
+    assert.equal(receipt.attempt, attempts);
+    assert.equal(receipt.parentJobId, f.owner.parentJobId);
+    assert.match(receipt.childLoopId, /^t-[a-f0-9]{24}$/);
+    assert.match(fs.readFileSync(path.join(f.stateRoot, receipt.patchRelativePath), 'utf8'), /return 42/);
+  });
+}

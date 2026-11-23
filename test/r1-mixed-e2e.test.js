@@ -42,7 +42,7 @@ async function runCase(testCase) {
    : testCase === 'large-fix' ? ['FAIL - ' + largeFix, 'PASS']
    : [{verdict:'FAIL - answer was wrong',stderr:marker},'PASS'];
  const worker = testCase === 'no-change' ? [{noChange:true}]
-   : [{write:'answer',contents:'wrong',touchState:false,stdout:marker,stderr:'worker stderr\n',earlyStdout:['transcript-crash','cancel-worker'].includes(testCase)?marker:undefined,latencyMs:['transcript-crash','cancel-worker'].includes(testCase)?10000:0},
+   : [{write:'answer',contents:'wrong',touchState:false,stdout:marker,stderr:'worker stderr\n',earlyStdout:['transcript-crash','cancel-worker'].includes(testCase)?marker:undefined,spawnGrandchild:testCase==='cancel-worker',latencyMs:['transcript-crash','cancel-worker'].includes(testCase)?10000:0},
       {write:'answer',contents:'42',touchState:false}];
  fs.writeFileSync(scenarioPath,JSON.stringify({engine:{worker,critic}}));
  const project={enabled:true,repo:'fixture/none',checkout,worktreeRoot,baseBranch:'main',worker:'codex',reviewPolicy:'always',reviewModel:'opus',implementationStrategy:'worker-critic-loop',autoMerge:false,
@@ -77,10 +77,20 @@ async function runCase(testCase) {
     }, 20000);
     const active = JSON.parse(fs.readFileSync(path.join(project.stateDir, 'issue-5.json')));
     assert.ok(active.agentProcess?.pid > 0 && active.agentProcess.startTime, 'canonical process ownership is checkpointed');
+    const grandchildReady = path.join(mockState, 'grandchild-ready');
+    await until(() => fs.existsSync(grandchildReady), 5000);
     assert.deepEqual(await request(port, '/api/cancel', { id: created.id }), { ok: true });
     assert.equal(lines(path.join(root, 'delivery')).length, 0, 'cancelled worker cannot trigger delivery');
     const parent = await until(async () => { const x = await request(port, `/api/r1/jobs/${created.id}`); return ['blocked', 'failed', 'cancelled'].includes(x.status) && x; }, 18000);
     assert.notEqual(parent.status, 'passed');
+    const grandchildPid = Number(fs.readFileSync(path.join(mockState, 'grandchild-pid'), 'utf8'));
+    assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0);
+    await until(() => {
+      try {
+        const raw = fs.readFileSync('/proc/' + grandchildPid + '/stat', 'utf8');
+        return ['Z', 'X'].includes(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[0]);
+      } catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+    }, 7000);
     // The fake CLI records an invocation only on exit; a killed worker must
     // never have completed and written its second implementation step.
     assert.equal(lines(path.join(mockState, 'invocations.ndjson')).filter(x=>x.role==='worker').length, 0);

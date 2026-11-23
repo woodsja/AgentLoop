@@ -255,6 +255,14 @@ try {
   } else {
     const index = nextIndex(stateDir, 'worker');
     step = pickStep(engine.worker, index) || {};
+    if (step.spawnGrandchild) {
+      const grandchildCode = "const fs = require('node:fs'); "
+        + "fs.writeFileSync(process.env.AGENTLOOP_MOCK_STATE + '/grandchild-ready', 'ready'); "
+        + "setInterval(() => {}, 1000)";
+      const child = require('node:child_process').spawn(process.execPath, ['-e', grandchildCode],
+        { stdio: 'ignore', env: process.env });
+      fs.writeFileSync(path.join(stateDir, 'grandchild-pid'), String(child.pid));
+    }
     if (step.earlyStdout) require('fs').writeFileSync(1, step.earlyStdout);
     sleep(step.latencyMs || engine.latencyMs);
     const work = applyWorkerStep(step);

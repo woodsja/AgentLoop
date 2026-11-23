@@ -262,7 +262,7 @@ test('canonical restart reconciles a stopped implementation before bounded recov
   const gate = new Promise(resolve => { release = resolve; });
   f.deps.cleanupIssueWorkspace = async () => {
     assert.equal(f.durable.load(1).agentProcess, null, 'cleanup requires confirmed process exit');
-    assert.equal(f.durable.load(1).implementationChildren[0].status, 'interrupted');
+    assert.equal(f.durable.load(1).implementationChildren[0].status, 'failed');
     cleanups++;
   };
   f.deps.prepareIssueWorkspace = async () => {
@@ -278,7 +278,7 @@ test('canonical restart reconciles a stopped implementation before bounded recov
   await f.tick(task);
   const status = f.jobs.read(task.id);
   assert.equal(status.evidence.ownershipBlocked, undefined);
-  assert.equal(status.evidence.implementationChildren[0].status, 'interrupted');
+  assert.equal(status.evidence.implementationChildren[0].status, 'failed');
   assert.equal(f.durable.load(1).agentProcess, null);
   assert.equal(f.durable.load(1).runs, 2, 'confirmed stopped work may use the next bounded parent attempt');
   assert.equal(preparations, 1);

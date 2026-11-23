@@ -497,7 +497,7 @@ async function run(argv, dependencies = {}) {
   };
   const attemptOptions = () => ({ ...dependencies.ralphOptions,
     assertProcessStopped,
-    ...(dependencies.parentJobId ? { spawnImpl: spawnAgent } : {}),
+    ...(dependencies.parentJobId ? { spawnImpl: spawnAgent, killProcessGroup: true } : {}),
     onPhaseChange: async phase => {
       assertNotCancelled();
       job.phase = phase;
@@ -784,10 +784,7 @@ async function run(argv, dependencies = {}) {
     if (!job?.terminal && interruptedImplementation && ['running', 'interrupted'].includes(job.ralph?.status)) {
       // assertProcessStopped above proved the previous group has ended. Retain
       // its evidence, then use the existing bounded attempt recovery below.
-      interruptedImplementation.status = 'interrupted';
-      if (job.ownershipBlockSource === 'implementation') {
-        delete job.ownershipBlocked; delete job.ownershipBlockSource;
-      }
+      interruptedImplementation.status = 'failed'; // stopped: terminal for failed-work capture
       store.save(job);
     }
     if ((job?.merge || job?.outcomePrState === 'MERGED') && !job.terminal) {

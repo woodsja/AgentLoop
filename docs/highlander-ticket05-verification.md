@@ -28,9 +28,13 @@ The first Ticket 05 implementation required corrections identified by independen
 1. Milestone pause, revocation and authorization drift are rechecked immediately before each actual worker or critic process launch. Current project registration, repository identity, worktree linkage, owner scope, parent identity, attempt and cancellation are also checked at the canonical worker interface.
 2. Recovery distinguishes a passed implementation child (which may continue PR/CI delivery) from an interrupted child. Confirmed-stopped processes use the existing bounded recovery mechanism, without inventing a permanent owner hold or duplicating a worker; ambiguous process ownership continues to fail closed.
 3. Cancellation/revocation cleanup uses proof of process exit rather than the continued validity of the owner's authorization, preserving the original cancellation error; temporary instruction files are validated and removed only when safe.
-4. Legitimate unfinished STATE.md progress is retained across interrupted execution if it still matches the generated R1 instruction context. Existing unrelated files, tracked instruction files and insertion into Git history are rejected.
+4. Legitimate unfinished STATE.md progress is retained across interrupted execution if it has the generated R1 progress header. Existing unrelated files, tracked instruction files and insertion into Git history are rejected.
 5. Worker/critic identity is passed explicitly to the execution recorder, rather than inferred from CLI arguments. CONTINUE feedback describes remaining work, not a rejection. Three exhausted critic cycles remain terminal even if the outer retry budget is larger.
 6. Restored tests cover real Git index/commit/add-remove tampering, real authorized-worktree linkage, forged checkout/alien repository, changed registration, stale attempts, cancelled parents, historical child inspection, orphan pending child recovery, corrected restart and proposal-pause behavior.
+
+Second-round independent Opus reviews of commit 9a663776f67c1dfb9c589a0918aba0bf48fdf65e returned spec PASS and standards NOT PASS, specifically on confirmed-stopped failed-work capture, process-group cancellation, and a default reviewer role. The follow-up source changes correct those findings: a stopped child has terminal failed/cancelled evidence; ambiguous process ownership remains interrupted, including during cancellation; and canonical capture derives a stable owner-bound provenance identifier from the existing checkpoint without adding a child queue. Explicit role propagation no longer defaults missing roles to worker. The actual detached process group is signalled on cancellation and timeout. New tests cover a real subprocess grandchild, one- and two-attempt Git recovery capture, and unknown-process cancellation. Red/green logs are retained with the existing Ticket 05 records.
+
+The same prior commit passed the full GitHub Actions CI run https://github.com/woodsja/AgentLoop/actions/runs/45103206383 using verification-only draft PR #197, which targets ralph-dev while authoritative PR #196 remains stacked. That historical PASS does not verify any subsequent fixes; CI must run again against the new final commit.
 
 The temporary tests and raw red-green logs (including original failures) are preserved under the durable Ticket 05 verification root. No model thoughts are claimed beyond the events actually exported by the CLI.
 
@@ -44,11 +48,11 @@ The temporary tests and raw red-green logs (including original failures) are pre
 | Public development submission interfaces | 1 | 1 | 1 |
 | Active classic-loop-only modules | 4 | 0 | 0 |
 | JS source modules | 79 | 77 | 77 |
-| Source JS lines | 16,835 | 14,787 | 14,821 |
+| Source JS lines | 16,835 | 14,787 | 14,839 |
 | Top-level test files | 69 | 65 | 66 |
-| Textual test declarations | 975 | 916 | 931 |
+| Textual test declarations | 975 | 916 | 934 |
 
-Corrected working-tree metrics were measured after the review fixes; final commit SHA, full test pass and independent review remain unverified. These counts include blank/comment lines. The decrease of 2,048 source LOC at the first Ticket 05 commit is real deletion, not an added compatibility coordinator.
+Corrected working-tree metrics were measured after the second review fixes; final commit SHA, full test pass and independent review remain unverified. These counts include blank/comment lines. The decrease of 2,048 source LOC at the first Ticket 05 commit is real deletion, not an added compatibility coordinator.
 
 ## Verification evidence and distinction between environments
 
@@ -56,7 +60,7 @@ The first Codex workspace-write sandbox failed synchronous Git subprocess setup 
 
 The corrected source was separately tested with actual Git and VM subprocesses. The normal-VM test log files in the durable Ticket 05 directory use the names corrections-native-<suite>.log, including r1-mixed-e2e. The new repository authorization suite initially used an overly narrow error-message assertion despite all process launches being denied; that assertion was corrected to inspect the canonical durable checkpoint's denial evidence. Its final normal-VM rerun passed 5/5. The first failed suite run remains preserved rather than erased.
 
-Corrected normal-VM focused/integration results (before final full suite): R1 implementation 33/33, R1 review recovery 21/21, R1 milestone admission 32/32, daemon HTTP 18/18, R1 jobs 9/9, CLI worker 11/11, process claim 4/4, prompts 10/10, failed work 11/11, R1 mixed-engine E2E 9/9, repository authorization final rerun 5/5. Individual raw outputs are in the durable Ticket 05 verification directory. Final full native npm test uses the VM's installed uv on PATH and writes corrections-native-fullsuite.log and corrections-native-fullsuite.exit.
+Corrected normal-VM focused/integration results before the second-round fixes: R1 implementation 33/33, R1 review recovery 21/21, R1 milestone admission 32/32, daemon HTTP 18/18, R1 jobs 9/9, CLI worker 11/11, process claim 4/4, prompts 10/10, failed work 11/11, R1 mixed-engine E2E 9/9, repository authorization final rerun 5/5. Individual raw outputs are in the durable Ticket 05 verification directory. The previous full native npm test progressed through most suites but exited 1 because the new optional group-termination flag was supplied as an undefined property to a legacy task-service fixture; that was corrected and its targeted test passed 5/5. The new full native npm test uses the VM's installed uv on PATH and writes corrections-native-fullsuite.log and corrections-native-fullsuite.exit.
 
 **Do not claim the full suite, GitHub Actions CI or a final independent review passed until their exact results are verified.**
 

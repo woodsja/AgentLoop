@@ -203,6 +203,7 @@ test('revocation after confirmed worker exit removes temporary instructions and 
   });
   await assert.rejects(f.service.run(f.cwd, f.task), /milestone revoked/);
   assert.equal(f.invocations.length, 1);
+  assert.equal(f.evidence.at(-1).status, 'failed', 'a confirmed-stopped revoked attempt is terminal for failed-work capture');
   for (const name of ['PLAN.md', 'STATE.md', 'GUIDELINES.md']) assert.equal(fs.existsSync(path.join(f.cwd, name)), false);
   assert.ok(f.events.some(e => e.event === 'cleanup_error' && /history check failed/.test(e.message)));
 });
@@ -312,4 +313,19 @@ test('real Git admits untracked resumed STATE without losing progress or leaving
   fs.writeFileSync(path.join(f.cwd, 'STATE.md'), '# R1 implementation progress\n\nCompleted implementation; next verify.\n');
   assert.equal((await f.service.run(f.cwd, f.task)).status, 'passed');
   assert.equal(git('status', '--porcelain'), '');
+});
+
+test('cancellation with unknown process ownership remains interrupted and preserves instruction files', async t => {
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const f = fixture(t, ['VERDICT: PASS'], true, {
+    blockWorker: started,
+    assertProcessStopped: () => { throw new Error('process group still running'); },
+  });
+  const running = f.service.run(f.cwd, f.task);
+  await ready;
+  f.service.cancel('owner cancellation requested');
+  await assert.rejects(running, /owner cancellation requested/);
+  assert.equal(f.evidence.at(-1).status, 'interrupted');
+  assert.equal(fs.existsSync(path.join(f.cwd, 'PLAN.md')), true);
 });

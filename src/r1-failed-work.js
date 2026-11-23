@@ -235,7 +235,10 @@ function captureFailedR1Job({ project, job, workspace, queueStore, stateRoot }) 
     throw new Error('R1 failed-work recovery parent identity is missing or invalid.');
   }
   const children = job.implementationChildren?.length
-    ? job.implementationChildren.map(child => ({ id: `${parentJobId}-implementation-${child.attempt}`,
+    ? job.implementationChildren.map(child => ({
+      // Recovery provenance only: deterministically identify a canonical
+      // parent/attempt without recreating a child queue or writable state.
+      id: 't-' + sha(JSON.stringify([job.project, job.repo, job.issue.number, parentJobId, child.attempt])).slice(0, 24),
       attempt: child.attempt, stage: ['running', 'interrupted'].includes(child.status) ? 'running' : 'done',
       task: { status: child.status === 'paused_owner_decision' ? 'partial' : child.status } }))
     : queueStore.listR1ChildLoops(parentJobId);

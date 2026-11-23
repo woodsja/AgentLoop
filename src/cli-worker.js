@@ -96,13 +96,26 @@ function createCliWorker(options = {}) {
             stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: true,
             env: engine.env ? engine.env(process.env) : process.env,
-          }, { role: options.role || 'worker' });
+          }, { role: options.role });
         } catch (error) {
           reject(error);
           return;
         }
 
-        const abort = () => { child.kill('SIGTERM'); };
+        // Canonical R1 workers run in a detached process group. Cancelling
+        // only the CLI leader leaves its subprocesses free to edit the worktree.
+        const signalProcess = signal => {
+          if (options.killProcessGroup && process.platform === 'linux'
+            && Number.isSafeInteger(child.pid) && child.pid > 0) {
+            try { process.kill(-child.pid, signal); return; }
+            catch (error) { if (error.code !== 'ESRCH') throw error; }
+          }
+          child.kill(signal);
+        };
+        const abort = () => {
+          try { signalProcess('SIGTERM'); }
+          catch (error) { options.recordExecution?.('signal_error', { message: error.message }); }
+        };
         options.signal?.addEventListener('abort', abort, { once: true });
         if (options.signal?.aborted) abort();
         let stdout = '';
@@ -178,14 +191,14 @@ function createCliWorker(options = {}) {
         timeout = setTimeout(() => {
           timedOut = true;
           try {
-            child.kill('SIGTERM');
+            signalProcess('SIGTERM');
           } catch (error) {
             finish(error);
             return;
           }
           // A child that ignores termination must not keep the adapter pending.
           timeoutFallback = setTimeout(() => {
-            try { child.kill('SIGKILL'); } catch { /* already gone */ }
+            try { signalProcess('SIGKILL'); } catch { /* still fail closed on ownership check */ }
             finish(null, null, 'SIGKILL');
           }, 1000);
         }, timeoutMs);

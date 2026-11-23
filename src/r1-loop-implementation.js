@@ -63,6 +63,7 @@ function createR1LoopImplementation(options = {}) {
     return createCliWorker({
     config: options.config, spawnImpl: options.spawnImpl, timeoutMs: options.timeoutMs,
     tempDir: options.tempDir, registryPath: options.registryPath, signal: cancellation.signal, role,
+    killProcessGroup: options.killProcessGroup,
     buildPrompt: () => prompt,
     recordExecution: (event, details) => recordExecution(event, { ...details, role, cycle: number }),
   })(cwd, { ...task, worker: role === 'critic' ? 'claude' : 'codex',
@@ -149,13 +150,16 @@ function createR1LoopImplementation(options = {}) {
         return { task, status: 'needs_planning', attempts };
       } catch (error) {
         primaryError = error;
-        evidence.status = cancellation.signal.aborted ? 'cancelled' : 'interrupted';
+        evidence.status = 'interrupted'; // uncertain until process-stop proof
         // Process ownership is independent of permission to do more work.
         // Revocation/cancellation must not strand our files after confirmed exit.
         try {
           if (options.assertProcessStopped) await options.assertProcessStopped();
           else await beforeAttempt();
           safeToClean = true;
+          // Once ownership is proven stopped, this attempt is terminal for
+          // failed-work capture. Only uncertain process ownership remains interrupted.
+          evidence.status = cancellation.signal.aborted ? 'cancelled' : 'failed';
         } catch { /* Unknown/alive process: retain files and fail closed. */ }
         throw error;
       } finally {
