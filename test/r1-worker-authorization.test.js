@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { createR1Jobs } = require('../src/r1-jobs');
+const { createDevelopmentJobs } = require('../src/development-jobs');
 const { createJobStore } = require('../src/autopilot-state');
 const { configuredProjects } = require('../src/project-registry');
 
@@ -37,7 +37,7 @@ for (const change of ['forged checkout', 'other repository', 'changed repository
       moveTask(id, from, to) { const task = store.readTask(id, from); stages[from] = stages[from].filter(x => x.id !== id); stages[to].push(task); },
     };
     const durable = createJobStore(project.stateDir); let transitioned = false;
-    jobs = createR1Jobs(store, { autopilotDependencies: {
+    jobs = createDevelopmentJobs(store, { autopilotDependencies: {
       loadProjectConfig: () => project, discoverReadyIssues: async () => [{ number: 5, title: 'Test', body: '## Acceptance criteria\n- Test' }],
       findOpenIssuePullRequests: async () => [], readRepositoryInstructions: async () => [], prepareRepositoryEnvironment: async () => {}, cleanupIssueWorkspace: async () => {},
       prepareIssueWorkspace: async (_project, _issue, options) => {

@@ -15,7 +15,7 @@
 2. In the trusted owner-managed project configuration, add `"implementationStrategy": "worker-critic-loop"` to **one registered, enabled project**. Leave `worker: "codex"`, `reviewPolicy: "always"`, verification commands, CI workflow name, worktreeRoot and `autoMerge` policy untouched. Review that Claude critic model resolves to **Opus** in the owner daemon model configuration; the code's `criticEngine` is `claude` but the model is configured separately.
 3. Confirm the owner project registry's checkout and worktreeRoot point to matching canonical Git repositories. Verify the daemon has an isolated, write-protected state directory not writable by model workers. Do not permit an HTTP/MCP caller to choose raw paths.
 4. Start with a disposable issue and `autoMerge: false` wherever possible. Confirm the parent references a single child, the child actually enters `running` even with `maxConcurrent:1`, critic verdicts are durable, local deterministic verification runs, CI is green at the pushed SHA and the final independent Claude review matches that SHA.
-5. Monitor daemon `/api/r1/jobs/<id>`, `/api/jobs/<child-id>`, the loop transcript, GitHub CI and PR commit identity. A critic PASS by itself is never a delivery authorization.
+5. Monitor daemon `/api/development/jobs/<id>`, `/api/jobs/<child-id>`, the loop transcript, GitHub CI and PR commit identity. A critic PASS by itself is never a delivery authorization.
 
 ## Rollback and recovery
 

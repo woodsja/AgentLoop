@@ -307,8 +307,8 @@ test('read-only R1 status recovers CLI actions from the durable project job afte
     return structuredClone(task);
   } };
   await f.command('accept');
-  const { createR1Jobs } = require('../src/r1-jobs');
-  const reader = createR1Jobs(queue, { autopilotDependencies: { loadProjectConfig: () => f.project } });
+  const { createDevelopmentJobs } = require('../src/development-jobs');
+  const reader = createDevelopmentJobs(queue, { autopilotDependencies: { loadProjectConfig: () => f.project } });
   const calls = f.requests.length;
   const recovered = reader.read(task.id);
   assert.equal(recovered.evidence.decisions[0].ownerDecision.option, 'SQL');
@@ -611,7 +611,7 @@ test('a restarted canonical parent recovers pending decision publication without
     moveTask(id, from, to) { stages[to].push(this.readTask(id, from)); stages[from] = []; },
     listR1ChildLoops: () => [], appendExecution(id, event) { events.push(event); }, appendLogLine() {},
   };
-  const jobs = require('../src/r1-jobs').createR1Jobs(queue, { autopilotDependencies: {
+  const jobs = require('../src/development-jobs').createDevelopmentJobs(queue, { autopilotDependencies: {
     loadProjectConfig: () => f.project, execFile: (file, args, options, callback) => args.includes('--include')
       ? callback(null, 'HTTP/2 200 OK\r\n\r\n' + JSON.stringify([f.decisionIssue]), '< HTTP/2.0 200 OK\n')
       : f.options.execFile(file, args, options, callback), discoverReadyIssues: async () => [],

@@ -66,7 +66,7 @@ async function runCase(testCase) {
  };
  try{
   let port = await launch();
-  const created=await request(port,'/api/r1/jobs',{project:'demo',issue:5,title:'Add answer'});
+  const created=await request(port,'/api/development/jobs',{project:'demo',issue:5,title:'Add answer'});
   assert.match(created.id,/^t-[a-f0-9]{8}$/);
   if (testCase === 'cancel-worker') {
     await until(async () => {
@@ -81,7 +81,7 @@ async function runCase(testCase) {
     await until(() => fs.existsSync(grandchildReady), 5000);
     assert.deepEqual(await request(port, '/api/cancel', { id: created.id }), { ok: true });
     assert.equal(lines(path.join(root, 'delivery')).length, 0, 'cancelled worker cannot trigger delivery');
-    const parent = await until(async () => { const x = await request(port, `/api/r1/jobs/${created.id}`); return ['blocked', 'failed', 'cancelled'].includes(x.status) && x; }, 18000);
+    const parent = await until(async () => { const x = await request(port, `/api/development/jobs/${created.id}`); return ['blocked', 'failed', 'cancelled'].includes(x.status) && x; }, 18000);
     assert.notEqual(parent.status, 'passed');
     const grandchildPid = Number(fs.readFileSync(path.join(mockState, 'grandchild-pid'), 'utf8'));
     assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0);
@@ -109,7 +109,7 @@ async function runCase(testCase) {
     assert.deepEqual(Buffer.from(after.base64,'base64').subarray(0,before.length), before, 'daemon SIGKILL preserves all prior captured bytes across recovery');
     return;
   }
-  const finished=await until(async()=>{const j=await request(port,`/api/r1/jobs/${created.id}`);return ['ready_for_human_merge','blocked','failed','passed'].includes(j.status)&&j;},55000);
+  const finished=await until(async()=>{const j=await request(port,`/api/development/jobs/${created.id}`);return ['ready_for_human_merge','blocked','failed','passed'].includes(j.status)&&j;},55000);
   if (testCase === 'transcript') {
     assert.equal(finished.status, 'blocked');
     const fullOutput = marker + 'large-log\n'.repeat(200000);
@@ -154,7 +154,7 @@ async function runCase(testCase) {
     // Recovery reads the durable state and journals, with no replay of a terminal job.
     port = await launch();
     assert.deepEqual(await retrieve(created.id), before);
-    assert.equal((await request(port, `/api/r1/jobs/${created.id}`)).evidence.verification.stderr, 'test: owner failure\nstack line\n');
+    assert.equal((await request(port, `/api/development/jobs/${created.id}`)).evidence.verification.stderr, 'test: owner failure\nstack line\n');
     return;
   }
   if (testCase === 'no-change') {

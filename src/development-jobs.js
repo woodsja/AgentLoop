@@ -37,7 +37,7 @@ function autonomous(project) {
 
 const { evidence, nextAction, deliveryStatus, deliveryPhase } = require('./r1-status');
 
-function createR1Jobs(store, options = {}) {
+function createDevelopmentJobs(store, options = {}) {
   const dependencies = options.autopilotDependencies || {};
   const load = dependencies.loadProjectConfig || loadProjectConfig;
   const discover = dependencies.discoverReadyIssues || discoverReadyIssues;
@@ -101,12 +101,12 @@ function createR1Jobs(store, options = {}) {
   });
 
   function submit(body) {
-    if (!Number.isSafeInteger(body.issue) || body.issue < 1) throw new Error('R1 submission requires a positive issue number.');
+    if (!Number.isSafeInteger(body.issue) || body.issue < 1) throw new Error('Development-job submission requires a positive issue number.');
     if (Object.hasOwn(body, 'cwd') || Object.hasOwn(body, 'projectPath')) throw new Error('R1 paths come from owner configuration.');
     const scope = resolveProject(store.config, body.project, undefined, store.paths.config);
     const project = load(body.project);
     if (!project.enabled || project.worker !== 'codex' || !['always', 'risk'].includes(project.reviewPolicy)) {
-      throw new Error('R1 async jobs require an enabled Codex project with independent review required.');
+      throw new Error('Development jobs require an enabled Codex project with independent review required.');
     }
     if (fs.realpathSync(project.checkout) !== scope.cwd) throw new Error('R1 checkout does not match the registered project.');
     const planned = deriveWorktreePath(project, { number: body.issue, title: body.title || 'Queued issue' });
@@ -114,7 +114,7 @@ function createR1Jobs(store, options = {}) {
     const named = entry && typeof entry === 'object' && Object.entries(entry.worktrees)
       .find(([name, candidate]) => candidate === planned && (body.worktree === undefined || name === body.worktree));
     const managed = !named && body.worktree === undefined && managesWorktree(entry, planned);
-    if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before R1 submission.');
+    if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before development-job submission.');
     // New jobs may reserve a not-yet-created worktree. If the path already
     // exists, validate the actual Git repository identity before admission;
     // a different repository can occupy an otherwise authorized directory.
@@ -571,4 +571,4 @@ function createR1Jobs(store, options = {}) {
   return { submit, advance, admit, recover, read, stop, cancel };
 }
 
-module.exports = { createR1Jobs };
+module.exports = { createDevelopmentJobs };

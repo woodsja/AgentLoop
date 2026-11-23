@@ -8,8 +8,8 @@ const tools = require('../src/tools');
 
 test('the MCP tool interface offers exactly one development-job submission', async () => {
   const names = tools.tools.map(tool => tool.name);
-  assert.ok(names.includes('submit_r1_job'));
-  for (const obsolete of ['dispatch_task', 'submit_job', 'ralph_run_task', 'start_loop']) {
+  assert.ok(names.includes('submit_development_job'));
+  for (const obsolete of ['dispatch_task', 'submit_job', 'ralph_run_task', 'start_loop', 'submit_r1_job', 'get_r1_job_status', 'get_r1_job_result']) {
     assert.equal(names.includes(obsolete), false, obsolete + ' is a competing execution interface');
     const denied = await tools.callTool({ name: obsolete, arguments: { project: 'demo', issue: 5 } });
     assert.equal(denied.isError, true);
@@ -89,22 +89,22 @@ test('job tools read compact status and completed result without worker-private 
   }
 });
 
-test('R1 admission remains separate from historical read-only job tools', async () => {
+test('development-job admission remains separate from historical read-only job tools', async () => {
   const calls = [];
   const daemonRequest = async (requestPath, body) => {
     calls.push({ requestPath, body });
     return body ? { statusCode: 201, value: { id: 't-0000r1' } } : { statusCode: 200, value: { id: 't-0000r1', phase: 'review' } };
   };
-  const submitted = await tools.callTool({ name: 'submit_r1_job', arguments: { project: 'demo', issue: 7, worktree: 'issue7' } }, { daemonRequest });
-  const status = await tools.callTool({ name: 'get_r1_job_status', arguments: { id: 't-0000r1' } }, { daemonRequest });
+  const submitted = await tools.callTool({ name: 'submit_development_job', arguments: { project: 'demo', issue: 7, worktree: 'issue7' } }, { daemonRequest });
+  const status = await tools.callTool({ name: 'get_development_job_status', arguments: { id: 't-0000r1' } }, { daemonRequest });
 
   assert.deepEqual(calls, [
-    { requestPath: '/api/r1/jobs', body: { project: 'demo', issue: 7, worktree: 'issue7', source: 'mcp' } },
-    { requestPath: '/api/r1/jobs/t-0000r1', body: undefined },
+    { requestPath: '/api/development/jobs', body: { project: 'demo', issue: 7, worktree: 'issue7', source: 'mcp' } },
+    { requestPath: '/api/development/jobs/t-0000r1', body: undefined },
   ]);
   assert.deepEqual(submitted.structuredContent, { id: 't-0000r1' });
   assert.deepEqual(status.structuredContent, { id: 't-0000r1', phase: 'review' });
-  const canonical = tools.tools.find((tool) => tool.name === 'submit_r1_job');
+  const canonical = tools.tools.find((tool) => tool.name === 'submit_development_job');
   assert.deepEqual(canonical.inputSchema.required, ['project', 'issue']);
   assert.equal(Object.hasOwn(canonical.inputSchema.properties, 'prompt'), false);
   assert.deepEqual(canonical.inputSchema.properties.worktree, { type: 'string' });

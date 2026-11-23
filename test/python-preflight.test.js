@@ -84,7 +84,7 @@ for (const mode of ['verification_unavailable', 'timeout', 'cancelled']) {
     assert.equal((await prepareRepositoryEnvironment(root, { runtime: 'python' })).baseline.passed, true);
   });
 }
-const { createR1Jobs } = require('../src/r1-jobs');
+const { createDevelopmentJobs } = require('../src/development-jobs');
 const { configuredProjects } = require('../src/project-registry');
 const { createJobStore } = require('../src/autopilot-state');
 for (const mode of ['red-tests', 'missing-lock', 'restart-dead', 'restart-ambiguous']) {
@@ -126,7 +126,7 @@ for (const mode of ['red-tests', 'missing-lock', 'restart-dead', 'restart-ambigu
       } }),
       reviewPullRequest: async () => assert.fail('failed checks cannot reach review'),
     };
-    const jobs = createR1Jobs(store, { autopilotDependencies: deps });
+    const jobs = createDevelopmentJobs(store, { autopilotDependencies: deps });
     const task = jobs.submit({ project: 'demo', issue: 1 }); store.moveTask(task.id, 'pending', 'running'); jobs.advance(task);
     const deadline = Date.now() + 15000;
     while (!stages.done.has(task.id)) { assert.ok(Date.now() < deadline, 'R1 fixture completes'); await new Promise(resolve => setTimeout(resolve, 20)); }
@@ -145,7 +145,7 @@ for (const mode of ['red-tests', 'missing-lock', 'restart-dead', 'restart-ambigu
       assert.equal(result.evidence.verification, null);
       assert.equal(result.evidence.review, null);
     }
-    assert.deepEqual(createR1Jobs(store, { autopilotDependencies: deps }).read(task.id), result);
+    assert.deepEqual(createDevelopmentJobs(store, { autopilotDependencies: deps }).read(task.id), result);
     const state = createJobStore(project.stateDir);
     assert.equal(state.load(1).environmentProcess ?? null, null);
     if (mode.startsWith('restart-')) {
@@ -156,7 +156,7 @@ for (const mode of ['red-tests', 'missing-lock', 'restart-dead', 'restart-ambigu
       prior.environmentProcess = mode === 'restart-dead' ? { pid: 99999999, startTime: '1' } : { pid: null, startTime: null };
       state.save(prior);
       store.moveTask(task.id, 'done', 'running');
-      const restarted = createR1Jobs(store, { autopilotDependencies: deps });
+      const restarted = createDevelopmentJobs(store, { autopilotDependencies: deps });
       restarted.recover(store.readTask(task.id, 'running'));
       store.moveTask(task.id, 'pending', 'running'); restarted.advance(store.readTask(task.id, 'running'));
       const restartDeadline = Date.now() + 15000;

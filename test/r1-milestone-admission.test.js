@@ -42,7 +42,7 @@ async function fixture(t, fixedManifest = false) {
   return { root, options, request, issue, run, approve, writes, events, db };
 }
 
-const { createR1Jobs } = require('../src/r1-jobs');
+const { createDevelopmentJobs } = require('../src/development-jobs');
 const { configuredProjects } = require('../src/project-registry');
 async function r1Fixture(t, fixedManifest = false) {
   const f = await fixture(t, fixedManifest);
@@ -63,7 +63,7 @@ async function r1Fixture(t, fixedManifest = false) {
     moveTask(id, from, to) { const task = store.readTask(id, from); tasks[from] = tasks[from].filter(x => x.id !== id); tasks[to].push(task); },
   };
   const deps = { loadProjectConfig: () => project, execFile: f.options.execFile, discoverReadyIssues: async () => [f.issue] };
-  const jobs = createR1Jobs(store, { projectsPath: f.options.projectsPath, admitIntervalMs: 0,
+  const jobs = createDevelopmentJobs(store, { projectsPath: f.options.projectsPath, admitIntervalMs: 0,
     autopilotDependencies: deps });
   return { ...f, project, tasks, events, store, jobs, deps };
 }
@@ -160,7 +160,7 @@ for (const [change, fixedManifest] of ['none', 'revoked', 'expired', 'edited', '
         const before = [...f.events];
         const preview = await grantCommand('resume', 'g1', f.options);
         await grantCommand('resume', 'g1', { ...f.options, digest: preview.digest });
-        const resumed = createR1Jobs(f.store, { projectsPath: f.options.projectsPath, autopilotDependencies: f.deps });
+        const resumed = createDevelopmentJobs(f.store, { projectsPath: f.options.projectsPath, autopilotDependencies: f.deps });
         resumed.recover(f.store.readTask(task.id, 'running'));
         f.store.moveTask(task.id, 'pending', 'running');
         resumed.advance(f.store.readTask(task.id, 'running'));

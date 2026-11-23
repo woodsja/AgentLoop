@@ -33,7 +33,7 @@ function markup(html) {
 test('dashboard offers only the canonical development-job submission', () => {
   assert.match(publicHtml, /<form id="jobForm"/);
   assert.match(publicHtml, /<input id="jobIssue" type="number" min="1" required/);
-  assert.ok(publicHtml.includes("post('/api/r1/jobs', {project, issue})"));
+  assert.ok(publicHtml.includes("post('/api/development/jobs', {project, issue})"));
   for (const legacy of ['taskForm','loopForm','/api/dispatch','/api/loop']) {
     assert.equal(publicHtml.includes(legacy), false, 'legacy admission persists: ' + legacy);
   }
@@ -49,7 +49,7 @@ test('Dashboard sources compile and stay aligned', () => {
   assert.match(publicHtml, /<form id="jobForm"/);
   assert.match(publicHtml, /<select id="jobProject" required disabled>/);
   assert.match(publicHtml, /<input id="jobIssue" type="number" min="1" required/);
-  assert.ok(publicHtml.includes("post('/api/r1/jobs', {project, issue})"));
+  assert.ok(publicHtml.includes("post('/api/development/jobs', {project, issue})"));
   assert.match(publicHtml, /fetch\('\/api\/projects', \{cache: 'no-store'\}\)/);
   assert.doesNotMatch(publicHtml, /body\.cwd = project/);
   assert.match(publicHtml, /<link rel="icon" type="image\/png"/);
@@ -108,7 +108,7 @@ test('decision status drawer renders owner records as inert text without changin
   vm.createContext(context); vm.runInContext(source.slice(start, end), context);
   let mounted;
   await context.mountDecisionStatus({ prepend: value => { mounted = value; } }, context.drawerTaskId);
-  assert.equal(route, '/api/r1/jobs/t-1234abcd');
+  assert.equal(route, '/api/development/jobs/t-1234abcd');
   assert.equal(mounted, section);
   assert.match(section.innerHTML, /Decision #15/); assert.match(section.innerHTML, /implementation #10/);
   assert.match(section.innerHTML, /not_checked/); assert.match(section.innerHTML, /&lt;script&gt;/);
