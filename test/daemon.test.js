@@ -134,8 +134,10 @@ test('retired pending direct tasks are closed without launching a worker', async
     assert.equal(result.status, 200);
     assert.equal(result.body.result.reason, 'legacy_execution_retired');
     assert.equal(isolated.store.listTasks('running').length, 0);
-    const archived = isolated.store.readExecutionBytes(pending.id, 0, 262144);
-    assert.match(Buffer.from(archived.base64, 'base64').toString('utf8'), /legacy_job_terminal/);
+    await assertRetiredArchive(isolated, server, pending.id, Buffer.alloc(0), {
+      status: 'failed', reason: 'legacy_execution_retired',
+      summary: 'Legacy execution admission retired. No worker or loop was started.', stage: 'pending',
+    });
 
     // A pre-upgrade classic loop is terminalized without executing either engine.
     const oldLoop = isolated.store.enqueueTask({ type: 'loop', project: 'demo', projectPath: project, engine: 'codex', maxCycles: 1 });
@@ -150,6 +152,106 @@ test('retired pending direct tasks are closed without launching a worker', async
     isolated.restore();
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+// Inspect the durable archive and the same result/logs exposed to operators.
+async function assertRetiredArchive(isolated, server, id, before, { status, reason, summary, stage }) {
+  const done = isolated.store.readTask(id, 'done');
+  const response = await requestJson(server, 'GET', `/api/jobs/${id}`);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.status, status);
+  for (const record of [done, response.body.result]) {
+    assert.equal(record.status, status);
+    assert.equal(record.reason, reason);
+    assert.equal(record.summary, summary);
+    assert.ok(record.finishedAt);
+  }
+  assert.equal(done.finishedAt, response.body.result.finishedAt);
+  const raw = await requestBytes(server, `/api/log/${id}?download=1`);
+  assert.equal(raw.status, 200);
+  assert.deepEqual(raw.bytes.subarray(0, before.length), before);
+  const terminal = raw.bytes.toString('utf8').trim().split('\n').map(JSON.parse)
+    .filter(event => event.event === 'legacy_job_terminal');
+  assert.equal(terminal.length, 1);
+  assert.deepEqual({ status: terminal[0].status, reason: terminal[0].reason, summary: terminal[0].summary, stage: terminal[0].stage },
+    { status, reason, summary, stage });
+  const logs = await requestJson(server, 'GET', `/api/log/${id}`);
+  assert.ok(logs.body.lines.includes(summary));
+}
+
+test('HTTP cancellation archives a previously running legacy job as cancelled with truthful evidence', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-retired-cancel-'));
+  const isolated = isolatedDaemon({ dashboardPort: 0 }, directory);
+  const { daemon: d, store: s } = isolated;
+  d.testing.initializeRuntime();
+  const server = d.createHttpServer();
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  if (!await listenHttp(t, server)) return;
+  const task = s.enqueueTask({ status: 'running', startedAt: new Date().toISOString(), prompt: 'Previously running legacy job' });
+  s.moveTask(task.id, 'pending', 'running');
+  s.appendExecution(task.id, { event: 'output', role: 'worker', stream: 'stdout', base64: Buffer.from('original worker output\n').toString('base64') });
+  const before = fs.readFileSync(s.executionPath(task.id));
+  assert.equal((await requestJson(server, 'POST', '/api/cancel', { id: task.id })).status, 200);
+  await assertRetiredArchive(isolated, server, task.id, before, {
+    status: 'cancelled', reason: 'cancelled', summary: 'Owner cancelled the legacy job. It will not be replayed.', stage: 'running',
+  });
+  assert.equal((await requestJson(server, 'POST', '/api/cancel', { id: task.id })).status, 404);
+  assert.deepEqual(s.listTasks('running'), []);
+  assert.equal(fs.readFileSync(s.executionPath(task.id), 'utf8').split('\n').filter(line => line.includes('legacy_job_terminal')).length, 1);
+});
+
+test('HTTP parent cancellation archives a pending historical child consistently without starting it', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-retired-child-cancel-'));
+  const isolated = isolatedDaemon({ dashboardPort: 0 }, directory);
+  const { daemon: d, store: s } = isolated;
+  d.testing.initializeRuntime({ r1: { autopilotDependencies: { loadProjectConfig: () => assert.fail('cancellation must not launch an executor') } } });
+  const server = d.createHttpServer();
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  if (!await listenHttp(t, server)) return;
+  const parent = s.enqueueTask({ workflow: 'r1', project: 'demo', repo: 'owner/demo', issue: 5,
+    autopilotStateDir: path.join(directory, 'jobs'), status: 'running' });
+  s.moveTask(parent.id, 'pending', 'running');
+  const attempt = 1;
+  const hash = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
+  const id = `t-${hash(`${parent.id}:${attempt}`).slice(0, 24)}`;
+  // A genuine pre-upgrade child reservation and its matching pending record.
+  const stable = { project: 'demo', projectPath: directory, source: 'r1', engine: 'codex',
+    workerEngine: 'codex', criticEngine: 'claude', autoCommit: false, maxCycles: 3, taskRetries: 3,
+    r1Child: { parentJobId: parent.id, attempt, issue: 5 } };
+  s.writeTask({ id, type: 'loop', status: 'pending', ...stable }, 'pending');
+  const indexDir = path.join(s.paths.state, 'r1-child-index', parent.id);
+  fs.mkdirSync(indexDir, { recursive: true });
+  const index = path.join(indexDir, 'attempt-1.json');
+  fs.writeFileSync(index, JSON.stringify({ schemaVersion: 1, parentJobId: parent.id, attempt, id, fingerprint: hash(JSON.stringify(stable)) }));
+  const reservation = fs.readFileSync(index);
+  assert.equal((await requestJson(server, 'POST', '/api/cancel', { id: parent.id })).status, 200);
+  await assertRetiredArchive(isolated, server, id, Buffer.alloc(0), {
+    status: 'cancelled', reason: 'parent_cancelled', summary: 'Owner cancelled the parent job before this pending legacy child started.', stage: 'pending',
+  });
+  assert.deepEqual(fs.readFileSync(index), reservation);
+  assert.equal(s.readTask(parent.id, 'running').cancelRequested, true);
+  assert.deepEqual(s.listTasks('pending'), []);
+});
+
+test('graceful shutdown archives previously running legacy work without misrepresenting its history', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-retired-shutdown-'));
+  const isolated = isolatedDaemon({ dashboardPort: 0 }, directory);
+  const { daemon: d, store: s } = isolated;
+  d.testing.initializeRuntime();
+  const server = d.createHttpServer();
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); d.resetStopping(); isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  if (!await listenHttp(t, server)) return;
+  const task = s.enqueueTask({ status: 'running', startedAt: new Date().toISOString(), prompt: 'Interrupted legacy work' });
+  s.moveTask(task.id, 'pending', 'running');
+  s.appendExecution(task.id, { event: 'output', role: 'worker', stream: 'stdout', base64: Buffer.from('original worker output\n').toString('base64') });
+  const before = fs.readFileSync(s.executionPath(task.id));
+  let exitCode;
+  await d.stop(code => { exitCode = code; });
+  assert.equal(exitCode, 0);
+  await assertRetiredArchive(isolated, server, task.id, before, {
+    status: 'failed', reason: 'daemon_shutdown', summary: 'Daemon shut down before the legacy task finished.', stage: 'running',
+  });
+  assert.deepEqual(s.listTasks('running'), []);
 });
 
 test('a disappearing pre-upgrade queue record cannot starve other retired jobs', () => {
@@ -199,6 +301,15 @@ test('restart archives an interrupted historical direct task without replay or l
     assert.equal(done.reason, 'daemon_restarted');
     const result = JSON.parse(fs.readFileSync(path.join(isolated.store.paths.results, legacy.id + '.json'), 'utf8'));
     assert.equal(result.reason, 'daemon_restarted');
+    assert.equal(done.summary, 'Daemon restarted before the legacy job finished. The retired job will not be replayed.');
+    assert.equal(result.summary, done.summary);
+    const terminal = fs.readFileSync(isolated.store.executionPath(legacy.id), 'utf8').trim().split('\n').map(JSON.parse)
+      .filter(entry => entry.event === 'legacy_job_terminal');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0].summary, done.summary);
+    assert.equal(terminal[0].status, 'failed');
+    assert.equal(terminal[0].reason, 'daemon_restarted');
+    assert.ok(isolated.store.readLogLines(legacy.id).includes(done.summary));
     assert.equal(isolated.store.listTasks('running').length, 0);
     assert.equal(isolated.store.listTasks('pending').length, 0);
     const after = fs.readFileSync(isolated.store.executionPath(legacy.id));
@@ -711,4 +822,21 @@ test('historical child with unknown process ownership remains held and inspectab
   }, { writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); } }));
   assert.equal(response.status, 200); assert.equal(response.body.status, 'running'); assert.equal(response.body.id, child.id);
   assert.equal(response.body.result, undefined, 'unknown process exit cannot invent a terminal result');
+  const cancelServer = d.createHttpServer();
+  try {
+    if (!await listenHttp(t, cancelServer)) return;
+    const cancelled = await requestJson(cancelServer, 'POST', '/api/cancel', { id: child.id });
+    assert.equal(cancelled.status, 503);
+    assert.match(cancelled.body.error, /not been confirmed stopped/);
+    assert.equal(s.readTask(child.id, 'running').status, 'running');
+    assert.equal((await requestJson(cancelServer, 'GET', `/api/jobs/${child.id}`)).body.result, undefined);
+    assert.deepEqual(s.listTasks('done'), []);
+    assert.deepEqual(fs.readFileSync(s.executionPath(child.id)).subarray(0, before.length), before);
+    assert.equal(fs.readFileSync(s.executionPath(child.id), 'utf8').includes('legacy_job_terminal'), false);
+    await d.stop(() => {});
+    assert.equal(s.readTask(child.id, 'running').status, 'running', 'shutdown also holds unconfirmed process ownership');
+    assert.deepEqual(s.listTasks('done'), []);
+  } finally {
+    await new Promise(resolve => cancelServer.close(resolve));
+  }
 });

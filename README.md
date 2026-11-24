@@ -48,7 +48,7 @@ The engine layer came later. Nothing in the daemon is tied to one CLI: `src/engi
 
 ## Independent evaluation
 
-The reproducible [query parser evaluation](examples/query-parser) asked for the full repair in one pass. Cycle 1 produced nine passing tests, but a fresh critic found a mixed percent-decoding defect and returned FAIL. Cycle 2 fixed it, added regression coverage, passed 11 tests, and received PASS from a new critic.
+The historical [query parser evaluation](examples/query-parser) asked for the full repair in one pass. Cycle 1 produced nine passing tests, but a fresh critic found a mixed percent-decoding defect and returned FAIL. Cycle 2 fixed it, added regression coverage, passed 11 tests, and received PASS from a new critic.
 
 [Read the evaluation record](docs/evaluation.md).
 
@@ -58,7 +58,7 @@ Requirements:
 
 - Node.js 18 or newer
 - Git
-- At least one engine CLI installed and authenticated, found on `PATH` or through an `enginePaths` override. Codex CLI (`codex`) has no version floor; Claude Code (`claude`) needs 2.1.169 or newer, the release that added the `--safe-mode` flag it is launched with
+- Codex and Claude Code CLIs installed and authenticated for the worker and independent critic, found on `PATH` or through `enginePaths` overrides. Codex CLI (`codex`) has no version floor; Claude Code (`claude`) needs 2.1.169 or newer, the release that added the `--safe-mode` flag it is launched with
 
 Windows:
 
@@ -68,7 +68,7 @@ cd AgentLoop
 node src\daemon.js
 ```
 
-Open `http://127.0.0.1:5757`. Select **+ New loop**, point **Project folder** at a folder containing `PLAN.md`, pick an **Engine**, then select **Start loop**. No dependency install is required.
+Open `http://127.0.0.1:5757`. After the owner has registered and activated a project and authorized an exact ready-labeled GitHub issue, select **New job**, choose the registered project, and enter the issue number. The same development job can be submitted through MCP `submit_development_job` or `POST /api/development/jobs`. No dependency install is required.
 
 ## Connect a chat client
 
@@ -188,7 +188,7 @@ The AgentLoop daemon has a separate `agentloop.service`; it is not a timer and d
 }
 ```
 
-With no valid `allowedProjects` entries, job and loop submission remains denied. The service installer never registers projects and never supplies a paid-engine fallback; install and authenticate the Codex or Claude CLI you intend to use first.
+With no valid `allowedProjects` entries, development-job submission remains denied. The service installer never registers projects and never supplies a paid-engine fallback; install and authenticate both the Codex worker and Claude critic CLIs first.
 
 Preview the exact user unit (the safe default):
 
@@ -220,9 +220,9 @@ macOS and Linux use the equivalent command:
 node src/daemon.js
 ```
 
-On every platform, install and authenticate at least one engine CLI first. The daemon and bridge bind to loopback addresses, so a tunnel is required for a hosted connector.
+On every platform, install and authenticate both the Codex worker and Claude critic CLIs first. The daemon and bridge bind to loopback addresses, so a tunnel is required for a hosted connector.
 
-On Windows, pressing Ctrl-C in the console gracefully finalizes running loops because it raises SIGINT. Scripted process termination (`process.kill` with SIGTERM) on Windows terminates immediately without running shutdown handlers; if terminated this way, restart recovery finalizes interrupted tasks on the next startup.
+On Windows, pressing Ctrl-C in the console requests graceful daemon shutdown because it raises SIGINT. Scripted process termination (`process.kill` with SIGTERM) on Windows terminates immediately without running shutdown handlers; if terminated this way, restart recovery reconciles interrupted jobs on the next startup. Unknown process ownership remains fail-closed.
 
 ## Roadmap
 

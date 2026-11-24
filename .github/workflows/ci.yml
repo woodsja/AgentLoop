@@ -1,10 +1,13 @@
 name: CI
 
-# Authoritative pass/fail check for pull requests into main and ralph-dev. Ralph's
-# autopilot waits on the Actions runs for the delivered head commit.
+# Authoritative pass/fail check for pull requests into main and ralph-dev, and
+# integrated commits pushed to ralph-dev. Ralph's autopilot waits on the Actions
+# runs for the delivered head commit.
 on:
   pull_request:
     branches: [main, ralph-dev]
+  push:
+    branches: [ralph-dev]
 
 permissions:
   contents: read
