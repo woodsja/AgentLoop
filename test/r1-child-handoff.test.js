@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { createJob, createJobStore } = require('../src/autopilot-state');
 const { configuredProjects } = require('../src/project-registry');
 const { createR1ChildHandoff } = require('../src/r1-child-handoff');
 const { createR1ChildStore } = require('../src/r1-child-store');
@@ -34,6 +35,7 @@ function fixture(t) {
     r1: { project: 'demo', issue: { number: 65, title: 'Feature' }, worktreePath: issuePath,
       workspaceState: 'prepared', status: 'running', runs: 1, terminal: false },
   };
+  parent.autopilotStateDir = path.join(root, 'jobs');
   const tasks = [];
   const durable = createR1ChildStore({ stateRoot: root, writeTask: (child, stage) => {
     const folder = path.join(root, 'tasks', stage);
@@ -44,7 +46,7 @@ function fixture(t) {
   const store = {
     paths: { config: configPath },
     config: { allowedProjects: configuredProjects({ demo: { root: checkout, worktreeRoot } }, configPath) },
-    readTask: (id, stage) => { if (id !== parent.id || stage !== 'running') throw new Error('not found'); return structuredClone(parent); },
+    readTask: (id, stage) => { if (id !== parent.id || stage !== 'running') throw new Error('not found'); if (parent.autopilotStateDir) createJobStore(parent.autopilotStateDir).save({ ...createJob({ projectName: 'demo', repo: 'example/repo', issue: { number: 65, title: 'Feature' }, branch: 'issue-65', worktreePath: issuePath, now: () => new Date().toISOString() }), ...parent.r1, r1ParentJobId: parent.id }); return structuredClone(parent); },
     ...{ enqueueR1ChildLoopOnce: durable.ensureLoop, listR1ChildLoops: durable.listChildren },
     writeTask: (task, stage) => { if (stage === 'running') Object.assign(parent, structuredClone(task)); },
   };
@@ -77,9 +79,11 @@ test('rejects missing, completed, mismatched and unauthorized parent without cre
   f.parent.status = 'done';
   assert.throws(() => f.create().ensure(f.parent.id), /not eligible/);
   f.parent.status = 'running';
-  f.parent.r1.issue.number = 17;
-  assert.throws(() => f.create().ensure(f.parent.id), /not active/);
-  f.parent.r1.issue.number = 65;
+  // Mismatch the queue identity, not the retired task.r1 preview: the
+  // canonical issue record must not authorize a different parent issue.
+  f.parent.issue = 17;
+  assert.throws(() => f.create().ensure(f.parent.id), /does not belong to this parent/);
+  f.parent.issue = 65;
   f.parent.r1.worktreePath = f.root;
   assert.throws(() => f.create().ensure(f.parent.id), /authorized managed issue worktree/);
   assert.equal(f.tasks.length, 0);

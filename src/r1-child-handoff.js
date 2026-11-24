@@ -3,6 +3,7 @@
 // Internal R1-only seam. Owner configuration selects the working directory;
 // callers cannot supply a project, path, or other filesystem authority.
 const fs = require('node:fs');
+const { createJobStore } = require('./autopilot-state');
 const path = require('node:path');
 const { resolveWorkerScope, resolveProject, managesWorktree } = require('./project-registry');
 const { deriveWorktreePath } = require('./autopilot-workspace');
@@ -21,6 +22,9 @@ function createR1ChildHandoff({ store, loadProject, configPath = store?.paths?.c
     const parent = store.readTask(parentJobId, 'running');
     if (parent.id !== parentJobId || parent.workflow !== 'r1' || parent.status !== 'running'
       || !Number.isSafeInteger(parent.issue) || parent.issue < 1) throw new Error('R1 parent job is not eligible.');
+    if (!parent.autopilotStateDir) throw new Error('Historical R1 parent is read-only; canonical checkpoint required.');
+    Object.defineProperty(parent, 'r1', { enumerable: false,
+      value: createJobStore(parent.autopilotStateDir).load(parent.issue, parent.id) });
     const job = parent.r1;
     if (!job || job.terminal || job.project !== parent.project || job.issue?.number !== parent.issue
       || job.status !== 'running' || job.workspaceState !== 'prepared'

@@ -67,6 +67,15 @@ async function r1Fixture(t, fixedManifest = false) {
     autopilotDependencies: deps });
   return { ...f, project, tasks, events, store, jobs, deps };
 }
+async function settled(f) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const job = require('../src/autopilot-state').createJobStore(f.project.stateDir).load(106);
+    if (job?.terminal || job?.authorizationBlocked) { await new Promise(resolve => setImmediate(resolve)); return; }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('Delivery did not settle at its canonical checkpoint.');
+}
 test('manual R1 submit and discovery reject ready labels without receipts durably', async t => {
   const f = await r1Fixture(t);
   await assert.rejects(async () => f.jobs.submit({ project: 'demo', issue: 106 }), /milestone.*receipt/i);
@@ -81,9 +90,9 @@ test('authorized submit progresses; queued recovery rechecks revocation without 
   f.jobs.recover(task);
   const db = f.db(); db.grants.g1.state = 'revoked'; fs.writeFileSync(path.join(f.root, 'milestone-grants.json'), JSON.stringify(db));
   f.store.moveTask(task.id, 'pending', 'running');
-  f.jobs.advance(f.store.readTask(task.id, 'running')); await f.jobs.stop(() => {});
+  f.jobs.advance(f.store.readTask(task.id, 'running')); await settled(f);
   assert.equal(f.tasks.done.length, 0);
-  assert.match(f.tasks.running[0].authorizationBlocked.message, /revoked/i);
+  assert.match(require('../src/autopilot-state').createJobStore(f.project.stateDir).load(106).authorizationBlocked.message, /revoked/i);
   assert.ok(f.events.some(e => e.event === 'recovery' || e.type === 'recovery'));
 });
 
@@ -132,16 +141,16 @@ for (const [change, fixedManifest] of ['none', 'revoked', 'expired', 'edited', '
       cleanupIssueWorkspace: async () => {},
       createRalphTaskService: () => { throw new Error('must not restart the worker'); },
     });
-    f.jobs.advance(f.store.readTask(task.id, 'running')); await f.jobs.stop(() => {});
+    f.jobs.advance(f.store.readTask(task.id, 'running')); await settled(f);
     const saved = original.load(106);
     assert.equal(reviews, 1, JSON.stringify({ events: f.events, tasks: f.tasks, saved }));
     assert.equal(saved.review.verdict, 'PASS'); assert.equal(saved.ci.state, 'green');
     assert.equal(saved.verification.stdout, 'complete evidence');
     assert.equal(merges, change === 'none' ? 1 : 0);
-    if (change === 'none') assert.equal(f.tasks.done[0].status, 'merged');
+    if (change === 'none') assert.equal(f.jobs.read(task.id).status, 'merged');
     else {
       assert.equal(f.tasks.done.length, 0, 'authorization hold retains resumable queue work');
-      assert.ok(f.tasks.running[0].r1.authorizationBlocked);
+      assert.ok(saved.authorizationBlocked);
       assert.equal(f.tasks.running[0].cleanup, undefined, 'authorization holds retain work and labels');
       assert.ok(saved.failures.some(x => x.phase === 'authorization'));
       let cleanups = 0;
@@ -154,8 +163,11 @@ for (const [change, fixedManifest] of ['none', 'revoked', 'expired', 'edited', '
         const resumed = createR1Jobs(f.store, { projectsPath: f.options.projectsPath, autopilotDependencies: f.deps });
         resumed.recover(f.store.readTask(task.id, 'running'));
         f.store.moveTask(task.id, 'pending', 'running');
-        resumed.advance(f.store.readTask(task.id, 'running')); await resumed.stop(() => {});
-        assert.equal(f.tasks.done[0].status, 'merged'); assert.equal(merges, 1); assert.equal(reviews, 1);
+        resumed.advance(f.store.readTask(task.id, 'running'));
+        const deadline = Date.now() + 5000;
+        while (!original.load(106).terminal && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(original.load(106).terminal, true, 'resume must complete within five seconds');
+        assert.equal(f.jobs.read(task.id).status, 'merged'); assert.equal(merges, 1); assert.equal(reviews, 1);
         assert.deepEqual(f.events.slice(0, before.length), before, 'restart preserves original transcript records');
       }
     }
@@ -220,8 +232,11 @@ test('a reserved mixed implementation child rechecks the milestone before queue 
   git(['init', '-b', 'main']); git(['-c', 'user.name=Fixture', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'Initial']);
   const worktree = require('../src/autopilot-workspace').deriveWorktreePath(f.project, f.issue);
   git(['worktree', 'add', '-b', 'ralph/issue-106', worktree]);
-  task.status = 'running'; task.r1 = { issue: { number: 106, title: f.issue.title }, project: 'demo', status: 'running',
+  task.status = 'running'; const active = { issue: { number: 106, title: f.issue.title }, project: 'demo', status: 'running',
     runs: 1, terminal: false, workspaceState: 'prepared', worktreePath: worktree };
+  const jobState = require('../src/autopilot-state');
+  const durable = jobState.createJobStore(f.project.stateDir);
+  durable.save({ ...jobState.createJob({ projectName: 'demo', repo: f.project.repo, issue: f.issue, branch: 'ralph/issue-106', worktreePath: worktree, now: durable.now }), ...active, r1ParentJobId: task.id });
   f.store.writeTask(task, 'running');
   const child = { id: 't-0000bcde', type: 'loop', source: 'r1', project: 'demo', projectPath: worktree,
     workerEngine: 'codex', criticEngine: 'claude', engine: 'codex', r1Child: { parentJobId: task.id, attempt: 1, issue: 106 } };
@@ -250,9 +265,9 @@ test('a queued R1 job cannot switch to a replacement receipt after submission', 
   for (const event of grant.ticketEvents) if (event.receiptId === prior) event.receiptId = replacement;
   fs.writeFileSync(path.join(f.root, 'milestone-grants.json'), JSON.stringify(db));
   f.store.moveTask(task.id, 'pending', 'running');
-  f.jobs.advance(f.store.readTask(task.id, 'running')); await f.jobs.stop(() => {});
+  f.jobs.advance(f.store.readTask(task.id, 'running')); await settled(f);
   assert.equal(f.tasks.done.length, 0);
-  assert.match(f.tasks.running[0].authorizationBlocked.message, /receipt changed/);
+  assert.match(require('../src/autopilot-state').createJobStore(f.project.stateDir).load(106).authorizationBlocked.message, /receipt changed/);
 });
 test('expiration during the final GitHub read fails closed', async t => {
   const f = await r1Fixture(t); await f.approve(); await f.run('release');

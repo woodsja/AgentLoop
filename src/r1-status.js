@@ -1,4 +1,5 @@
 'use strict';
+const { deliveryPhase } = require('./autopilot-state');
 
 // Preserve owner-visible evidence; sanitize only the new CI display fields.
 // Owner text is verbatim, with escaping left to the rendering layer.
@@ -66,6 +67,7 @@ function evidence(job, configuredWorkflow) {
   return job && {
     outcome: job.terminalState || job.status,
     commit: job.delivery && job.delivery.commit,
+    updatedAt: job.updatedAt,
     verification: job.verification && { ...job.verification },
     ci: ciProjection(job, configuredWorkflow),
     review: job.review?.commit === job.delivery?.commit ? review(job.review) : null,
@@ -74,6 +76,9 @@ function evidence(job, configuredWorkflow) {
     architectureDecision: job.architectureDecision,
     architectureDecisionHistory: job.architectureDecisionHistory || [],
     environmentPreflight: job.environmentPreflight,
+    ownershipBlocked: job.ownershipBlocked,
+    cancelRequested: job.cancelRequested,
+    outcomeActions: job.outcomeActions,
     reviewAttempts: job.reviewAttempts,
     reviewPreparationHistory: job.reviewPreparationHistory || [],
     reviewHistory: (job.reviewHistory || []).map(entry => ({ ...entry, reviewer: ownerText(entry.reviewer), findings: review(entry).findings, findingCount: review(entry).findingCount, diagnostics: entry.diagnostics && ownerText(entry.diagnostics) })),
@@ -82,9 +87,11 @@ function evidence(job, configuredWorkflow) {
 }
 
 function nextAction(task, projected) {
+  if (projected?.ownershipBlocked) return { action: 'owner_decision', reason: projected.ownershipBlocked };
+  if (Object.values(projected?.outcomeActions || {}).some(action => !action.ok)) return { action: 'owner_decision', reason: 'Outcome cleanup is incomplete; inspect action attempts and raw journal. Automatic retries are bounded at three.' };
   if (projected?.architectureDecision?.resumeRequested) return { action: 'wait', reason: 'Owner resume requested; awaiting fresh guarded authorization.' };
   if (task.status === 'paused_owner_decision' || projected?.architectureDecision) return { action: 'owner_decision', reason: projected?.architectureDecision?.blockedReason || 'Implementation and guarded merge are paused. Inspect the decision issue, notification status and original logs; prose is not approval.' };
-  if (['passed', 'blocked', 'failed', 'merged', 'needs_specification', 'completed'].includes(task.status)) {
+  if (['passed', 'blocked', 'failed', 'merged', 'needs_specification', 'completed', 'cancelled'].includes(task.status)) {
     return { action: 'none', reason: 'Job finished; inspect the terminal outcome and recorded owner evidence. Merge does not imply deployment.' };
   }
   if (projected?.commit && (task.phase === 'ci' || task.r1?.status === 'awaiting_ci')) {
@@ -92,4 +99,13 @@ function nextAction(task, projected) {
   }
   return { action: 'wait', reason: 'Await the current implementation, verification, review or correction phase.' };
 }
-module.exports = { evidence, nextAction };
+// Presentation only: terminal evidence is decided and persisted by Autopilot.
+function deliveryStatus(job, autonomous = false) {
+  if (!job.terminal) return (job.authorizationBlocked || job.ownershipBlocked) ? 'blocked' : job.status === 'pending' ? 'queued' : 'running';
+  if (job.terminalState === 'paused_owner_decision') return 'paused_owner_decision';
+  if (job.terminalState === 'ready_for_human_merge') return 'passed';
+  if (['merged', 'needs_specification', 'cancelled'].includes(job.terminalState)) return job.terminalState;
+  return autonomous ? 'failed' : 'blocked';
+}
+
+module.exports = { evidence, nextAction, deliveryStatus, deliveryPhase };

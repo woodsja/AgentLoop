@@ -1,0 +1,28 @@
+{
+  "counting_rule": "Physical lines including comments and blank lines in src/**/*.js; no logs, fixtures, docs or tests.",
+  "baseline_ticket03": {
+    "source_modules": 79,
+    "source_lines": 16392,
+    "r1_jobs_lines": 631
+  },
+  "starting_e99b626": {
+    "source_modules": 79,
+    "source_lines": 16718,
+    "r1_jobs_lines": 534
+  },
+  "delivery_coordinators": 1,
+  "active_delivery_state_writers": 1,
+  "active_delivery_checkpoint_copies": 1,
+  "current_candidate": {
+    "source_modules": 79,
+    "source_lines": 16835,
+    "r1_jobs_lines": 575
+  },
+  "delta_since_ticket03": {
+    "source_modules": 0,
+    "source_lines": 443,
+    "r1_jobs_lines": -56,
+    "delivery_coordinators": -1,
+    "active_delivery_checkpoint_copies": -2
+  }
+}

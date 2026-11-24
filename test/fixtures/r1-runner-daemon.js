@@ -28,7 +28,7 @@ require('../../src/daemon').start({ r1: {
   ciPollMs: 100, ciTimeoutMs: fixture.ciTimeoutMs, admitIntervalMs: 100,
   execFile: (command, args, options, callback) => {
     record('commands', [command, ...args]);
-    callback(null, args.includes('--json') ? '{"state":"OPEN"}' : '', '');
+    callback(null, args.includes('--json') ? (args.includes('comments') ? '{"comments":[]}' : '{"state":"OPEN"}') : (command === 'git' && args.includes('rev-parse') ? 'exists' : ''), '');
   },
   autopilotDependencies: {
     loadProjectConfig: () => project,

@@ -78,7 +78,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     await launch();
     // The original line endpoint keeps short navigation labels. Complete raw
     // output is covered through the owner journal in r1-mixed-e2e.test.js.
-    const [inFlight] = await until(() => { const tasks = tasksFor(7); return tasks[0] && tasks[0].phase === 'implementation' && tasks; }, '#7 implementation');
+    const [inFlight] = await until(async () => { const tasks = tasksFor(7); return tasks[0] && (await get(port, `/api/r1/jobs/${tasks[0].id}`)).phase === 'implementation' && tasks; }, '#7 implementation');
     const progress = await get(port, `/api/log/${inFlight.id}?lines=200`);
     assert.deepEqual(Object.keys(progress), ['lines'], 'the established log endpoint response shape is preserved');
     assert.ok(Array.isArray(progress.lines));
@@ -103,6 +103,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.deepEqual(lines(path.join(root, 'closures')), [7]);
     assert.ok(commands().some(c => c.join(' ') === 'gh api --method DELETE repos/example/repo/git/refs/heads/ralph/issue-7-issue-7'));
     assert.ok(commands().some(c => c.join(' ').endsWith('branch -D ralph/issue-7-issue-7')));
+
     assert.ok(!commands().some(c => c[1] === 'pr' && c[2] === 'close'), 'a merged PR is never closed');
     // The CI watcher polls with a bound instead of on every 1.5s daemon tick.
     const ci7 = lines(path.join(root, 'ci')).filter(call => call.number === 7);
@@ -115,8 +116,10 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     assert.equal(unspecified.job.status, 'needs_specification');
     assert.equal((await get(port, `/api/log/${unspecified.task.id}?lines=200`)).lines.filter(line => /terminal outcome: needs_specification/.test(line)).length, 1);
     assert.ok(!lines(path.join(root, 'workers')).includes('issue-8'));
+    assert.ok(unspecified.job.evidence.diagnostics.some(f => /product specification/.test(f.message)));
     assert.ok(commands().some(c => c.join(' ') === 'gh issue edit 8 --repo example/repo --remove-label ready-for-agent --add-label ready-for-human'));
     assert.ok(commands().some(c => c[1] === 'issue' && c[2] === 'comment' && c[3] === '8' && /product specification/.test(c.at(-1))));
+
 
     // FAILED after the bounded review correction: PR closed, branch deleted, nothing merged.
     ready([7, 8, 9]);
@@ -127,6 +130,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     const closed = commands().find(c => c.slice(0, 5).join(' ') === 'gh pr close 9 --repo');
     assert.ok(closed && /outcome FAILED/.test(closed.at(-1)) && !/please review|approve/i.test(closed.at(-1)), 'PR closed with an outcome report, not a review request');
     assert.ok(commands().some(c => c.join(' ').includes('git/refs/heads/ralph/issue-9-issue-9')));
+    assert.ok(rejected.job.evidence.diagnostics.length > 0);
     assert.equal(lines(path.join(root, 'merges')).length, 1);
 
     // FAILED when deterministic verification rejects the implementation.
@@ -142,7 +146,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     ready([10]);
     const stalled = await outcome(10);
     assert.equal(stalled.job.status, 'failed');
-    assert.match(stalled.task.failure, /Required CI did not reach a final result/);
+    assert.ok(stalled.job.evidence.diagnostics.some(failure => /Required CI did not reach a final result/.test(failure.message)));
     assert.equal((await get(port, `/api/log/${stalled.task.id}?lines=200`)).lines.filter(line => /terminal outcome: failed/.test(line)).length, 1);
     assert.equal(lines(path.join(root, 'merges')).length, 1);
 
@@ -151,7 +155,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     recoveryFixture.ciTimeoutMs = 20000;
     fs.writeFileSync(fixture, JSON.stringify(recoveryFixture));
     ready([11]);
-    const [waiting] = await until(() => { const tasks = tasksFor(11); return tasks[0] && tasks[0].phase === 'ci' && tasks; }, '#11 waiting for CI');
+    const [waiting] = await until(async () => { const tasks = tasksFor(11); return tasks[0] && (await get(port, `/api/r1/jobs/${tasks[0].id}`)).phase === 'ci' && tasks; }, '#11 waiting for CI');
     fs.writeFileSync(path.join(root, 'ci-error'), '');
     const unavailable = await until(async () => {
       const job = await get(port, `/api/r1/jobs/${waiting.id}`);
@@ -169,7 +173,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     for (let restart = 0; restart < 2; restart += 1) {
       const died = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await died;
       await launch();
-      if (restart === 0) await until(() => { const tasks = tasksFor(11); return tasks[0] && tasks[0].phase === 'ci'; }, '#11 resumed CI');
+      if (restart === 0) await until(async () => { const tasks = tasksFor(11); return tasks[0] && (await get(port, `/api/r1/jobs/${tasks[0].id}`)).phase === 'ci'; }, '#11 resumed CI');
     }
     assert.equal((await get(port, `/api/r1/jobs/${waiting.id}`)).evidence.ci.category, 'provider_error');
     fs.unlinkSync(path.join(root, 'ci-error'));
@@ -186,7 +190,9 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     for (const event of ['queued for admission', 'admitted to the R1 runner', 'implementation started', 'deterministic verification passed', 'terminal outcome: merged']) {
       assert.equal(recoveredLog.lines.filter(line => line.includes(event)).length, 1, `restart does not duplicate ${event}`);
     }
-    assert.deepEqual(tasksFor(11)[0].r1LogEvents, ['queued', 'admitted', 'implementation', 'verification:1:passed', 'terminal:merged'], 'dedupe events survive the persisted task checkpoint');
+    assert.ok(tasksFor(11)[0].r1LogEvents.includes('verification:1:passed'), 'navigation dedupe remains transport metadata');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(project.stateDir, 'issue-11.json'))).r1LogEvents, undefined);
+    assert.equal(tasksFor(11)[0].r1, undefined);
 
     // Transcript append is best effort at every R1 transition, including
     // admitted, implementation, verification, and terminal completion.
