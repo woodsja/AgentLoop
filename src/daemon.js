@@ -308,11 +308,16 @@ function failUnauthorizedR1Child(child, error) {
 // This is a terminal recovery transition, not a second job coordinator.
 function closeRetiredJob(task, stage, reason = 'legacy_execution_retired') {
   const finishedAt = new Date().toISOString();
-  const summary = reason === 'daemon_shutdown'
-    ? 'Daemon shut down before the legacy task finished.'
-    : 'Legacy execution admission retired. No worker or loop was started.';
-  const ended = { ...task, status: 'failed', reason, summary, finishedAt };
-  const result = { id: task.id, status: 'failed', reason, summary, finishedAt,
+  const status = reason === 'cancelled' || reason === 'parent_cancelled' ? 'cancelled' : 'failed';
+  const summary = {
+    cancelled: 'Owner cancelled the legacy job. It will not be replayed.',
+    parent_cancelled: 'Owner cancelled the parent job before this pending legacy child started.',
+    daemon_shutdown: 'Daemon shut down before the legacy task finished.',
+    daemon_restarted: 'Daemon restarted before the legacy job finished. The retired job will not be replayed.',
+    legacy_execution_retired: 'Legacy execution admission retired. No worker or loop was started.',
+  }[reason];
+  const ended = { ...task, status, reason, summary, finishedAt };
+  const result = { id: task.id, status, reason, summary, finishedAt,
     durationMs: taskTime(task, 'startedAt') ? Math.max(0, Date.now() - taskTime(task, 'startedAt')) : 0 };
   // A failed result/task/move write is not terminal: leave the original stage
   // for fail-closed recovery. Emit the terminal event only after the durable
@@ -322,10 +327,10 @@ function closeRetiredJob(task, stage, reason = 'legacy_execution_retired') {
   store.moveTask(task.id, stage, 'done');
   // recorder handles journal write errors as best-effort evidence, recording
   // the failed append to stderr without undoing the already durable archive.
-  recorder(store, task.id)('legacy_job_terminal', { reason, stage, summary });
+  recorder(store, task.id)('legacy_job_terminal', { status, reason, stage, summary });
   try { store.appendLogLine(task.id, summary); }
   catch (error) { console.error('Failed to append archived job log: ' + error.message); }
-  recordEvent('fail', { id: task.id, reason });
+  recordEvent(status === 'cancelled' ? 'cancel' : 'fail', { id: task.id, reason });
 }
 
 function fillSlots() {
@@ -846,10 +851,7 @@ async function cancelTask(req, res) {
         if (stopped.status !== 200) { sendJson(res, stopped.status, { error: stopped.error }); return; }
       }
       else if (child.stage === 'pending') {
-        const cancelled = { ...child.task, status: 'cancelled', reason: 'parent_cancelled', finishedAt: new Date().toISOString() };
-        store.writeTask(cancelled, 'pending');
-        store.moveTask(child.id, 'pending', 'done');
-        store.writeResult({ id: child.id, status: 'cancelled', reason: 'parent_cancelled', finishedAt: cancelled.finishedAt });
+        closeRetiredJob(child.task, 'pending', 'parent_cancelled');
       }
     }
     sendJson(res, 200, { ok: true });
