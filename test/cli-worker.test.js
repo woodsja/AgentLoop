@@ -36,8 +36,8 @@ function fakeChild() {
 function spawnHarness(onSpawn) {
   let invocation;
   const child = fakeChild();
-  const spawnImpl = (executable, args, options) => {
-    invocation = { executable, args, options };
+  const spawnImpl = (executable, args, options, execution) => {
+    invocation = { executable, args, options, execution };
     queueMicrotask(() => {
       child.emit('spawn');
       if (onSpawn) onSpawn(child, invocation);
@@ -185,6 +185,7 @@ test('Claude uses registry arguments, sanitizes environment, and honors task.mod
     assert.equal(harness.invocation.executable, '/fake/claude');
     assert.deepEqual(harness.invocation.args, engines.get('claude').args({ model: 'task-model', outputPath: null }));
     assert.equal(harness.invocation.options.cwd, projectPath);
+    assert.equal(harness.invocation.execution.role, undefined, 'no caller role is not silently relabelled as worker');
     for (const key of Object.keys(original)) assert.equal(key in harness.invocation.options.env, false);
     assert.equal(result.engine, 'claude');
     assert.equal(result.model, 'task-model');
@@ -272,4 +273,110 @@ test('start and prompt delivery failures reject', async () => {
     createCliWorker({ config, spawnImpl: harness.spawnImpl })(projectPath, baseTask),
     /stdin failed/,
   );
+});
+
+test('owner cancellation signals the entire detached worker group including descendants', { timeout: 15000 }, async t => {
+  if (process.platform !== 'linux') return t.skip('Linux process groups required');
+  const { spawn } = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-worker-group-'));
+  const ready = path.join(dir, 'ready'), signalled = path.join(dir, 'grandchild-sigterm');
+  let groupPid;
+  t.after(() => {
+    if (groupPid && !fs.existsSync(signalled)) {
+      try { process.kill(-groupPid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const grandchildCode = [
+    "const fs = require('node:fs')",
+    "process.on('SIGTERM', () => { fs.writeFileSync(process.env.TEST_SIGNAL_FILE, 'received'); process.exit(0); })",
+    "fs.writeFileSync(process.env.TEST_READY_FILE, 'ready')",
+    "setInterval(() => {}, 1000)",
+  ].join(';');
+  const parentCode = 'require("node:child_process").spawn(process.execPath, ["-e", '
+    + JSON.stringify(grandchildCode)
+    + '], {stdio: "ignore", env: process.env}); setInterval(() => {}, 1000);';
+  const abort = new AbortController();
+  const runWorker = createCliWorker({
+    config: { allowedProjects, enginePaths: { codex: process.execPath } },
+    signal: abort.signal,
+    killProcessGroup: true,
+    spawnImpl: (_file, _args, options) => {
+      const child = spawn(process.execPath, ['-e', parentCode], { ...options, detached: true,
+        env: { ...options.env, TEST_READY_FILE: ready, TEST_SIGNAL_FILE: signalled } });
+      groupPid = child.pid;
+      return child;
+    },
+  });
+  const running = runWorker(projectPath, baseTask);
+  const waitFor = async (pathToFile, description) => {
+    const deadline = Date.now() + 4500;
+    while (!fs.existsSync(pathToFile) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(fs.existsSync(pathToFile), true, description);
+  };
+  await waitFor(ready, 'grandchild must be running before cancellation');
+  abort.abort(new Error('owner cancelled'));
+  await running;
+  await waitFor(signalled, 'SIGTERM must reach the grandchild in the detached process group');
+});
+
+test('owner cancellation escalates for detached workers whose descendants ignore SIGTERM', { timeout: 10000 }, async t => {
+  if (process.platform !== 'linux') return t.skip('Linux process groups required');
+  const { spawn } = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ralph-worker-stubborn-group-'));
+  const ready = path.join(dir, 'ready'), grandchildPidPath = path.join(dir, 'grandchild-pid');
+  let groupPid;
+  t.after(() => {
+    if (groupPid) {
+      try { process.kill(-groupPid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const grandchildCode = [
+    "const fs = require('node:fs')",
+    "process.on('SIGTERM', () => {})",
+    "fs.writeFileSync(process.env.RALPH_GROUP_READY, 'ready')",
+    "setInterval(() => {}, 1000)",
+  ].join(';');
+  const parentCode = [
+    "const fs = require('node:fs')",
+    "const { spawn } = require('node:child_process')",
+    "process.on('SIGTERM', () => {})",
+    "const child = spawn(process.execPath, ['-e', " + JSON.stringify(grandchildCode) + "], { stdio: 'ignore', env: process.env })",
+    "fs.writeFileSync(process.env.RALPH_GRANDCHILD_PID, String(child.pid))",
+    "setInterval(() => {}, 1000)",
+  ].join(';');
+  const abort = new AbortController();
+  const running = createCliWorker({
+    config: { allowedProjects, enginePaths: { codex: process.execPath } },
+    signal: abort.signal, timeoutMs: 30000, killProcessGroup: true,
+    spawnImpl: (_file, _args, options) => {
+      const child = spawn(process.execPath, ['-e', parentCode], { ...options, detached: true,
+        env: { ...options.env, RALPH_GROUP_READY: ready, RALPH_GRANDCHILD_PID: grandchildPidPath } });
+      groupPid = child.pid;
+      return child;
+    },
+  })(projectPath, baseTask);
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(ready) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(fs.existsSync(ready), true, 'descendant must be running before cancellation');
+  abort.abort(new Error('owner requested cancellation'));
+  const finished = await Promise.race([
+    running.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 2400)),
+  ]);
+  if (!finished) {
+    try { process.kill(-groupPid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    await running;
+  }
+  assert.equal(finished, true, 'cancellation must stop a SIGTERM-resistant group without waiting for worker timeout');
+  const pid = Number(fs.readFileSync(grandchildPidPath, 'utf8'));
+  const stopped = () => {
+    try {
+      const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+      return ['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]);
+    } catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+  };
+  const end = Date.now() + 1200;
+  while (!stopped() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(stopped(), true, 'stubborn descendant must no longer be runnable');
 });

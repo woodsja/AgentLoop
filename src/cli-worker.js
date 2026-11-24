@@ -84,8 +84,8 @@ function createCliWorker(options = {}) {
     const outputPath = engine.usesOutputFile
       ? path.join(tempDir, `ralph-worker-${randomUUID()}.txt`)
       : null;
-    const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
-    const prompt = buildWorkerPrompt(task, context);
+    const args = engine.args({ model, outputPath, role: options.role, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
+    const prompt = (options.buildPrompt || buildWorkerPrompt)(task, context);
 
     try {
       return await new Promise((resolve, reject) => {
@@ -96,13 +96,41 @@ function createCliWorker(options = {}) {
             stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: true,
             env: engine.env ? engine.env(process.env) : process.env,
-          });
+          }, { role: options.role });
         } catch (error) {
           reject(error);
           return;
         }
 
-        const abort = () => { child.kill('SIGTERM'); };
+        // Canonical R1 workers run in a detached process group. Cancelling
+        // only the CLI leader leaves its subprocesses free to edit the worktree.
+        let abortFallback;
+        const signalProcess = signal => {
+          if (options.killProcessGroup && process.platform === 'linux'
+            && Number.isSafeInteger(child.pid) && child.pid > 0) {
+            try { process.kill(-child.pid, signal); return; }
+            catch (error) {
+              if (error.code !== 'ESRCH') {
+                options.recordExecution?.('signal_error', { message: error.message });
+              }
+              // Preserve leader termination even when signalling the group fails.
+            }
+          }
+          child.kill(signal);
+        };
+        const abort = () => {
+          try { signalProcess('SIGTERM'); }
+          catch (error) { options.recordExecution?.('signal_error', { message: error.message }); }
+          if (options.killProcessGroup) {
+            // A CLI or descendant may ignore SIGTERM. Escalate the whole
+            // detached group rather than waiting for the normal worker timeout.
+            abortFallback = setTimeout(() => {
+              try { signalProcess('SIGKILL'); }
+              catch (error) { options.recordExecution?.('signal_error', { message: error.message }); }
+            }, 1000);
+            abortFallback.unref?.();
+          }
+        };
         options.signal?.addEventListener('abort', abort, { once: true });
         if (options.signal?.aborted) abort();
         let stdout = '';
@@ -128,6 +156,7 @@ function createCliWorker(options = {}) {
           options.signal?.removeEventListener('abort', abort);
           clearTimeout(timeout);
           clearTimeout(timeoutFallback);
+          clearTimeout(abortFallback);
           if (error) {
             reject(error);
             return;
@@ -178,14 +207,14 @@ function createCliWorker(options = {}) {
         timeout = setTimeout(() => {
           timedOut = true;
           try {
-            child.kill('SIGTERM');
+            signalProcess('SIGTERM');
           } catch (error) {
             finish(error);
             return;
           }
           // A child that ignores termination must not keep the adapter pending.
           timeoutFallback = setTimeout(() => {
-            try { child.kill('SIGKILL'); } catch { /* already gone */ }
+            try { signalProcess('SIGKILL'); } catch { /* still fail closed on ownership check */ }
             finish(null, null, 'SIGKILL');
           }, 1000);
         }, timeoutMs);

@@ -449,13 +449,13 @@ async function run(argv, dependencies = {}) {
   });
   // Persist a launch intent before spawning: a crash in the PID checkpoint
   // window must hold the job instead of assuming no process was started.
-  const spawnAgent = (file, args, options) => {
-    if (!dependencies.parentJobId) return (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, options);
+  const spawnAgent = (file, args, options, execution) => {
+    if (!dependencies.parentJobId) return (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, options, execution);
     assertNotCancelled();
     job.agentProcess = { status: 'launching' }; store.save(job);
     let child;
     try {
-      child = (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, { ...options, detached: true });
+      child = (dependencies.ralphOptions?.spawnImpl || require('node:child_process').spawn)(file, args, { ...options, detached: true }, execution);
     } catch (error) {
       job.agentProcess = null; store.save(job); // spawn threw before returning a process
       throw error;
@@ -496,7 +496,8 @@ async function run(argv, dependencies = {}) {
     return child;
   };
   const attemptOptions = () => ({ ...dependencies.ralphOptions,
-    ...(dependencies.parentJobId ? { spawnImpl: spawnAgent } : {}),
+    assertProcessStopped,
+    ...(dependencies.parentJobId ? { spawnImpl: spawnAgent, killProcessGroup: true } : {}),
     onPhaseChange: async phase => {
       assertNotCancelled();
       job.phase = phase;
@@ -778,6 +779,14 @@ async function run(argv, dependencies = {}) {
     // Re-read under the lock: the selection-time snapshot may be stale.
     job = store.load(candidate.number);
     assertProcessStopped();
+    const interruptedImplementation = job?.implementationChildren?.find(child => child.attempt === job.runs
+      && ['running', 'interrupted'].includes(child.status));
+    if (!job?.terminal && interruptedImplementation && ['running', 'interrupted'].includes(job.ralph?.status)) {
+      // assertProcessStopped above proved the previous group has ended. Retain
+      // its evidence, then use the existing bounded attempt recovery below.
+      interruptedImplementation.status = 'failed'; // stopped: terminal for failed-work capture
+      store.save(job);
+    }
     if ((job?.merge || job?.outcomePrState === 'MERGED') && !job.terminal) {
       await finishApprovedMerge(); store.save(job);
       return { issue: candidate, job, outcome: { status: job.terminalState || job.status, terminal: job.terminal } };
@@ -1249,6 +1258,14 @@ async function run(argv, dependencies = {}) {
       if (project.architectureDecisions === true) task.goal += `\n\n${decisions.instructions(decisionReferences)}`;
       const service = createService({ config: storeConfig, ...attemptOptions(),
         onWorkerStart: () => { resumePreparation = null; },
+        onImplementationEvidence: evidence => {
+          job.implementationChildren ||= [];
+          const child = { ...structuredClone(evidence), parentId: dependencies.parentJobId, attempt: job.runs };
+          const index = job.implementationChildren.findIndex(item => item.attempt === job.runs);
+          if (index < 0) job.implementationChildren.push(child);
+          else job.implementationChildren[index] = child;
+          store.save(job);
+        },
         recordBaseline: sha => {
           if (!job.ralph.baselineSha) { job.ralph.baselineSha = sha; store.save(job); }
           return job.ralph.baselineSha;

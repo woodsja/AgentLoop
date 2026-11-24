@@ -137,8 +137,8 @@ test('retired pending direct tasks are closed without launching a worker', async
     const archived = isolated.store.readExecutionBytes(pending.id, 0, 262144);
     assert.match(Buffer.from(archived.base64, 'base64').toString('utf8'), /legacy_job_terminal/);
 
-    // A pre-upgrade classic loop is also terminalized; only R1-owned children run.
-    const oldLoop = isolated.store.enqueueLoop({ project: 'demo', projectPath: project, engine: 'codex', maxCycles: 1 });
+    // A pre-upgrade classic loop is terminalized without executing either engine.
+    const oldLoop = isolated.store.enqueueTask({ type: 'loop', project: 'demo', projectPath: project, engine: 'codex', maxCycles: 1 });
     isolated.daemon.fillSlots();
     const closedLoop = isolated.store.readTask(oldLoop.id, 'done');
     assert.equal(closedLoop.status, 'failed');
@@ -221,7 +221,7 @@ test('restart retires an interrupted classic loop without relaunching either eng
   const first = isolatedDaemon(config, directory);
   let started = false;
   try {
-    const loop = first.store.enqueueLoop({ project: 'demo', projectPath: project, status: 'running',
+    const loop = first.store.enqueueTask({ type: 'loop', project: 'demo', projectPath: project, status: 'running',
       workerEngine: 'codex', criticEngine: 'claude', maxCycles: 3,
       cycles: [{ n: 1, status: 'running', phase: 'worker' }] });
     id = loop.id; first.store.moveTask(id, 'pending', 'running');
@@ -233,7 +233,7 @@ test('restart retires an interrupted classic loop without relaunching either eng
     const done = first.store.readTask(id, 'done');
     assert.equal(done.status, 'failed');
     assert.equal(done.reason, 'daemon_restarted');
-    assert.equal(done.cycles[0].status, 'failed');
+    assert.equal(done.cycles[0].status, 'running', 'historical cycle evidence is preserved verbatim');
     assert.deepEqual(fs.readFileSync(first.store.executionPath(id)).subarray(0, raw.length), raw);
     assert.deepEqual(first.store.listTasks('running'), []);
   } finally {
@@ -266,7 +266,7 @@ test('legacy archival failure cannot prevent other queued jobs from being retire
   const originalWrite = isolated.store.writeResult;
   try {
     const first = isolated.store.enqueueTask({ project: 'demo', priority: 1, prompt: 'legacy first' });
-    const second = isolated.store.enqueueLoop({ project: 'demo', priority: 2, projectPath: project });
+    const second = isolated.store.enqueueTask({ type: 'loop', project: 'demo', priority: 2, projectPath: project });
     isolated.store.writeResult = result => {
       if (result.id === first.id) throw new Error('simulated archived-result storage failure');
       return originalWrite(result);
@@ -410,7 +410,7 @@ test('historical HTTP jobs remain inspectable after removing new direct submissi
     assert.equal(compactResult.structuredContent.result.status, 'done');
 
     // Both historic loop and R1 job IDs remain visible through the same read-only route.
-    const pastLoop = isolated.store.enqueueLoop({ project: 'demo', projectPath: fs.realpathSync(project) });
+    const pastLoop = isolated.store.enqueueTask({ type: 'loop', project: 'demo', projectPath: fs.realpathSync(project) });
     const pastR1 = isolated.store.enqueueTask({ project: 'demo', workflow: 'r1', issue: 8 });
     for (const past of [pastLoop, pastR1]) {
       isolated.store.writeResult({ id: past.id, status: 'failed', reason: 'archived_test', summary: 'Retained.' });
@@ -491,694 +491,6 @@ function tempRepo() {
   return { dir, git };
 }
 
-test('a second block names its own task number and plan item', () => {
-  const loop = {
-    planTasks: ['build parser', 'wire CLI', 'ship docs'],
-    done: ['build parser'],
-    blocked: [{ task: 2, item: 'wire CLI' }],
-    nextItem: 'wire CLI',
-  };
-
-  assert.deepEqual(daemon.blockedEntry(loop, { n: 5, task: 3 }), { task: 3, item: 'ship docs' });
-});
-
-test('a blocked entry falls back to the walked plan position', () => {
-  const loop = { planTasks: ['one', 'two', 'three'], done: ['one'], blocked: [{ task: 2, item: 'two' }] };
-
-  assert.deepEqual(daemon.blockedEntry(loop, null), { task: 3, item: 'three' });
-  assert.deepEqual(daemon.blockedEntry({ nextItem: 'only hint' }, null), { task: 1, item: 'only hint' });
-  assert.deepEqual(daemon.blockedEntry({}, null), { task: 1, item: 'first PLAN.md item' });
-});
-
-test('a worker that commits its own changes counts as progress', () => {
-  const before = { head: 'aaa', tree: ' M src/app.js' };
-
-  assert.equal(daemon.madeNoChanges(before, { head: 'aaa', tree: ' M src/app.js' }), true);
-  assert.equal(daemon.madeNoChanges(before, { head: 'bbb', tree: '' }), false);
-  assert.equal(daemon.madeNoChanges(before, { head: 'aaa', tree: ' M src/app.js\n M PLAN.md' }), false);
-});
-
-test('an edit to an already-dirty file counts as progress', () => {
-  const before = { head: 'aaa', tree: ' M src/app.js', dirty: 'one' };
-
-  assert.equal(daemon.madeNoChanges(before, { head: 'aaa', tree: ' M src/app.js', dirty: 'one' }), true);
-  assert.equal(daemon.madeNoChanges(before, { head: 'aaa', tree: ' M src/app.js', dirty: 'two' }), false);
-});
-
-test('the tree snapshot sees content, not just status codes', (t) => {
-  const repo = tempRepo();
-
-  if (!repo) {
-    t.skip('git unavailable');
-    return;
-  }
-
-  try {
-    const file = path.join(repo.dir, 'app.js');
-    fs.writeFileSync(file, 'first\n');
-    repo.git('add', '-A', '.');
-    repo.git('commit', '-qm', 'seed');
-    fs.writeFileSync(file, 'second\n');
-    fs.writeFileSync(path.join(repo.dir, 'STATE.md'), 'notes\n');
-
-    const before = daemon.gitSnapshot(repo.dir);
-    fs.writeFileSync(file, 'third\n');
-    fs.writeFileSync(path.join(repo.dir, 'STATE.md'), 'more notes\n');
-
-    const after = daemon.gitSnapshot(repo.dir);
-
-    assert.equal(before.tree, after.tree);
-    assert.notEqual(before.dirty, after.dirty);
-    assert.equal(daemon.madeNoChanges(before, after), false);
-    assert.equal(daemon.madeNoChanges(before, daemon.gitSnapshot(repo.dir)), false);
-    assert.equal(daemon.madeNoChanges(after, daemon.gitSnapshot(repo.dir)), true);
-  } finally {
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-  }
-});
-
-test('a sibling project commit never blocks a queued loop', (t) => {
-  const repo = tempRepo();
-
-  if (!repo) {
-    t.skip('git unavailable');
-    return;
-  }
-
-  try {
-    const project = path.join(repo.dir, 'project');
-    const sibling = path.join(repo.dir, 'sibling');
-
-    fs.mkdirSync(project);
-    fs.mkdirSync(sibling);
-    fs.writeFileSync(path.join(project, 'app.js'), 'one\n');
-    fs.writeFileSync(path.join(sibling, 'app.js'), 'one\n');
-    repo.git('add', '-A', '.');
-    repo.git('commit', '-qm', 'seed');
-
-    const queued = daemon.gitSnapshot(project);
-
-    fs.writeFileSync(path.join(sibling, 'app.js'), 'two\n');
-    repo.git('add', '-A', '.');
-    repo.git('commit', '-qm', 'sibling checkpoint');
-
-    const atStart = daemon.gitSnapshot(project);
-
-    assert.equal(queued.head, atStart.head);
-    assert.equal(daemon.sameProjectTree(queued, atStart), true);
-    assert.equal(daemon.madeNoChanges(queued, atStart), true);
-  } finally {
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-  }
-});
-
-test('a commit inside the project advances its revision', (t) => {
-  const repo = tempRepo();
-
-  if (!repo) {
-    t.skip('git unavailable');
-    return;
-  }
-
-  try {
-    const project = path.join(repo.dir, 'project');
-
-    fs.mkdirSync(project);
-    fs.writeFileSync(path.join(project, 'app.js'), 'one\n');
-    repo.git('add', '-A', '.');
-    repo.git('commit', '-qm', 'seed');
-
-    const before = daemon.gitSnapshot(project);
-
-    fs.writeFileSync(path.join(project, 'app.js'), 'two\n');
-    repo.git('add', '-A', '.');
-    repo.git('commit', '-qm', 'worker commit');
-
-    const after = daemon.gitSnapshot(project);
-
-    assert.notEqual(before.head, after.head);
-    assert.equal(daemon.madeNoChanges(before, after), false);
-  } finally {
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-  }
-});
-
-test('a worker commit becomes the checkpoint sha only over a clean tree', () => {
-  assert.equal(daemon.workerCommitSha('aaa', 'bbb', ''), 'bbb');
-  assert.equal(daemon.workerCommitSha('aaa', 'aaa', ''), null);
-  assert.equal(daemon.workerCommitSha('aaa', 'bbb', ' M src/app.js'), null);
-  assert.equal(daemon.workerCommitSha('', 'bbb', ''), null);
-});
-
-test('a continued checkpoint carries the cycle task, not the done count', () => {
-  assert.equal(daemon.cycleTaskNumber({ n: 4, task: 3 }, 2), 3);
-  assert.equal(daemon.cycleTaskNumber({ n: 4 }, 2), 2);
-  assert.equal(daemon.cycleTaskNumber(null, 2), 2);
-});
-
-test('a checkpoint only adopts a commit that touched the project', () => {
-  assert.match(daemonSource, /'rev-list', '-1', 'HEAD', '--', '\.'/);
-  assert.match(daemonSource, /workerCommitSha\(headAtStart, projectHead\(loop\.projectPath\), tree\.output\)/);
-});
-
-test('a queued loop revalidates its tree before the first checkpoint', () => {
-  assert.match(daemonSource, /projectTreeUnchanged\(loop\.gitAtQueue, loop\.projectPath\)/);
-  assert.match(daemonSource, /'dirty_project_tree'/);
-});
-
-test('the start gate passes an unchanged tree and rejects real drift', (t) => {
-  const repo = tempRepo();
-
-  if (!repo) {
-    t.skip('git unavailable');
-    return;
-  }
-
-  try {
-    fs.writeFileSync(path.join(repo.dir, 'app.js'), 'one\n');
-    repo.git('add', '-A', '.');
-    repo.git('commit', '-qm', 'seed');
-
-    const queued = daemon.gitSnapshot(repo.dir);
-
-    assert.equal(daemon.projectTreeUnchanged(queued, repo.dir), true);
-
-    fs.writeFileSync(path.join(repo.dir, 'app.js'), 'two\n');
-    assert.equal(daemon.projectTreeUnchanged(queued, repo.dir, 2), false);
-    assert.equal(daemon.projectTreeUnchanged(null, repo.dir, 1), false);
-  } finally {
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-  }
-});
-
-test('the start gate reads the tree, not the revision', () => {
-  const queued = { head: 'aaa', tree: '', dirty: 'empty' };
-
-  assert.equal(daemon.sameProjectTree(queued, { head: 'bbb', tree: '', dirty: 'empty' }), true);
-  assert.equal(daemon.sameProjectTree(queued, { head: 'aaa', tree: ' M src/app.js', dirty: 'empty' }), false);
-  assert.equal(daemon.sameProjectTree(queued, { head: 'aaa', tree: '', dirty: 'other' }), false);
-  assert.equal(daemon.sameProjectTree(queued, null), false);
-  assert.equal(daemon.sameProjectTree(null, queued), false);
-});
-
-test('a missing git snapshot never counts as no progress', () => {
-  assert.equal(daemon.madeNoChanges(null, { head: 'aaa', tree: '' }), false);
-  assert.equal(daemon.madeNoChanges({ head: 'aaa', tree: '' }, null), false);
-  assert.equal(daemon.madeNoChanges(undefined, undefined), false);
-});
-
-test('checkpoint commits are restricted to the project path', () => {
-  assert.match(daemonSource, /'commit', '-m', value, '--', '\.'/);
-});
-
-test('both polish endings checkpoint the validated tree', () => {
-  assert.match(daemonSource, /recordCheckpoint\(shipped, null, 'wip\(loop\): polish shipped'\)/);
-  assert.match(daemonSource, /recordCheckpoint\(improved, null, 'wip\(loop\): polish improved'\)/);
-});
-
-test('a legacy config model is never stamped onto a new loop', () => {
-  assert.doesNotMatch(daemonSource, /model: store\.config\.model/);
-});
-
-test('checkpointCommit throws GitCheckpointError on git failure', () => {
-  const repo = tempRepo();
-  assert.ok(repo);
-  try {
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'initial\n');
-    repo.git('add', 'test.txt');
-    repo.git('commit', '-m', 'initial commit');
-
-    const loop = { id: 'test-loop', projectPath: repo.dir, autoCommit: true };
-    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
-
-    assert.throws(
-      () => daemon.checkpointCommit(loop, 'test checkpoint', ''),
-      daemon.GitCheckpointError,
-    );
-  } finally {
-    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-  }
-});
-
-test('finishLoopCritic fails the cycle and spends retry when checkpoint commit fails', () => {
-  store.ensureDirs();
-  const repo = tempRepo();
-  assert.ok(repo);
-  const loopId = 'test-checkpoint-fail-loop';
-  try {
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'initial\n');
-    repo.git('add', 'test.txt');
-    repo.git('commit', '-m', 'initial commit');
-
-    const head = repo.git('rev-parse', 'HEAD').stdout.trim();
-    const loop = {
-      id: loopId,
-      type: 'loop',
-      status: 'running',
-      autoCommit: true,
-      projectPath: repo.dir,
-      planTasks: ['task one', 'task two'],
-      maxCycles: 3,
-      taskRetries: 3,
-      failStreak: 0,
-      cycles: [
-        {
-          n: 1,
-          task: 1,
-          status: 'running',
-          phase: 'critic',
-          gitAtStart: { head },
-        },
-      ],
-    };
-
-    store.writeTask(loop, 'running');
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'modified\n');
-    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
-
-    daemon.finishLoopCritic(loop, 1, {
-      exitCode: 0,
-      resultText: 'VERDICT: CONTINUE - done: task one; next: task two',
-    });
-
-    const updated = store.readTask(loopId, 'running');
-    assert.ok(updated);
-    assert.equal(updated.failStreak, 1);
-    assert.equal(updated.done, undefined);
-    const c1 = updated.cycles[0];
-    assert.equal(c1.status, 'failed');
-    assert.equal(c1.verdict, 'FAIL');
-    assert.match(c1.reason, /index\.lock|checkpoint failed/i);
-  } finally {
-    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
-  }
-});
-
-test('finishLoopWorker retries on worker failure reasons instead of ending loop', () => {
-  store.ensureDirs();
-  const loopId = 'test-worker-fail-loop';
-  const loop = {
-    id: loopId,
-    type: 'loop',
-    status: 'running',
-    autoCommit: false,
-    planTasks: ['task one'],
-    maxCycles: 3,
-    taskRetries: 3,
-    failStreak: 0,
-    cycles: [
-      {
-        n: 1,
-        task: 1,
-        status: 'running',
-        phase: 'worker',
-      },
-    ],
-  };
-
-  try {
-    store.writeTask(loop, 'running');
-
-    daemon.finishLoopWorker(loop, 1, {
-      resultText: 'failed without json',
-      timedOut: true,
-    });
-
-    const updated = store.readTask(loopId, 'running');
-    assert.ok(updated);
-    assert.equal(updated.status, 'running');
-    assert.equal(updated.failStreak, 1);
-    const c1 = updated.cycles[0];
-    assert.equal(c1.status, 'failed');
-    assert.equal(c1.reason, 'timed_out');
-  } finally {
-    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
-  }
-});
-
-test('stop() marks running loop terminal with daemon_shutdown and logs dirty files', async () => {
-  const tempStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-state-'));
-  const originalPaths = { ...store.paths };
-  Object.assign(store.paths, {
-    state: tempStateDir,
-    tasks: path.join(tempStateDir, 'tasks'),
-    pending: path.join(tempStateDir, 'tasks', 'pending'),
-    running: path.join(tempStateDir, 'tasks', 'running'),
-    done: path.join(tempStateDir, 'tasks', 'done'),
-    results: path.join(tempStateDir, 'results'),
-    logs: path.join(tempStateDir, 'logs'),
-    events: path.join(tempStateDir, 'events.ndjson'),
-    messages: path.join(tempStateDir, 'messages.ndjson'),
-    daemon: path.join(tempStateDir, 'daemon.json'),
-    bridge: path.join(tempStateDir, 'bridge.json'),
-    mcpToken: path.join(tempStateDir, 'mcp-token'),
-  });
-
-  store.ensureDirs();
-  const repo = tempRepo();
-  assert.ok(repo);
-  const loopId = 'test-shutdown-loop';
-  try {
-    fs.writeFileSync(path.join(repo.dir, 'file.txt'), 'initial\n');
-    repo.git('add', 'file.txt');
-    repo.git('commit', '-m', 'initial');
-
-    fs.writeFileSync(path.join(repo.dir, 'file.txt'), 'dirty content\n');
-
-    const loop = {
-      id: loopId,
-      type: 'loop',
-      status: 'running',
-      autoCommit: true,
-      projectPath: repo.dir,
-      planTasks: ['task one'],
-      maxCycles: 3,
-      cycles: [
-        {
-          n: 1,
-          task: 1,
-          status: 'running',
-          phase: 'worker',
-        },
-      ],
-    };
-
-    store.writeTask(loop, 'running');
-    fs.writeFileSync(store.paths.daemon, JSON.stringify({ pid: process.pid, ts: new Date().toISOString() }));
-    assert.equal(fs.existsSync(store.paths.daemon), true);
-
-    daemon.resetStopping();
-    let exitedCode = null;
-    await daemon.stop((code) => {
-      exitedCode = code;
-    });
-
-    assert.equal(exitedCode, 0);
-    assert.equal(fs.existsSync(store.paths.daemon), false);
-    assert.equal(fs.existsSync(path.join(store.paths.running, `${loopId}.json`)), false);
-
-    const doneTask = store.readTask(loopId, 'done');
-    assert.ok(doneTask);
-    assert.equal(doneTask.status, 'failed');
-    assert.equal(doneTask.reason, 'daemon_shutdown');
-    assert.ok(Array.isArray(doneTask.dirtyFiles));
-    assert.ok(doneTask.dirtyFiles.some((f) => f.includes('file.txt')));
-    assert.equal(doneTask.cycles[0].status, 'failed');
-    assert.equal(doneTask.cycles[0].reason, 'daemon_shutdown');
-  } finally {
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-    Object.assign(store.paths, originalPaths);
-    fs.rmSync(tempStateDir, { recursive: true, force: true });
-    daemon.resetStopping();
-  }
-});
-
-test('finishLoop callbacks after stop() has begun return without throwing', async () => {
-  const tempStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-state-'));
-  const originalPaths = { ...store.paths };
-  Object.assign(store.paths, {
-    state: tempStateDir,
-    tasks: path.join(tempStateDir, 'tasks'),
-    pending: path.join(tempStateDir, 'tasks', 'pending'),
-    running: path.join(tempStateDir, 'tasks', 'running'),
-    done: path.join(tempStateDir, 'tasks', 'done'),
-    results: path.join(tempStateDir, 'results'),
-    logs: path.join(tempStateDir, 'logs'),
-    events: path.join(tempStateDir, 'events.ndjson'),
-    messages: path.join(tempStateDir, 'messages.ndjson'),
-    daemon: path.join(tempStateDir, 'daemon.json'),
-    bridge: path.join(tempStateDir, 'bridge.json'),
-    mcpToken: path.join(tempStateDir, 'mcp-token'),
-  });
-
-  store.ensureDirs();
-  const loopId = 'test-stopping-callback-loop';
-  const loop = {
-    id: loopId,
-    type: 'loop',
-    status: 'running',
-    autoCommit: false,
-    planTasks: ['task one'],
-    maxCycles: 3,
-    taskRetries: 3,
-    failStreak: 0,
-    cycles: [
-      {
-        n: 1,
-        task: 1,
-        status: 'running',
-        phase: 'worker',
-      },
-    ],
-  };
-
-  try {
-    store.writeTask(loop, 'running');
-    fs.writeFileSync(store.paths.daemon, JSON.stringify({ pid: process.pid, ts: new Date().toISOString() }));
-
-    daemon.resetStopping();
-    await daemon.stop(() => {});
-
-    assert.doesNotThrow(() => {
-      daemon.finishLoopWorker(loop, 1, { resultText: 'still running', timedOut: true });
-    });
-    assert.doesNotThrow(() => {
-      daemon.finishLoopCritic(loop, 1, { exitCode: 0, resultText: 'VERDICT: PASS' });
-    });
-
-    const doneTask = store.readTask(loopId, 'done');
-    assert.ok(doneTask);
-    assert.equal(doneTask.status, 'failed');
-    assert.equal(doneTask.reason, 'daemon_shutdown');
-
-    const leftoverId = 'test-stopping-leftover-loop';
-    const leftover = { ...loop, id: leftoverId };
-    store.writeTask(leftover, 'running');
-
-    assert.doesNotThrow(() => {
-      daemon.finishLoopWorker(leftover, 1, { resultText: 'still running', timedOut: true });
-    });
-    assert.doesNotThrow(() => {
-      daemon.finishLoopCritic(leftover, 1, { exitCode: 0, resultText: 'VERDICT: PASS' });
-    });
-
-    const leftoverTask = store.readTask(leftoverId, 'running');
-    assert.ok(leftoverTask);
-    assert.equal(leftoverTask.status, 'running');
-    assert.equal(leftoverTask.failStreak, 0);
-    assert.equal(leftoverTask.cycles[0].status, 'running');
-  } finally {
-    Object.assign(store.paths, originalPaths);
-    fs.rmSync(tempStateDir, { recursive: true, force: true });
-    daemon.resetStopping();
-  }
-});
-
-test('finishLoopCritic fails the cycle, leaves verdict FAIL, and does not latch hasPassedCycle when final-pass checkpoint fails', () => {
-  store.ensureDirs();
-  const repo = tempRepo();
-  assert.ok(repo);
-  const loopId = 'test-pass-checkpoint-fail-loop';
-  try {
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'clean\n');
-    repo.git('add', 'test.txt');
-    repo.git('commit', '-m', 'clean');
-    const head = repo.git('rev-parse', 'HEAD').stdout.trim();
-
-    const loop = {
-      id: loopId,
-      type: 'loop',
-      status: 'running',
-      autoCommit: true,
-      projectPath: repo.dir,
-      planTasks: ['task one'],
-      maxCycles: 3,
-      taskRetries: 3,
-      failStreak: 0,
-      cycles: [
-        {
-          n: 1,
-          task: 1,
-          status: 'running',
-          phase: 'critic',
-          gitAtStart: { head },
-        },
-      ],
-    };
-
-    store.writeTask(loop, 'running');
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'modified\n');
-    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
-
-    daemon.finishLoopCritic(loop, 1, {
-      exitCode: 0,
-      resultText: 'VERDICT: PASS',
-    });
-
-    const updated = store.readTask(loopId, 'running');
-    assert.ok(updated);
-    assert.equal(updated.failStreak, 1);
-    assert.equal(updated.status, 'running');
-    const c1 = updated.cycles[0];
-    assert.equal(c1.status, 'failed');
-    assert.equal(c1.verdict, 'FAIL');
-    assert.notEqual(c1.verdict, 'PASS');
-    assert.equal(daemon.hasPassedCycle(updated), false);
-    assert.match(c1.reason, /index\.lock|checkpoint failed/i);
-  } finally {
-    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
-  }
-});
-
-test('finishLoopCritic fails the cycle, leaves verdict FAIL, and does not complete the loop when polish SHIP checkpoint fails', () => {
-  store.ensureDirs();
-  const repo = tempRepo();
-  assert.ok(repo);
-  const loopId = 'test-polish-ship-checkpoint-fail-loop';
-  try {
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'clean\n');
-    repo.git('add', 'test.txt');
-    repo.git('commit', '-m', 'clean');
-    const head = repo.git('rev-parse', 'HEAD').stdout.trim();
-
-    const loop = {
-      id: loopId,
-      type: 'loop',
-      status: 'running',
-      autoCommit: true,
-      polish: true,
-      projectPath: repo.dir,
-      planTasks: ['task one'],
-      maxCycles: 3,
-      taskRetries: 3,
-      failStreak: 0,
-      cycles: [
-        {
-          n: 1,
-          status: 'passed',
-          phase: 'critic',
-          verdict: 'PASS',
-        },
-        {
-          n: 2,
-          status: 'running',
-          phase: 'polish',
-          gitAtStart: { head },
-        },
-      ],
-    };
-
-    store.writeTask(loop, 'running');
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'modified\n');
-    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
-
-    daemon.finishLoopCritic(loop, 2, {
-      exitCode: 0,
-      resultText: 'VERDICT: SHIP',
-    });
-
-    const updated = store.readTask(loopId, 'running');
-    assert.ok(updated);
-    assert.equal(updated.failStreak, 1);
-    assert.equal(updated.status, 'running');
-    assert.notEqual(updated.reason, 'cycle_transition_failed');
-    const c2 = updated.cycles[1];
-    assert.equal(c2.status, 'failed');
-    assert.equal(c2.verdict, 'FAIL');
-    assert.notEqual(c2.verdict, 'SHIP');
-    assert.notEqual(c2.reason, 'cycle_transition_failed');
-    assert.match(c2.reason, /index\.lock|checkpoint failed/i);
-  } finally {
-    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
-    try { fs.unlinkSync(path.join(store.paths.done, `${loopId}.json`)); } catch {}
-  }
-});
-
-test('registerFailedCycle records checkpoint error into cycle checkpointError and emits checkpoint_failed event when blocked checkpoint fails', () => {
-  store.ensureDirs();
-  const repo = tempRepo();
-  assert.ok(repo);
-  const loopId = 'test-blocked-checkpoint-fail-loop';
-  try {
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'clean\n');
-    repo.git('add', 'test.txt');
-    repo.git('commit', '-m', 'clean');
-    const head = repo.git('rev-parse', 'HEAD').stdout.trim();
-
-    const loop = {
-      id: loopId,
-      type: 'loop',
-      status: 'running',
-      autoCommit: true,
-      projectPath: repo.dir,
-      planTasks: ['task one', 'task two'],
-      maxCycles: 5,
-      taskRetries: 1,
-      failStreak: 0,
-      cycles: [
-        {
-          n: 1,
-          task: 1,
-          status: 'running',
-          phase: 'critic',
-          gitAtStart: { head },
-        },
-      ],
-    };
-
-    store.writeTask(loop, 'running');
-    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'modified\n');
-    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
-
-    daemon.registerFailedCycle(loop, 1, {
-      status: 'failed',
-      phase: 'critic',
-      verdict: 'FAIL',
-      reason: 'critic_invalid_verdict',
-      summary: 'Task 1 failed',
-    }, {
-      type: 'critic_verdict',
-      data: { id: loopId, cycle: 1, verdict: 'FAIL' },
-    });
-
-    const updated = store.readTask(loopId, 'running');
-    assert.ok(updated);
-    assert.ok(Array.isArray(updated.blocked));
-    assert.equal(updated.blocked.length, 1);
-    const c1 = updated.cycles[0];
-    assert.equal(c1.status, 'blocked');
-    assert.equal(c1.reason, 'critic_invalid_verdict');
-    assert.match(c1.checkpointError, /index\.lock|checkpoint failed/i);
-  } finally {
-    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
-    fs.rmSync(repo.dir, { recursive: true, force: true });
-    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
-  }
-});
-
-test('loop roles can be independently selected and old engine-only requests remain valid', () => {
-  assert.deepEqual(daemon.loopEngines({ workerEngine: 'codex', criticEngine: 'claude' }), {
-    engine: 'codex', workerEngine: 'codex', criticEngine: 'claude',
-  });
-  assert.deepEqual(daemon.loopEngines({ engine: 'claude' }), {
-    engine: 'claude', workerEngine: 'claude', criticEngine: 'claude',
-  });
-  assert.equal(daemon.loopEngines({ engine: 'claude', criticEngine: 'codex' }).workerEngine, 'claude');
-  assert.throws(() => daemon.loopEngines({ engine: 'unknown' }), /Unsupported engine/);
-  assert.throws(() => daemon.loopEngines({ workerEngine: 'unknown', criticEngine: 'claude' }), /Unsupported workerEngine/);
-});
-
-test('null loop requests preserve default engine fallback', () => {
-  assert.equal(daemon.loopEngines(null).workerEngine, 'codex');
-});
-
 test('HTTP access rejects rebinding Hosts and cross-site Origins and keeps legacy filenames', async t => {
   const server = daemon.createHttpServer();
   if (!await listenHttp(t, server)) return;
@@ -1200,78 +512,6 @@ test('HTTP access rejects rebinding Hosts and cross-site Origins and keeps legac
   assert.equal(result.status,200);
   assert.equal(result.headers['content-disposition'],`attachment; filename="${id}.ndjson"`);
 });
-
-for (const role of ['worker', 'critic']) {
-  test(`R1 ${role} authorization denial holds the exact session and permits retry without losing history`, t => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-milestone-hold-'));
-    const isolated = isolatedDaemon({ allowedProjects: { demo: directory } }, directory);
-    t.after(() => { isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
-    const s = isolated.store, d = isolated.daemon;
-    s.ensureDirs();
-    const parent = { id: 't-12345678', workflow: 'r1', project: 'demo', issue: 1,
-      autopilotStateDir: path.join(directory, 'jobs'), status: 'running', milestoneAuthorization: { grantId: 'g1' } };
-    const { createJob, createJobStore } = require('../src/autopilot-state');
-    const durable = createJobStore(parent.autopilotStateDir);
-    durable.save({ ...createJob({ projectName: 'demo', repo: 'owner/demo', issue: { number: 1, title: 'Held' },
-      branch: 'ralph/issue-1-held', worktreePath: directory, now: durable.now }),
-      r1ParentJobId: parent.id, status: 'running', workspaceState: 'prepared', runs: 1 });
-    const previous = { n: 1, status: 'failed', phase: 'critic', verdict: 'FAIL', summary: 'Prior review retained' };
-    const cycle = { n: 2, status: 'running', phase: role, workerSummary: 'Implementation retained' };
-    const loop = { id: 't-23456789', type: 'loop', project: 'demo', status: 'running', projectPath: directory,
-      engine: 'unavailable-test-engine', cycles: [previous, cycle], cycle: 2,
-      r1Child: { parentJobId: parent.id, attempt: 1 } };
-    s.writeTask(parent, 'running'); s.writeTask(loop, 'running');
-    s.appendLogLine(loop.id, 'Original captured output');
-    let denied = true, checks = 0, finishes = 0;
-    t.mock.method(require('../src/milestone-work'), 'checkCurrent', authorization => {
-      assert.deepEqual(authorization, parent.milestoneAuthorization); checks++;
-      if (denied) throw new Error('Canonical milestone authorization changed (paused).');
-    });
-    d.spawnLoopSession(loop, cycle, role, 'Exact original prompt', () => finishes++);
-    let held = s.readTask(loop.id, 'running');
-    assert.equal(held.status, 'running');
-    assert.deepEqual(held.cycles, loop.cycles);
-    assert.equal(held.authorizationBlocked.role, role);
-    assert.equal(held.authorizationBlocked.prompt, 'Exact original prompt');
-    assert.equal(finishes, 0);
-    assert.equal(s.listTasks('done').length, 0);
-    const evidence = s.readLogLines(loop.id);
-    denied = false;
-    // An unavailable fake engine stops at the process boundary after the fresh
-    // authorization check; no external agent is executed by this test.
-    d.spawnLoopSession(held, cycle, role, held.authorizationBlocked.prompt, details => {
-      finishes++;
-      assert.equal(details.reason, `${role}_start_failed`);
-      assert.match(details.resultText, /Unsupported/);
-    });
-    held = s.readTask(loop.id, 'running');
-    assert.equal(checks, 2); assert.equal(finishes, 1);
-    assert.equal(held.authorizationBlocked, undefined);
-    assert.deepEqual(held.cycles, loop.cycles);
-    assert.deepEqual(s.readLogLines(loop.id).slice(0, evidence.length), evidence);
-  });
-}
-
-for (const missing of [null, 'ENOENT']) {
-  test(`historical R1 session rejects a parent lookup returning ${missing} without starting a worker`, t => {
-    let finished = false, checkpoint = null;
-    const events = [];
-    t.mock.method(store, 'readTask', () => {
-      if (missing === 'ENOENT') throw Object.assign(new Error('Parent moved'), { code: 'ENOENT' });
-      return null;
-    });
-    t.mock.method(store, 'writeTask', (task, stage) => { checkpoint = { task, stage }; });
-    t.mock.method(store, 'appendExecution', (id, event) => { events.push({ id, event }); });
-    const loop = { id: 'historical-child', engine: 'unavailable-test-engine',
-      r1Child: { parentJobId: 'moved-parent' } };
-    daemon.spawnLoopSession(loop, { n: 1 }, 'worker', 'prompt', () => { finished = true; });
-    assert.equal(finished, false, 'unknown historical parent never starts a new worker');
-    assert.equal(checkpoint.stage, 'running');
-    assert.equal(checkpoint.task.authorizationBlocked.prompt, 'prompt');
-    assert.match(checkpoint.task.authorizationBlocked.message, /Canonical R1 parent is not running/);
-    assert.ok(events.some(entry => entry.event.event === 'authorization_blocked'));
-  });
-}
 
 test('dashboard HTTP handler isolates one bad canonical record and exposes its raw journal link', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-canonical-diagnostic-'));
@@ -1311,7 +551,7 @@ test('dashboard HTTP handler isolates one bad canonical record and exposes its r
   assert.deepEqual(Buffer.concat(chunks), fs.readFileSync(s.executionPath(bad.id)), 'all raw bytes remain available despite a broken checkpoint');
 });
 
-test('HTTP cancellation of a supervision hold persists canonical cancellation without an executor', async t => {
+for (const queueStage of ['pending', 'running']) test(`HTTP cancellation of a ${queueStage} supervision hold persists canonical cancellation without an executor`, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-cancel-hold-'));
   const isolated = isolatedDaemon({}, directory);
   t.after(() => { isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
@@ -1320,7 +560,7 @@ test('HTTP cancellation of a supervision hold persists canonical cancellation wi
   const parent = s.enqueueTask({ workflow: 'r1', project: 'demo', repo: 'owner/demo', issue: 1,
     autopilotStateDir: path.join(directory, 'jobs'), title: 'Held before start', status: 'running',
     supervisionBlocked: { reason: 'Owner configuration revoked' } });
-  s.moveTask(parent.id, 'pending', 'running');
+  if (queueStage === 'running') s.moveTask(parent.id, 'pending', 'running');
   const server = d.createHttpServer();
   const invoke = (method, url, body) => new Promise(resolve => {
     const req = new (require('node:stream').PassThrough)();
@@ -1378,4 +618,95 @@ test('HTTP R1 corrected specification retains old status result and raw identity
   assert.deepEqual(await invoke('GET', `/api/log/${oldId}?raw=1&bytes=262144`), raw);
   const result = await invoke('GET', `/api/jobs/${oldId}`);
   assert.equal(result.body.result.status, 'needs_specification');
+});
+
+test('historical GET-by-ID preserves classic results and raw cycle records without admissions', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'historical-id-inspection-'));
+  const isolated = isolatedDaemon({}, directory);
+  t.after(() => { isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const s = isolated.store, d = isolated.daemon;
+  d.testing.initializeRuntime();
+  const server = d.createHttpServer();
+  const invoke = (method, url) => new Promise(resolve => server.emit('request', {
+    method, url, headers: { host: 'localhost:5769' }, socket: { localPort: 5769 },
+  }, { writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); } }));
+  for (const kind of ['task', 'loop', 'r1']) {
+    const task = s.enqueueTask({ type: kind === 'loop' ? 'loop' : 'task',
+      ...(kind === 'r1' ? { workflow: 'r1', project: 'demo', issue: 5 } : {}), status: 'failed' });
+    s.moveTask(task.id, 'pending', 'done');
+    const result = { id: task.id, status: 'failed', summary: 'complete historical result\n' + 'x'.repeat(10000) };
+    s.writeResult(result);
+    const found = (await invoke('GET', `/api/jobs/${task.id}`)).body.result;
+    assert.equal(found.id, task.id);
+    assert.equal(found.status, 'failed');
+    assert.equal(found.summary, result.summary);
+    const logId = kind === 'loop' ? `${task.id}-cycle-1-critic` : task.id;
+    s.appendExecution(logId, { event: 'output', role: 'critic', base64: Buffer.from('full raw\n').toString('base64') });
+    const route = kind === 'loop' ? `${task.id}/cycle/1/critic` : task.id;
+    const page = await invoke('GET', `/api/log/${route}?raw=1&bytes=262144`);
+    assert.deepEqual(Buffer.from(page.body.base64, 'base64'), fs.readFileSync(s.executionPath(logId)));
+  }
+  assert.equal(s.enqueueLoop, undefined);
+  assert.equal(s.enqueueR1ChildLoopOnce, undefined);
+  for (const route of ['/api/loop', '/api/jobs', '/api/dispatch']) assert.equal((await invoke('POST', route)).status, 404);
+});
+
+test('historical child index stays read-only through GET-by-ID; orphan pending child fails closed on restart', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-historical-child-'));
+  const isolated = isolatedDaemon({ dashboardPort: 0, enginePaths: { codex: '/nonexistent/retired-worker' } }, directory);
+  const s = isolated.store, d = isolated.daemon;
+  t.after(async () => { await d.stop(() => {}); d.resetStopping(); isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const parentId = 't-12345678', attempt = 1;
+  const hash = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
+  const id = `t-${hash(`${parentId}:${attempt}`).slice(0, 24)}`;
+  const child = { id, project: 'demo', projectPath: '/tmp/historical', source: 'r1', type: 'loop',
+    engine: 'codex', workerEngine: 'codex', criticEngine: 'claude', autoCommit: false, maxCycles: 3, taskRetries: 3,
+    r1Child: { parentJobId: parentId, attempt, issue: 5 }, status: 'pending' };
+  s.writeTask(child, 'pending');
+  const stable = { project: child.project, projectPath: child.projectPath, source: child.source,
+    engine: child.engine, workerEngine: child.workerEngine, criticEngine: child.criticEngine,
+    autoCommit: child.autoCommit, maxCycles: child.maxCycles, taskRetries: child.taskRetries, r1Child: child.r1Child };
+  const indexDir = path.join(s.paths.state, 'r1-child-index', parentId); fs.mkdirSync(indexDir, { recursive: true });
+  const index = path.join(indexDir, 'attempt-1.json');
+  fs.writeFileSync(index, JSON.stringify({ schemaVersion: 1, parentJobId: parentId, attempt, id, fingerprint: hash(JSON.stringify(stable)) }));
+  const indexBytes = fs.readFileSync(index), pendingBytes = fs.readFileSync(path.join(s.paths.pending, `${id}.json`));
+  d.testing.initializeRuntime(); const server = d.createHttpServer();
+  const get = () => new Promise(resolve => server.emit('request', { method: 'GET', url: `/api/jobs/${id}`,
+    headers: { host: 'localhost:5769' }, socket: { localPort: 5769 } }, {
+    writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); },
+  }));
+  assert.equal(s.listR1ChildLoops(parentId)[0].id, id);
+  assert.equal((await get()).status, 200); assert.equal((await get()).status, 200);
+  assert.deepEqual(fs.readFileSync(index), indexBytes);
+  assert.deepEqual(fs.readFileSync(path.join(s.paths.pending, `${id}.json`)), pendingBytes);
+  d.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+  const done = s.readTask(id, 'done');
+  assert.equal(done.reason, 'r1_child_unauthorized'); assert.equal(done.status, 'failed');
+  assert.equal(s.listR1ChildLoops(parentId)[0].stage, 'done');
+  const found = await get(); assert.equal(found.status, 200); assert.equal(found.body.result.reason, 'r1_child_unauthorized');
+  assert.deepEqual(fs.readFileSync(index), indexBytes);
+  assert.equal(s.listTasks('pending').length, 0); assert.equal(s.listTasks('running').length, 0);
+});
+
+test('historical child with unknown process ownership remains held and inspectable after restart', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-ambiguous-child-'));
+  const isolated = isolatedDaemon({ dashboardPort: 0, enginePaths: { codex: '/nonexistent/retired-worker' } }, directory);
+  const s = isolated.store, d = isolated.daemon;
+  t.after(async () => { await d.stop(() => {}); d.resetStopping(); isolated.restore(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const child = { id: 't-0123456789abcdef01234567', type: 'loop', source: 'r1', status: 'running',
+    r1Child: { parentJobId: 't-12345678', attempt: 1, issue: 5 } };
+  s.writeTask(child, 'running');
+  s.appendExecution(child.id, { event: 'output', role: 'worker', base64: Buffer.from('captured before restart\n').toString('base64') });
+  const before = fs.readFileSync(s.executionPath(child.id));
+  d.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+  const held = s.readTask(child.id, 'running');
+  assert.equal(held.recoveryBlocked, true); assert.equal(held.status, 'running');
+  assert.deepEqual(s.listTasks('pending'), []); assert.deepEqual(s.listTasks('done'), []);
+  assert.deepEqual(fs.readFileSync(s.executionPath(child.id)).subarray(0, before.length), before);
+  const server = d.createHttpServer();
+  const response = await new Promise(resolve => server.emit('request', {
+    method: 'GET', url: `/api/jobs/${child.id}`, headers: { host: 'localhost:5769' }, socket: { localPort: 5769 },
+  }, { writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); } }));
+  assert.equal(response.status, 200); assert.equal(response.body.status, 'running'); assert.equal(response.body.id, child.id);
+  assert.equal(response.body.result, undefined, 'unknown process exit cannot invent a terminal result');
 });
