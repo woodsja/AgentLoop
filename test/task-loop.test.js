@@ -445,3 +445,159 @@ test('invalid state callback is rejected before any worker runs', async () => {
   }), /options\.onStateChange must be a function/);
   assert.equal(calls, 0);
 });
+
+test('public task loop trusts deterministic verification instead of a worker status claim', async () => {
+  await inProject(async projectPath => {
+    const failed = await runTask(projectPath, task({ maxAttempts: 1 }), {
+      runWorker: async () => ({ status: 'passed', verification: { passed: true } }),
+    });
+    assert.equal(failed.status, 'needs_planning');
+    assert.equal(failed.attempts[0].status, 'failed');
+    assert.equal(failed.attempts[0].verification.exitCode, 1);
+
+    const passed = await runTask(projectPath, task({ maxAttempts: 1 }), {
+      runWorker: async () => {
+        fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+        return { status: 'failed', verification: { passed: false } };
+      },
+    });
+    assert.equal(passed.status, 'passed');
+    assert.equal(passed.attempts[0].verification.passed, true);
+  });
+});
+
+test('worker mutation cannot change the next attempt contract', async () => {
+  await inProject(async projectPath => {
+    let calls = 0;
+    const result = await runTask(projectPath, task({ maxAttempts: 2 }), {
+      runWorker: async (_cwd, workerTask) => {
+        calls++;
+        assert.equal(workerTask.goal, 'Create result.txt');
+        assert.deepEqual(workerTask.acceptance, ['result.txt exists']);
+        if (calls === 1) {
+          workerTask.goal = 'malicious mutation';
+          workerTask.acceptance.push('unapproved requirement');
+          workerTask.verification = 'exit 0';
+        }
+      },
+    });
+    assert.equal(calls, 2);
+    assert.equal(result.task.goal, 'Create result.txt');
+    assert.deepEqual(result.task.acceptance, ['result.txt exists']);
+    assert.equal(result.status, 'needs_planning');
+    assert.ok(result.attempts.every(attempt => attempt.status === 'failed'));
+  });
+});
+
+test('a failed worker never runs verification as a side effect', async () => {
+  await inProject(async projectPath => {
+    const marker = 'node -e "require(\'node:fs\').writeFileSync(\'verification-ran\', \'yes\')"';
+    const result = await runTask(projectPath, task({ verification: marker, maxAttempts: 1 }), {
+      runWorker: async () => { throw new Error('worker failed'); },
+    });
+    assert.equal(result.status, 'needs_planning');
+    assert.equal(result.attempts[0].status, 'worker_error');
+    assert.equal(result.attempts[0].error.message, 'worker failed');
+    assert.equal(fs.existsSync(path.join(projectPath, 'verification-ran')), false);
+  });
+});
+
+test('verification runs only after the worker finishes', async () => {
+  await inProject(async projectPath => {
+    let releaseWorker;
+    const gate = new Promise(resolve => { releaseWorker = resolve; });
+    const marker = 'node -e "const fs=require(\'node:fs\'); fs.writeFileSync(\'verification-ran\', \'yes\'); process.exit(fs.existsSync(\'result.txt\') ? 0 : 1)"';
+    const execution = runTask(projectPath, task({ maxAttempts: 1, verification: marker }), {
+      runWorker: async () => {
+        await gate;
+        fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+      },
+    });
+    await new Promise(resolve => setTimeout(resolve, 90));
+    assert.equal(fs.existsSync(path.join(projectPath, 'result.txt')), false);
+    assert.equal(fs.existsSync(path.join(projectPath, 'verification-ran')), false);
+    releaseWorker();
+    const result = await execution;
+    assert.equal(result.status, 'passed');
+    assert.equal(fs.readFileSync(path.join(projectPath, 'verification-ran'), 'utf8'), 'yes');
+  });
+});
+
+test('missing or invalid worker callback fails before task normalization', async () => {
+  for (const options of [undefined, null, [], {}, { runWorker: null }]) {
+    await assert.rejects(runTask(process.cwd(), null, options), /options\.runWorker must be a function/);
+  }
+});
+
+test('worker receives defaults through the surviving public task interface', async () => {
+  await inProject(async projectPath => {
+    let received;
+    const result = await runTask(projectPath, task(), {
+      runWorker: async (cwd, workerTask) => {
+        assert.equal(cwd, projectPath);
+        received = workerTask;
+        fs.writeFileSync(path.join(projectPath, 'result.txt'), 'ready');
+      },
+    });
+    assert.equal(received.maxAttempts, 2);
+    assert.equal(received.reviewPolicy, 'risk');
+    assert.equal(result.task.maxAttempts, 2);
+    assert.equal(result.task.reviewPolicy, 'risk');
+    assert.equal(result.status, 'passed');
+  });
+});
+
+test('worker cannot opt into an architecture pause by rewriting its task copy', async () => {
+  await inProject(async projectPath => {
+    const decisions = require('../src/architecture-decisions');
+    const file = path.join(projectPath, decisions.FILE);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // If the worker could toggle the trusted flag, this invalid owner proposal
+    // would be read and fail the task instead of running its verified command.
+    fs.writeFileSync(file, '{invalid-untrusted-proposal');
+    const result = await runTask(projectPath, task({ maxAttempts: 1 }), {
+      runWorker: async (cwd, workerTask) => {
+        workerTask.architectureDecisions = true;
+        fs.writeFileSync(path.join(cwd, 'result.txt'), 'ready');
+      },
+    });
+    assert.equal(result.status, 'passed');
+    assert.equal(result.attempts[0].status, 'passed');
+    assert.equal(result.task.architectureDecisions, undefined);
+  });
+});
+
+test('worker cannot disable an authorized owner pause or rewrite its proposal policy', async () => {
+  await inProject(async projectPath => {
+    const decisions = require('../src/architecture-decisions');
+    const proposal = {
+      key: 'owner-pause-required', problem: 'Select persistent state format',
+      options: [
+        { name: 'Journal', tradeoffs: 'Write amplification' },
+        { name: 'SQLite', tradeoffs: 'Schema migrations' },
+      ],
+      recommendation: 'Journal', consequences: 'Compaction needed',
+      conflicts: 'No existing decision', grantImplications: 'No new grant',
+      newEvidence: '', settledDecision: false,
+      expensiveToReverse: true, surprisingWithoutContext: true, genuineTradeoff: true,
+    };
+    const input = task({ maxAttempts: 1, architectureDecisions: true });
+    const result = await runTask(projectPath, input, {
+      runWorker: async (cwd, workerTask) => {
+        const file = path.join(cwd, decisions.FILE);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(proposal));
+        workerTask.architectureDecisions = false;
+        workerTask.acceptance.push('worker-provided condition');
+        workerTask.verification = 'exit 0';
+      },
+    });
+    assert.equal(result.status, 'paused_owner_decision');
+    assert.equal(result.attempts[0].status, 'paused_owner_decision');
+    assert.equal(result.proposal.key, proposal.key);
+    assert.equal(result.task.architectureDecisions, true);
+    assert.notStrictEqual(result.task, input);
+    assert.deepEqual(input.acceptance, ['result.txt exists']);
+    assert.equal(result.attempts[0].verification, undefined);
+  });
+});

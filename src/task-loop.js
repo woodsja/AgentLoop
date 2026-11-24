@@ -1,5 +1,5 @@
 const { normalizeTaskContract } = require('./task-contract');
-const { executeTask } = require('./task-executor');
+const { verifyTask } = require('./task-runner');
 
 function snapshotAttempt(attempt) {
   if (attempt.status === 'worker_error') {
@@ -42,11 +42,18 @@ async function runTask(projectPath, inputTask, options) {
     const context = { attempt: number, previousAttempt };
     let result;
     try {
-      result = await executeTask(projectPath, task, {
-        runWorker: (workerPath, workerTask) => options.runWorker(workerPath, workerTask, context),
-        verificationTimeoutMs: options.verificationTimeoutMs,
-        recordExecution: options.recordExecution,
-      });
+      // Hand the worker its own task copy. It must not be able to rewrite the
+      // trusted verification command or architecture-decision policy.
+      const workerTask = normalizeTaskContract(task);
+      const worker = await options.runWorker(projectPath, workerTask, context);
+      const proposal = require('./architecture-decisions').readProposal(
+        projectPath, task.architectureDecisions, options.recordExecution);
+      if (proposal) {
+        result = { task, worker, status: 'paused_owner_decision', proposal };
+      } else {
+        const verified = await verifyTask(projectPath, task, options.verificationTimeoutMs, options.recordExecution);
+        result = { task, worker, status: verified.status, verification: verified.verification };
+      }
       if (result.status === 'paused_owner_decision') {
         attempts.push({ number, status: result.status, worker: result.worker, proposal: result.proposal });
         await emitState('paused_owner_decision', null);
