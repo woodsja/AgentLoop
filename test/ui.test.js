@@ -30,6 +30,15 @@ function markup(html) {
     .trim();
 }
 
+test('dashboard offers only the canonical development-job submission', () => {
+  assert.match(publicHtml, /<form id="jobForm"/);
+  assert.match(publicHtml, /<input id="jobIssue" type="number" min="1" required/);
+  assert.ok(publicHtml.includes("post('/api/r1/jobs', {project, issue})"));
+  for (const legacy of ['taskForm','loopForm','/api/dispatch','/api/loop']) {
+    assert.equal(publicHtml.includes(legacy), false, 'legacy admission persists: ' + legacy);
+  }
+});
+
 test('Dashboard sources compile and stay aligned', () => {
   assert.ok(replayHtml.indexOf('<script src="replay.js"></script>') >= 0);
   assert.ok(replayHtml.indexOf('<script src="replay.js"></script>') < replayHtml.indexOf('<script>'));
@@ -37,15 +46,11 @@ test('Dashboard sources compile and stay aligned', () => {
   assert.equal(markup(publicHtml), markup(replayHtml));
   assert.match(publicHtml, /<aside id="rail"/);
   assert.match(publicHtml, /class="duo duo-main"/);
-  assert.match(publicHtml, /<form id="taskForm"/);
-  assert.match(publicHtml, /<select id="lProject" required disabled>/);
-  assert.match(publicHtml, /<select id="tProject" required disabled>/);
-  assert.match(publicHtml, /<select id="lWorkerEngine">/);
-  assert.match(publicHtml, /<select id="lCriticEngine">/);
-  assert.ok(publicHtml.includes("body.workerEngine = $('#lWorkerEngine').value"));
-  assert.ok(publicHtml.includes("body.criticEngine = $('#lCriticEngine').value"));
+  assert.match(publicHtml, /<form id="jobForm"/);
+  assert.match(publicHtml, /<select id="jobProject" required disabled>/);
+  assert.match(publicHtml, /<input id="jobIssue" type="number" min="1" required/);
+  assert.ok(publicHtml.includes("post('/api/r1/jobs', {project, issue})"));
   assert.match(publicHtml, /fetch\('\/api\/projects', \{cache: 'no-store'\}\)/);
-  assert.match(publicHtml, /body\.project = project/);
   assert.doesNotMatch(publicHtml, /body\.cwd = project/);
   assert.match(publicHtml, /<link rel="icon" type="image\/png"/);
   assert.match(publicHtml, /<span class="bw">/);

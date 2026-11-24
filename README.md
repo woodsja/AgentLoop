@@ -12,79 +12,33 @@ For this repository's Woods-controlled autonomous Ralph deployment, the [accepte
 
 ## What it is
 
-Plan a goal in Claude or ChatGPT, then let it rip. AgentLoop is a local orchestration daemon for coding agents: each cycle starts a fresh worker, work carries forward in project files, a fresh critic enforces your rubric, and the whole run is watchable on a local dashboard.
+AgentLoop coordinates authorized development jobs in registered Git repositories. A single submission through the MCP tool `submit_r1_job` or the corresponding daemon route `POST /api/r1/jobs` advances implementation, deterministic verification, exact-commit GitHub CI, independent Claude review and bounded correction, then leaves an open pull request for an owner to merge separately. The current transport uses the historical `r1` name; the intended public vocabulary is a neutral development job after the coordinator and state are consolidated.
 
-Codex CLI and Claude Code both run as engines. Pick one per loop from the dashboard, or per task through the bridge.
+Codex handles implementation; Claude reviews independently. The daemon persists job progress and captured raw execution records so the owner can inspect results, cancel running work, or diagnose a failed or interrupted job. New development jobs use the same coordinator regardless of whether a client submits through the dashboard or MCP.
 
-AgentLoop is for solo developers who run long agent tasks across multiple projects and cannot supervise every session.
+## Why fresh contexts
 
-It exists because running coding agents by hand means shuttling plans between a chat and a terminal all day, and quality slips the moment you stop watching.
-
-Your standards live in GUIDELINES.md and the critic enforces them every cycle, so you supervise the work without babysitting it.
-
-## Why sequential fresh-context
-
-Long-running chats collect stale assumptions and irrelevant context. That is context rot. AgentLoop starts a new engine process for every worker and critic session, so no prior chat history follows them. The durable context is the project itself plus concrete critic fixes. That keeps a loop bounded, easier to leave unattended, and less likely to spend tokens re-reading an ever-growing conversation.
-
-A loop is intentionally sequential. Independent queued tasks can run up to `maxConcurrent`, but one loop does not create a parallel swarm that races across the same project.
-
-```text
-Claude or ChatGPT -> MCP bridge -> daemon -> worker/critic cycles -> dashboard
-```
+Each agent invocation starts with a fresh process. Durable job state and the repository carry forward the authorized task and any reviewer findings; no human must copy intermediate results between conversations. Retries are bounded. Historical task and loop records remain readable, but their old admission interfaces are no longer supported. Pre-upgrade pending legacy tasks and classic loops are failed closed when the scheduler reaches them; if an R1 job holds the execution slot they remain pending but cannot start a retired executor. Interrupted legacy processes are recovered without replay.
 
 ## How it works
 
-- **Dispatch** sends one one-shot task to `POST /api/dispatch`. Its file moves from pending to running to done, with a transcript and dashboard cancellation.
-- **Loop** runs a project cycle by cycle. A worker reads `PLAN.md` and `STATE.md`, makes one increment, updates state, and exits. A fresh critic then reads `PLAN.md`, `GUIDELINES.md`, the worker output, and the project files. The next worker is a new process.
-- **Polish mode** is an optional loop flag: after the first PASS, remaining cycles become polish cycles where the critic re-verifies the guidelines and proposes one improvement per cycle until it verdicts SHIP.
-- **Critic contract** requires the final line to be exactly `VERDICT: PASS`, `VERDICT: FAIL - <concrete fixes>`, or `VERDICT: CONTINUE - done: <item>; next: <item>`. FAIL becomes injected fix notes for the next worker; CONTINUE records a finished PLAN.md item and starts a fresh worker on the next one; PASS means every unblocked plan item is complete and ends the loop unless polish mode is on. Polish cycles end with `VERDICT: IMPROVE - <one improvement>` or `VERDICT: SHIP`. `maxCycles` is capped at 1 to 50 and defaults to 3.
-- **Stuck tasks get skipped.** `taskRetries` (1 to 10, default 3) caps consecutive FAIL cycles per task; at the cap the task is marked blocked, later workers and critics skip it, and the loop ends `partial` if the rest passes or `incomplete` if the cycle budget runs out mid-plan.
-- **Auto-checkpoint** is on by default for projects inside a git work tree: the daemon makes a local commit after each completed task, on the final pass, and when a task is blocked. The daemon composes every commit message itself and never touches remotes; a dirty tree at loop start is refused so checkpoints stay clean.
-- **Files are memory.** `PLAN.md`, `STATE.md`, and `GUIDELINES.md` carry the goal, progress, and rubric. A loop project needs `PLAN.md`; missing `STATE.md` and `GUIDELINES.md` files are seeded automatically.
-- **Messages narrate a run.** A connected chat client can post `info`, `question`, or `results` messages through the bridge. They appear in the dashboard Messages panel.
-- **Engines are pluggable.** `src/engines.js` holds one entry per engine: how to find its CLI, what arguments to run it with, and how to read its event stream. The daemon itself is engine-agnostic. Set `defaultEngine` in `config.json`, override it per loop in the dashboard, or per task through the bridge. An engine that is not installed is greyed out rather than offered.
-- **Workers start clean and constrained.** Codex sessions use workspace-write sandboxing, disable network access inside the sandbox, and route boundary requests through automatic approval review. Claude Code sessions run with `acceptEdits` so they never block on a prompt, `--safe-mode` so a worker ignores your personal `CLAUDE.md`, hooks, skills, and MCP servers, and web tools disabled. The two are not identical: Codex isolates the network at the sandbox boundary, so a shell command it runs cannot reach out, while a shell command run by Claude Code can.
+1. Register and activate a project in owner-controlled configuration and authorize its worktree policy. Supply an exact GitHub issue that has **already** received its separately approved executable release and required ready label; creating or drafting an issue alone does not authorize execution.
+2. Submit `{project, issue}` once with `submit_r1_job`, or choose **New job** in the dashboard. The daemon validates project, repository, and worktree authorization before starting work.
+3. Codex implements the change in the authorized worktree, and Ralph runs deterministic verification with complete captured output. Failed implementation or verification receives bounded correction attempts.
+4. Ralph pushes the delivery branch and opens a PR. Required GitHub Actions workflow results are checked against the *exact delivered commit*, followed by independent read-only Claude review of that same commit. Actionable review findings can trigger bounded correction and a fresh exact-commit check.
+5. With `autoMerge: false`, the job ends in a recorded pass/blocked outcome and leaves an approved PR open for owner inspection. Merging and production deployment are separate actions.
 
-The daemon is plain Node with no package dependencies. Task state, results, transcripts, events, and messages are stored as JSON or NDJSON files. The dashboard is one local HTML file at `http://127.0.0.1:5757`.
+The R1-backed delivery coordinator is the currently proven implementation. The internal classic worker/critic loop is still needed for some projects and will be consolidated in a later change; it is not a separately supported submission path. No direct one-shot task or classic-loop submission interface is offered.
 
-## Multi-task loops
+Captured raw logs, historical job lookups, cancellation, and owner-decision holds are retained. The system never promises access to model reasoning not exposed by the CLI.
 
-A `PLAN.md` written as a top-level list is walked one item per worker:
-
-```markdown
-# Calculator
-
-Users report two bugs in `calculator.html`.
-
-1. Fix the arithmetic.
-2. Fix the `%` button.
-```
-
-`-`, `*`, `+`, and `1.` all count, up to 100 items. Indented lines are detail for the item above them, not items of their own.
-
-Each cycle takes one item. `VERDICT: CONTINUE - done: <item>; next: <item>` closes that item and starts a fresh worker on the next one. `VERDICT: FAIL` keeps the same item and injects the critic fixes into the next worker. `VERDICT: PASS` ends the loop once every unblocked item is complete.
-
-`taskRetries` caps consecutive FAIL cycles on a single item, 1 to 10, default 3. At the cap that item is marked blocked: later workers take the next item instead, the critic stops grading it, and the loop finishes `partial` if the rest passes or `incomplete` if the cycle budget runs out first. Size `maxCycles` at roughly tasks x retries.
-
-### Checkpoints
-
-Auto-checkpoint is on by default for a project inside a git work tree. The daemon commits after each completed item, when an item is blocked, and on the final pass, so every task boundary is a sha you can read, diff, or reset to. The dashboard shows each one on its task chip.
-
-The daemon writes those commit messages itself from the verdict text. Agents never run git, and the daemon never touches a remote: `git add -A .` then `git commit` inside the project folder, nothing else.
-
-It needs two things. The project must be a git work tree, otherwise the toggle is forced off and the dashboard reads `checkpoints off`. And the project tree must be clean when the loop starts, otherwise the loop is refused, so a checkpoint only ever holds work the loop did.
+**Agent permissions and host boundary.** The Codex implementation CLI runs with the configured workspace-write sandbox and network access disabled inside that sandbox, using its existing on-request approval policy. Internal Claude critics run in restricted read-only mode with web tools disabled. The independent PR reviewer uses a separate restricted Claude process with no execution tools and a private owner-managed credential. These agent settings do not establish that the Linux VM is isolated from the Windows host; verify actual VM-to-host bridges separately under [ADR 0001](docs/decisions/0001-agentloop-trust-boundary.md).
 
 ## The dashboard
 
-A left rail navigates the page - waiting on you, active run, recent runs, queue, messages, event log - and holds the loop launcher, live daemon status, and a theme picker with fifteen editor themes remembered locally.
+The local dashboard at `http://127.0.0.1:5757` offers one **New job** form: select a registered project and enter its already-authorized GitHub issue number. The form submits to `POST /api/r1/jobs`; it cannot create or approve GitHub issues or choose an arbitrary filesystem path. The dashboard also shows job status, queue, historical runs, owner messages and execution evidence, including downloadable complete raw NDJSON logs. Cancellation still uses `POST /api/cancel`.
 
-- **Cycle timeline.** The active run shows one card per cycle: verdict, critic summary, duration, and cost. A card working a plan task carries a try tag like `T02 · try 1/3`, and a task that hits its retry budget is marked blocked on the card itself.
-- **Task rail.** A loop with a parsed `PLAN.md` gets a chip per plan task: done chips show their checkpoint sha, the active chip shows its try count, blocked chips show the spent retry budget.
-- **Waiting on you.** Tasks blocked on an answer pin to the top of the page with a rail badge; the block stays hidden while nothing is blocked.
-- **End states.** Recent runs keep loop endings distinct: `passed`, `partial` (passed with blocked tasks), `incomplete` (cycle budget ran out mid-plan), and `maxed` (no passing verdict), plus counts of tasks done and blocked.
-- **Launcher.** The loop form takes a project folder, max cycles, task retries, an engine picker that preselects `defaultEngine` and disables engines that are not installed, an auto-checkpoint toggle (on by default), and polish mode.
-
-The page polls `GET /api/state`, a whitelisted read-only payload: optional metrics like cost and duration are omitted when unknown rather than zero-filled, and project paths are reduced to folder basenames, so absolute paths never leave the daemon.
+The existing read-only visualization includes historical loop timelines and checkpoint details. Those remain for inspection while their underlying execution machinery is consolidated into the canonical delivery coordinator.
 
 ## How it was built
 
@@ -143,20 +97,17 @@ Claude Code can connect to the local bridge directly, no tunnel needed:
 claude mcp add --transport http agentloop "http://127.0.0.1:5758/mcp?key=<token-from-Connector>"
 ```
 
-The bridge listens only on `127.0.0.1:5758`, uses a token, and exposes `agentloop_status`, `submit_job`, `get_job_status`, `get_job_result`, `submit_r1_job`, `get_r1_job_status`, `get_r1_job_result`, `dispatch_task`, `start_loop`, and `send_message`. Job and dispatch submission require a registered project name; `dispatch_task` and `start_loop` both take an optional `engine`.
+The bridge listens on `127.0.0.1:5758` with its existing token and exposes `submit_r1_job` as its sole development-job submission tool. It also exposes `get_r1_job_status`, `get_r1_job_result`, `get_job_status`, `get_job_result`, `agentloop_status`, and `send_message`. Generic status/result tools retain access to historical job IDs. The separate opt-in `run_bash` diagnostic tool is not a job-submission interface.
 
-## Try the demo loop
+## Submit a development job
 
-With the daemon running, select **+ New loop**:
+With an activated project and an owner-authorized ready-labeled GitHub issue:
 
-- **Project folder:** `examples/starter`
-- **Max cycles:** `3`
-- **Engine:** whichever you have installed
-- Select **Start loop**
+1. In the dashboard, select **New job**, choose the registered project, and enter the GitHub issue number. The form does not permit choosing a direct shell command, implementation engine, or arbitrary worktree.
+2. Alternatively, use `submit_r1_job({project: "registered-project", issue: 42})` through MCP. The job ID immediately returned is durable and can be used to retrieve status, results, and raw records.
+3. Follow the same job through implementation, native tests, PR delivery, exact-head CI, and Claude review. With auto-merge disabled, the resulting PR remains open and unmerged.
 
-Cycle 1 deliberately implements only the normal input path. The critic reads `GUIDELINES.md`, rejects the missing hardening and command-line requirements, and emits a FAIL verdict. A later cycle receives those fixes, completes the utility, and passes.
-
-Watch the cycle timeline in **Active run** and critic verdicts in the **Event log**. Open the completed task to see its transcript. Messages posted through the bridge appear in **Messages**.
+Do not relabel or release issues automatically when owner authorization or an immutable ticket manifest is required.
 
 ## Configuration
 
@@ -165,17 +116,17 @@ Watch the cycle timeline in **Active run** and critic verdicts in the **Event lo
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `dashboardPort` | `5757` | Local dashboard port. |
-| `maxConcurrent` | `2` | Maximum concurrent queued tasks or loops. |
+| `maxConcurrent` | `2` | Maximum concurrent admitted queue jobs and internal worker sessions. |
 | `taskTimeoutMin` | `45` | Timeout in minutes for each worker or critic session. |
-| `defaultEngine` | `codex` | Engine used when a task or loop does not name one. `codex` or `claude`. |
+| `defaultEngine` | `codex` | Default internal worker engine; the canonical development policy requires Codex implementation and independent Claude review. |
 | `mcpBridge.port` | `5758` | Local MCP bridge port. |
 | `models` | `{ "claude": "opus", "codex": "gpt-5.6-terra" }` | Default model per engine. |
 | `enginePaths` | none | Optional absolute path per engine, for a CLI that is not on `PATH`. |
-| `allowedProjects` | none | Admin-owned map of project name to root used by `/api/jobs`, `/api/dispatch`, and `/api/loop`. Missing or invalid entries deny submission. |
+| `allowedProjects` | none | Admin-owned registered project roots and authorized worktrees used by `/api/r1/jobs`. Missing or invalid entries deny submission. |
 
 The shipped `config.json` includes every key above except the optional `enginePaths` key.
 
-To enable HTTP submission, explicitly register each project (relative roots are resolved relative to `config.json`):
+Register the canonical development project in the owner-controlled registry (relative roots are resolved relative to `config.json`):
 
 ```json
 "allowedProjects": {
@@ -183,9 +134,9 @@ To enable HTTP submission, explicitly register each project (relative roots are 
 }
 ```
 
-Requests send the project name, never a working directory. The daemon resolves the configured root to its canonical path and rejects unknown projects, supplied `cwd` values, and requested operations.
+Requests send the registered project name and an approved GitHub issue number, never a working directory. The daemon resolves the configured root and approved worktree before execution; it refuses unknown projects, path overrides, and unauthorized worktrees. Project policy for GitHub, worker, review and CI is also defined in `autopilot-projects.json`.
 
-A model named on the task or loop itself wins over `models`.
+Registered project policy specifies the Codex worker and independent Claude reviewer for the canonical workflow.
 
 ## Scheduled autopilot (systemd user timer)
 
@@ -205,9 +156,9 @@ Worker directories must be authorized by the owner configuration (`AGENTLOOP_CON
 {"allowedProjects":{"ralph":{"root":"/path/to/checkout","worktrees":{"review":"/path/to/feature-worktree"}}}}
 ```
 
-To authorize future linked worktrees once at the project level, an entry may instead (or also) name a managed `worktreeRoot`, such as `{"root":"/path/to/checkout","worktreeRoot":"/path/to/worktrees"}`. After this owner authorization, `git worktree add /path/to/worktrees/feature -b feature/example` is the only worktree-specific setup needed. Select it with `worktree: "feature"` in `dispatch_task`, `start_loop`, or `ralph_run_task`; branch names are unrestricted. Explicit named aliases take precedence. Selectors must be single directory names, without slashes, absolute paths, or `..`. Projects without a managed root still require an explicit alias. A worker directory under that root is authorized only when its canonical path stays inside the root and it is a registered Git worktree of that same repository, not its main checkout; symlink escapes, plain directories, and other repositories' worktrees are refused.
+To authorize future linked worktrees once at the project level, an entry may instead (or also) name a managed `worktreeRoot`, such as `{"root":"/path/to/checkout","worktreeRoot":"/path/to/worktrees"}`. After this owner authorization, Ralph can create the approved Git issue worktree without an additional project-registry entry. The canonical submission names the registered project and issue; it cannot select an arbitrary filesystem location. Explicit named aliases take precedence. Selectors must be single directory names, without slashes, absolute paths, or `..`. Projects without a managed root still require an explicit alias. A worker directory under that root is authorized only when its canonical path stays inside the root and it is a registered Git worktree of that same repository, not its main checkout; symlink escapes, plain directories, and other repositories' worktrees are refused.
 
-Keep that authoritative configuration outside every writable worker directory. Requests select `project: "ralph"` and `worktree: "review"`; they cannot register a project or override its path. The resolver checks the canonical directory, Git worktree registration, and repository ownership again before execution. `dispatch_task`, `start_loop`, and `ralph_run_task` accept the optional `worktree` selector; `cwd` and `projectPath` remain rejected. Unknown projects, redirected worktrees, and unrelated paths fail closed.
+Keep that authoritative configuration outside every writable worker directory. Requests select an owner-registered project and GitHub issue. An optional authorized worktree alias can be supplied to the canonical submission when configured. The resolver rechecks the canonical directory, Git worktree registration, and repository ownership before execution; `cwd` and `projectPath` remain rejected. Unknown projects, redirected worktrees, and unrelated paths fail closed.
 
 Owner-authorized worktrees use ordinary VM-local subprocesses for preparation and verification. Worker CLIs keep their normal permission settings; registration does not require a per-worktree filesystem sandbox or a particular worker engine. Git worktrees support recovery and scope selection, not host isolation. See [Node project readiness](docs/node-projects.md) and [ADR 0001](docs/decisions/0001-agentloop-trust-boundary.md). This configuration support does not register new live projects or change services.
 
@@ -333,9 +284,10 @@ barrier. Restart separates torn records and marks interrupted children with
 unknown exit details. The dashboard accepts only local Host headers and matching
 local Origins; raw records are never redacted for access control.
 
-No additional scheduler or service is installed or started by submission. The
-generic `submit_job`, `get_job_status`, and `get_job_result` contracts are unchanged;
-the generic tools also report R1 job IDs with their compact status and result.
+No additional scheduler or service is installed or started by submission. Historical
+`get_job_status` and `get_job_result` remain available and can inspect previously
+created direct-task, loop, and R1 job IDs. Direct-task and classic-loop creation
+routes have been retired; preserving historical reads does not authorize legacy execution.
 
 Python projects use the [shared contract and locked readiness preflight](docs/python-preflight.md)
 to prepare a local `.venv` with `uv sync --locked` before worker admission.

@@ -11,10 +11,9 @@ const { createR1Jobs } = require('./r1-jobs');
 const { startTime: r1ProcessStartTime, terminatePriorR1Worker } = require('./r1-process-claim');
 let r1Jobs = createR1Jobs(store, { cancelChild: cancelOwnedR1Child });
 const engines = require('./engines');
-const { resolveProject, resolveWorkerScope } = require('./project-registry');
+const { resolveWorkerScope } = require('./project-registry');
 const state = require('./state');
 const {
-  taskPrompt,
   loopWorkerPrompt,
   polishWorkerPrompt,
   criticPrompt,
@@ -26,7 +25,6 @@ const {
 } = require('./prompts');
 
 const pollMs = 1500;
-const maxResultText = 20000;
 const maxLogLines = 1000;
 const maxEventBytes = 16 * 1024;
 const maxDigestBytes = 1024 * 1024;
@@ -34,7 +32,6 @@ const knownEngines = new Set(engines.ids());
 const messageKinds = new Set(['info', 'question', 'results']);
 const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', 'maxed', 'partial', 'incomplete', 'plan_complete']);
 const dirtyTreeError = 'Auto-checkpoint needs a clean project tree: commit or stash your changes first.';
-const defaultLoopCycles = 3;
 const defaultTaskRetries = 3;
 const shutdownGracePeriodMs = 10000;
 const shutdownDeadlineMarginMs = 2000;
@@ -70,11 +67,6 @@ function sortPending(tasks) {
     taskPriority(left) - taskPriority(right)
     || taskTime(left, 'createdAt') - taskTime(right, 'createdAt')
   ));
-}
-
-function trimResult(text) {
-  const value = String(text || '').trim();
-  return value.length > maxResultText ? value.slice(-maxResultText) : value;
 }
 
 function recordActivity(id, engine, line) {
@@ -188,28 +180,6 @@ function terminateLoopWorker(worker) {
     catch { /* Fallback still targets the known direct child. */ }
   }
   terminateWorker(worker.child);
-}
-
-function stopWorker(child) {
-  if (!child.pid) {
-    return;
-  }
-
-  if (process.platform === 'win32') {
-    try {
-      spawnSync(taskkillPath(), ['/pid', String(child.pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-    } catch {
-    }
-    return;
-  }
-
-  try {
-    child.kill('SIGTERM');
-  } catch {
-  }
 }
 
 function bridgePort() {
@@ -462,20 +432,6 @@ function timeoutMinutes() {
   return Number.isFinite(value) ? Math.max(1, value) : 45;
 }
 
-function loopCycles(value) {
-  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
-    return defaultLoopCycles;
-  }
-
-  const parsed = Number(value);
-
-  if (!Number.isFinite(parsed)) {
-    return defaultLoopCycles;
-  }
-
-  return Math.min(50, Math.max(1, Math.trunc(parsed)));
-}
-
 function loopRetries(value) {
   if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
     return defaultTaskRetries;
@@ -597,78 +553,6 @@ function fallbackSummary(text, status, timedOut) {
   }
 
   return status === 'done' ? 'Worker completed.' : 'Worker failed.';
-}
-
-function completeTask(task, details) {
-  const finishedAt = new Date().toISOString();
-  const startedAt = taskTime(task, 'startedAt');
-  const parsed = parseLoopResult(details.resultText);
-  const cancelled = details.cancelled === true;
-  const workerExitedNonzero = !cancelled && !details.forceFailed && !details.timedOut
-    && (details.exitCode !== 0 || details.signal);
-  const invalidLoopResult = !cancelled && !details.forceFailed && !details.timedOut
-    && !workerExitedNonzero && !parsed;
-  let reason = null;
-
-  if (cancelled) {
-    reason = 'cancelled';
-  } else if (details.timedOut) {
-    reason = 'timed_out';
-  } else if (details.reason) {
-    reason = details.reason;
-  } else if (details.forceFailed) {
-    reason = 'worker_failed';
-  } else if (workerExitedNonzero) {
-    reason = 'worker_exited_nonzero';
-  } else if (invalidLoopResult) {
-    reason = 'invalid_loop_result';
-  } else if (parsed.status === 'failed') {
-    reason = 'worker_reported_failure';
-  }
-
-  const status = cancelled ? 'cancelled' : reason ? 'failed' : parsed.status;
-  const result = {
-    id: task.id,
-    status,
-    summary: cancelled
-      ? 'Cancelled.'
-      : details.timedOut
-      ? fallbackSummary(details.resultText, status, true)
-      : invalidLoopResult
-      ? 'worker exited without a valid LOOP_RESULT'
-      : parsed && parsed.summary
-        ? parsed.summary
-        : fallbackSummary(details.resultText, status, details.timedOut),
-    resultText: trimResult(details.resultText),
-    exitCode: details.exitCode,
-    ...(typeof details.costUsd === 'number' ? { costUsd: details.costUsd } : {}),
-    ...(reason ? { reason } : {}),
-    durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
-    finishedAt,
-  };
-  const completedTask = {
-    ...task,
-    status,
-    finishedAt,
-    ...(reason ? { reason } : {}),
-  };
-
-  try {
-    store.writeResult(result);
-    store.writeTask(completedTask, 'running');
-    store.moveTask(task.id, 'running', 'done');
-    if (status === 'cancelled') {
-      recordEvent('cancel', { id: task.id, reason });
-    } else if (status === 'failed') {
-      recordEvent('fail', { id: task.id, reason, ...(workerExitedNonzero ? { code: details.exitCode } : {}) });
-    } else {
-      recordEvent('done', { id: task.id, status });
-    }
-  } catch (error) {
-    console.error(`Failed to finish ${task.id}: ${error.message}`);
-  } finally {
-    runningActivity.delete(task.id);
-  }
 }
 
 function completeLoop(loop, status, summary, reason) {
@@ -1674,133 +1558,6 @@ function startLoop(loop) {
   }
 }
 
-function spawnWorker(task) {
-  const engine = engines.get(task.engine) || engines.get(store.config.defaultEngine);
-  const model = engines.modelFor(engine, store.config, task.model);
-  const cwd = task.cwd ? path.resolve(task.cwd) : path.join(store.paths.root, 'workspace');
-  const outputPath = engine.usesOutputFile
-    ? path.join(store.paths.results, `.${task.id}.${Date.now()}.last-message.tmp`)
-    : null;
-  let child;
-  const record = recorder(store, task.id, { role: 'worker', stage: 'implementation', attempt: 1 });
-
-  try {
-    const scope = resolveWorkerScope(store.config, cwd, store.paths.config);
-    const args = engine.args({ model, outputPath, workspaceRoot: scope.isolatedWorktree ? scope.cwd : null });
-    child = captureProcess((_file, argv, options) => spawnEngine(engine, argv, options), engines.binary(engine, store.config.enginePaths) || engine.command, args, {
-      cwd: scope.cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    }, record);
-  } catch (error) {
-    record('exception', { name: error.name, message: error.message, stack: error.stack, code: error.code });
-    completeTask(task, {
-      exitCode: null,
-      forceFailed: true,
-      reason: 'worker_start_failed',
-      resultText: `Worker failed to start: ${error.message}`,
-      timedOut: false,
-    });
-    return;
-  }
-
-  const tail = { text: '', message: '', result: '' };
-  let inputFailed = false;
-  let timedOut = false;
-  let settled = false;
-  let timeout;
-  const worker = { child, timeout: null, cancelled: false };
-  activeWorkers.set(task.id, worker);
-  const captureLine = (line) => {
-    try {
-      store.appendLogLine(task.id, line);
-    } catch (error) {
-      console.error(`Failed to write log for ${task.id}: ${error.message}`);
-    }
-
-    trackTail(tail, recordActivity(task.id, engine, line));
-  };
-  const finish = (exitCode, signal, forceFailed = false, reason) => {
-    if (settled || stopping) {
-      return;
-    }
-
-    settled = true;
-    clearTimeout(timeout);
-    activeWorkers.delete(task.id);
-    completeTask(task, {
-      exitCode,
-      signal,
-      forceFailed,
-      reason: timedOut ? 'timed_out' : reason || (inputFailed ? 'worker_input_failed' : undefined),
-      resultText: finalText(engine, outputPath, tail, record),
-      timedOut,
-      cancelled: worker.cancelled,
-      ...(typeof tail.costUsd === 'number' ? { costUsd: tail.costUsd } : {}),
-    });
-  };
-
-  streamLines(child.stdout, captureLine);
-  streamLines(child.stderr, captureLine);
-  child.once('error', (error) => {
-    captureLine(`Worker error: ${error.message}`);
-    finish(null, null, true, 'worker_error');
-  });
-  child.once('close', (code, signal) => finish(code, signal));
-  child.stdin.on('error', (error) => {
-    inputFailed = true;
-    captureLine(`Worker input error: ${error.message}`);
-  });
-
-  const timeoutMin = timeoutMinutes();
-  timeout = setTimeout(() => {
-    timedOut = true;
-    captureLine(`Worker timed out after ${timeoutMin} minutes.`);
-    terminateLoopWorker(worker);
-  }, timeoutMin * 60 * 1000);
-  worker.timeout = timeout;
-
-  try {
-    child.stdin.end(taskPrompt(task));
-  } catch (error) {
-    captureLine(`Worker input error: ${error.message}`);
-    finish(null, null, true, 'worker_input_failed');
-  }
-}
-
-function startTask(task) {
-  const runningTask = {
-    ...task,
-    startedAt: new Date().toISOString(),
-  };
-
-  try {
-    store.moveTask(task.id, 'pending', 'running');
-  } catch (error) {
-    console.error(`Failed to start ${task.id}: ${error.message}`);
-    return;
-  }
-
-  try {
-    store.writeTask(runningTask, 'running');
-    recordEvent('start', { id: task.id });
-    runningActivity.set(task.id, {
-      ts: runningTask.startedAt,
-      text: 'Worker starting.',
-      toolCalls: 0,
-    });
-    spawnWorker(runningTask);
-  } catch (error) {
-    completeTask(runningTask, {
-      exitCode: null,
-      forceFailed: true,
-      reason: 'worker_start_failed',
-      resultText: `Worker failed to start: ${error.message}`,
-      timedOut: false,
-    });
-  }
-}
-
 function failUnauthorizedR1Child(child, error) {
   const failed = {
     ...child, status: 'failed', finishedAt: new Date().toISOString(),
@@ -1811,6 +1568,31 @@ function failUnauthorizedR1Child(child, error) {
   store.writeResult({ id: child.id, status: 'failed', reason: failed.reason,
     finishedAt: failed.finishedAt, summary: failed.summary });
   recordEvent('loop_ended', { id: child.id, status: 'failed', reason: failed.reason });
+}
+
+// Legacy records remain readable, but a pre-upgrade queued task or loop
+// is never allowed to start another executor after admission was retired.
+// This is a terminal recovery transition, not a second job coordinator.
+function closeRetiredJob(task, stage, reason = 'legacy_execution_retired') {
+  const finishedAt = new Date().toISOString();
+  const summary = reason === 'daemon_shutdown'
+    ? 'Daemon shut down before the legacy task finished.'
+    : 'Legacy execution admission retired. No worker or loop was started.';
+  const ended = { ...task, status: 'failed', reason, summary, finishedAt };
+  const result = { id: task.id, status: 'failed', reason, summary, finishedAt,
+    durationMs: taskTime(task, 'startedAt') ? Math.max(0, Date.now() - taskTime(task, 'startedAt')) : 0 };
+  // A failed result/task/move write is not terminal: leave the original stage
+  // for fail-closed recovery. Emit the terminal event only after the durable
+  // state is actually in done, so retries cannot claim completion twice.
+  store.writeResult(result);
+  store.writeTask(ended, stage);
+  store.moveTask(task.id, stage, 'done');
+  // recorder handles journal write errors as best-effort evidence, recording
+  // the failed append to stderr without undoing the already durable archive.
+  recorder(store, task.id)('legacy_job_terminal', { reason, stage, summary });
+  try { store.appendLogLine(task.id, summary); }
+  catch (error) { console.error('Failed to append archived job log: ' + error.message); }
+  recordEvent('fail', { id: task.id, reason });
 }
 
 const authorizingR1Children = new Set();
@@ -1866,7 +1648,26 @@ function fillSlots() {
   if (!slots) return;
 
   const pending = sortPending(store.listTasks('pending', { dashboard: true }).filter(task => !task.unreadable));
-  for (const selected of pending.slice(0, slots)) {
+  const canonical = [];
+  for (const entry of pending) {
+    // A record can disappear or become unreadable between listing and reading.
+    // Never start a retired worker or block unrelated jobs on that failure.
+    let task;
+    try { task = store.readTask(entry.id, 'pending'); }
+    catch (error) {
+      console.error(`Queued job ${entry.id} could not be read; no worker started: ${error.message}`);
+      continue;
+    }
+    if (task.r1Child || task.workflow === 'r1') {
+      canonical.push(entry);
+    } else {
+      try { closeRetiredJob(task, 'pending'); }
+      catch (error) {
+        console.error(`Legacy job ${task.id} could not be archived; no worker started: ${error.message}`);
+      }
+    }
+  }
+  for (const selected of canonical.slice(0, slots)) {
     const task = store.readTask(selected.id, 'pending');
     // An orphan child never becomes an ordinary unprivileged loop simply
     // because its parent moved to done/recovery before queue admission.
@@ -1874,14 +1675,10 @@ function fillSlots() {
       failUnauthorizedR1Child(task, new Error('Parent R1 job is not executing.'));
       continue;
     }
-    if (task.workflow === 'r1') {
-      if (store.listTasks('running', { dashboard: true }).length) return;
-      store.moveTask(task.id, 'pending', 'running');
-      r1Jobs.advance(task);
-      return;
-    }
-    if (task.type === 'loop') startLoop(task);
-    else startTask(task);
+    if (store.listTasks('running', { dashboard: true }).length) return;
+    store.moveTask(task.id, 'pending', 'running');
+    r1Jobs.advance(task);
+    return;
   }
 }
 
@@ -2186,88 +1983,6 @@ function serveDashboard(res) {
   }
 }
 
-function taskSource(body) {
-  return body && body.source === 'mcp' ? 'mcp' : 'api';
-}
-
-// Project roots are an administrator-owned capability.  A request may name a
-// configured project, but cannot choose a filesystem location or an operation
-// for the daemon to perform there.
-function authorizedProject(body) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { error: 'Request body must be an object.' };
-  }
-
-  if (Object.hasOwn(body, 'cwd') || Object.hasOwn(body, 'projectPath')) {
-    return { error: 'cwd and projectPath are derived from the registered project.' };
-  }
-
-  if (Object.hasOwn(body, 'operation') || Object.hasOwn(body, 'type')) {
-    return { error: 'Only standard task submission is supported.' };
-  }
-
-  const name = typeof body.project === 'string' ? body.project.trim() : '';
-
-  if (!name || !Object.hasOwn(store.config.allowedProjects, name)) {
-    return { error: 'Unknown project.' };
-  }
-
-  // The shared registry resolver also selects an optional owner-authorized
-  // worktree and rechecks canonical paths before anything is queued.
-  try {
-    const scope = resolveProject(store.config, name, body.worktree, store.paths.config);
-    return { name, projectPath: scope.cwd };
-  } catch (error) {
-    return { error: error.code === 'ENOENT' ? 'Registered project folder does not exist.' : error.message };
-  }
-}
-
-async function dispatch(req, res) {
-  let body;
-
-  try {
-    body = await readJsonBody(req);
-  } catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-
-  if (!body || typeof body.prompt !== 'string' || !body.prompt.trim()) {
-    sendJson(res, 400, { error: 'prompt is required.' });
-    return;
-  }
-
-  const project = authorizedProject(body);
-
-  if (project.error) {
-    sendJson(res, 400, { error: project.error });
-    return;
-  }
-
-  const engine = body.engine || store.config.defaultEngine;
-
-  if (!knownEngines.has(engine)) {
-    sendJson(res, 400, { error: `Unsupported engine: ${engine}.` });
-    return;
-  }
-
-  const task = store.enqueueTask({
-    prompt: body.prompt,
-    project: project.name,
-    // Never accept a request path here: worker cwd comes only from the
-    // canonical, realpath-resolved configured project root.
-    cwd: project.projectPath,
-    engine,
-    model: body.model,
-    title: body.title,
-    priority: body.priority,
-    source: taskSource(body),
-  });
-  recordEvent('queue', { id: task.id });
-
-  sendJson(res, 201, { id: task.id });
-}
-
 async function createMessage(req, res) {
   let body;
 
@@ -2298,41 +2013,6 @@ async function createMessage(req, res) {
   }
 
   sendJson(res, 200, store.appendMessage({ kind, text }));
-}
-
-function isDirectory(filePath) {
-  try {
-    return fs.statSync(filePath).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function isFile(filePath) {
-  try {
-    return fs.statSync(filePath).isFile();
-  } catch {
-    return false;
-  }
-}
-
-function hasActiveLoop(projectPath) {
-  for (const stage of ['pending', 'running']) {
-    for (const task of store.listTasks(stage)) {
-      if (task.type !== 'loop' || terminalTaskStatuses.has(task.status) || typeof task.projectPath !== 'string') {
-        continue;
-      }
-
-      try {
-        if (fs.realpathSync(task.projectPath) === projectPath) {
-          return true;
-        }
-      } catch {
-      }
-    }
-  }
-
-  return false;
 }
 
 function runGit(projectPath, args) {
@@ -2430,11 +2110,6 @@ function madeNoChanges(before, after) {
   return sameProjectTree(before, after) && before.head === after.head;
 }
 
-function insideGitWorkTree(projectPath) {
-  const result = runGit(projectPath, ['rev-parse', '--is-inside-work-tree']);
-  return result.ok && result.output === 'true';
-}
-
 // A worker that committed its own work leaves nothing to commit, so its sha is this cycle's
 // checkpoint. HEAD advancing over a clean tree is what separates that from a real git failure.
 function workerCommitSha(headAtStart, head, tree) {
@@ -2493,109 +2168,6 @@ function recordCheckpoint(loop, cycleNumber, message) {
       { ...(task === null ? {} : { task }), sha },
     ],
   };
-}
-
-function seedLoopFiles(projectPath) {
-  const defaults = [
-    [
-      path.join(projectPath, 'STATE.md'),
-      '# State\n\n## Completed\n\n- Nothing yet.\n\n## Next\n\n- Start with the first incomplete plan item.\n\n## Notes\n\n- None.\n',
-    ],
-    [
-      path.join(projectPath, 'GUIDELINES.md'),
-      '# Quality Guidelines\n\n- Meet every requirement in PLAN.md.\n- Keep changes scoped to this project.\n- Validate inputs and relevant edge cases.\n- Add concise usage guidance for runnable work.\n- Run an appropriate check before finishing.\n',
-    ],
-  ];
-
-  for (const [filePath, content] of defaults) {
-    if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, content, 'utf8');
-    }
-  }
-}
-
-async function createLoop(req, res) {
-  let body;
-
-  try {
-    body = await readJsonBody(req);
-  } catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-
-  const authorized = authorizedProject(body);
-
-  if (authorized.error) {
-    sendJson(res, 400, { error: authorized.error });
-    return;
-  }
-
-  const project = authorized.name;
-  const projectPath = authorized.projectPath;
-
-  try {
-    resolveWorkerScope(store.config, projectPath, store.paths.config);
-  } catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-
-  if (!isFile(path.join(projectPath, 'PLAN.md'))) {
-    sendJson(res, 400, { error: 'Project folder must contain PLAN.md.' });
-    return;
-  }
-
-  if (hasActiveLoop(projectPath)) {
-    sendJson(res, 400, { error: 'A loop is already running for this project.' });
-    return;
-  }
-
-  let selectedEngines;
-  try { selectedEngines = loopEngines(body); }
-  catch (error) {
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-  const polish = body && body.polish === true;
-
-  const gitPresent = insideGitWorkTree(projectPath);
-  const autoCommit = !(body && body.autoCommit === false) && gitPresent;
-
-  // Must run before seedLoopFiles: seeded STATE.md and GUIDELINES.md would trip it.
-  if (autoCommit) {
-    const status = runGit(projectPath, ['status', '--porcelain', '--', '.']);
-
-    if (!status.ok || status.output) {
-      sendJson(res, 400, { error: dirtyTreeError });
-      return;
-    }
-  }
-
-  try {
-    seedLoopFiles(projectPath);
-  } catch (error) {
-    sendJson(res, 500, { error: `Could not seed loop files: ${error.message}` });
-    return;
-  }
-
-  // The tree this gate approved, seeded files included: a queued loop revalidates against it.
-  const gitAtQueue = autoCommit ? gitSnapshot(projectPath) : null;
-  const loop = store.enqueueLoop({
-    project,
-    projectPath,
-    maxCycles: loopCycles(body && body.maxCycles),
-    taskRetries: loopRetries(body && body.taskRetries),
-    autoCommit,
-    ...(gitAtQueue ? { gitAtQueue } : {}),
-    ...(gitPresent ? {} : { noGit: true }),
-    ...(polish ? { polish: true } : {}),
-    ...selectedEngines,
-    title: `loop: ${project}`,
-    source: taskSource(body),
-  });
-  recordEvent('loop_queued', { id: loop.id });
-  sendJson(res, 201, { id: loop.id });
 }
 
 function logLineCount(value) {
@@ -2837,21 +2409,6 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (req.method === 'POST' && requestPath === '/api/jobs') {
-    await dispatch(req, res);
-    return;
-  }
-
-  if (req.method === 'POST' && requestPath === '/api/dispatch') {
-    await dispatch(req, res);
-    return;
-  }
-
-  if (req.method === 'POST' && requestPath === '/api/loop') {
-    await createLoop(req, res);
-    return;
-  }
-
   if (req.method === 'POST' && requestPath === '/api/bridge/start') {
     sendJson(res, 200, { running: startBridge() || bridgeRunning() });
     return;
@@ -3088,12 +2645,7 @@ async function stop(exitFn = process.exit) {
       }
     } else {
       try {
-        completeTask(task, {
-          exitCode: null,
-          forceFailed: true,
-          reason: 'daemon_shutdown',
-          resultText: 'Daemon shut down before the task finished.',
-        });
+        closeRetiredJob(task, 'running', 'daemon_shutdown');
       } catch (error) {
         console.error(`Failed to finalize task ${task.id} on shutdown: ${error.message}`);
       }

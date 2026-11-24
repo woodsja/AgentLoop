@@ -65,7 +65,18 @@ test('R1 parent with maxConcurrent=1 admits its own child but not unrelated jobs
     if (!observed) observed = store.readTask(child.id, 'done');
     assert.equal(observed.r1Child.parentJobId, parent.id);
     assert.equal(observed.type, 'loop');
-    assert.equal(store.readTask(unrelated.id, 'pending').id, unrelated.id);
+    // The unrelated legacy direct task must never execute. It can remain queued
+    // while R1 owns the slot, or be archived as failed after the child ends.
+    let unrelatedStage = 'pending';
+    let unrelatedTask;
+    try { unrelatedTask = store.readTask(unrelated.id, 'pending'); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      unrelatedStage = 'done';
+      unrelatedTask = store.readTask(unrelated.id, 'done');
+    }
+    assert.equal(unrelatedTask.id, unrelated.id);
+    if (unrelatedStage === 'done') assert.equal(unrelatedTask.reason, 'legacy_execution_retired');
     assert.equal(current.workflow, 'r1');
   } finally {
     release([]);

@@ -32,6 +32,17 @@ function requestJson(server, method, requestPath, body) {
   });
 }
 
+function requestBytes(server, requestPath) {
+  return new Promise((resolve, reject) => {
+    const address = server.address();
+    http.get({ host: '127.0.0.1', port: address.port, path: requestPath }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, bytes: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+}
+
 function isolatedDaemon(config, stateDir) {
   const configPath = path.join(stateDir, 'config.json');
   fs.writeFileSync(configPath, JSON.stringify(config));
@@ -83,43 +94,19 @@ async function listenHttp(t, server) {
   }
 }
 
-test('dispatch and loop discover new managed Git worktrees without registry edits', async t => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-managed-http-'));
-  const checkout = path.join(directory, 'checkout');
-  const managed = path.join(directory, 'managed');
-  const feature = path.join(managed, 'feature');
-  fs.mkdirSync(checkout);
-  const git = args => execFileSync('git', ['-C', checkout, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-  git(['init']);
-  git(['config', 'user.name', 'Ralph test']);
-  git(['config', 'user.email', 'ralph@example.test']);
-  fs.writeFileSync(path.join(checkout, 'PLAN.md'), '# Plan\n');
-  git(['add', '.']);
-  git(['commit', '-m', 'fixture']);
-  fs.mkdirSync(managed);
-  const isolated = isolatedDaemon({ allowedProjects: { demo: { root: checkout, worktreeRoot: managed } } }, directory);
+test('legacy HTTP submission routes are removed and cannot enqueue a new task', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-http-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project } }, directory);
   const server = isolated.daemon.createHttpServer();
   try {
-    // The daemon has already loaded owner authorization before Git creates it.
-    git(['worktree', 'add', '-b', 'feature/arbitrary-name', feature]);
     if (!await listenHttp(t, server)) return;
-    for (const endpoint of ['/api/dispatch', '/api/loop']) {
-      const response = await requestJson(server, 'POST', endpoint, {
-        project: 'demo', worktree: 'feature', prompt: 'Edit in the linked worktree', autoCommit: false,
-      });
-      assert.equal(response.status, 201, JSON.stringify(response.body));
-      const pending = isolated.store.readTask(response.body.id, 'pending');
-      assert.equal(endpoint === '/api/loop' ? pending.projectPath : pending.cwd, feature);
-      for (const name of ['missing', '../checkout', checkout]) {
-        const denied = await requestJson(server, 'POST', endpoint, { project: 'demo', worktree: name, prompt: 'deny' });
-        assert.equal(denied.status, 400);
-        assert.match(denied.body.error, /Unknown authorized worktree/);
-      }
-      fs.mkdirSync(path.join(managed, 'plain'), { recursive: true });
-      const unsafe = await requestJson(server, 'POST', endpoint, { project: 'demo', worktree: 'plain', prompt: 'deny' });
-      assert.equal(unsafe.status, 400);
-      assert.match(unsafe.body.error, /isolated Git worktree/);
+    for (const endpoint of ['/api/jobs', '/api/dispatch', '/api/loop']) {
+      const res = await requestJson(server, 'POST', endpoint, { project: 'demo', prompt: 'Do not queue this legacy task' });
+      assert.equal(res.status, 404, endpoint + ' must not admit new tasks');
     }
+    assert.equal(isolated.store.listTasks('pending').length, 0);
   } finally {
     await new Promise(resolve => server.close(resolve));
     isolated.restore();
@@ -127,7 +114,252 @@ test('dispatch and loop discover new managed Git worktrees without registry edit
   }
 });
 
-test('authorized HTTP jobs persist under a configured project and expose compact state/result', async (t) => {
+test('retired pending direct tasks are closed without launching a worker', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-pending-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({
+    allowedProjects: { demo: project }, maxConcurrent: 1, defaultEngine: 'codex',
+    enginePaths: { codex: '/nonexistent/highlander-codex-worker' },
+  }, directory);
+  const server = isolated.daemon.createHttpServer();
+  try {
+    if (!await listenHttp(t, server)) return;
+    const pending = isolated.store.enqueueTask({ project: 'demo', cwd: fs.realpathSync(project), engine: 'codex', prompt: 'Retired work must not execute' });
+    isolated.daemon.fillSlots();
+    const done = isolated.store.readTask(pending.id, 'done');
+    assert.equal(done.status, 'failed');
+    assert.equal(done.reason, 'legacy_execution_retired');
+    const result = await requestJson(server, 'GET', `/api/jobs/${pending.id}`);
+    assert.equal(result.status, 200);
+    assert.equal(result.body.result.reason, 'legacy_execution_retired');
+    assert.equal(isolated.store.listTasks('running').length, 0);
+    const archived = isolated.store.readExecutionBytes(pending.id, 0, 262144);
+    assert.match(Buffer.from(archived.base64, 'base64').toString('utf8'), /legacy_job_terminal/);
+
+    // A pre-upgrade classic loop is also terminalized; only R1-owned children run.
+    const oldLoop = isolated.store.enqueueLoop({ project: 'demo', projectPath: project, engine: 'codex', maxCycles: 1 });
+    isolated.daemon.fillSlots();
+    const closedLoop = isolated.store.readTask(oldLoop.id, 'done');
+    assert.equal(closedLoop.status, 'failed');
+    assert.equal(closedLoop.reason, 'legacy_execution_retired');
+    assert.equal((await requestJson(server, 'GET', `/api/jobs/${oldLoop.id}`)).body.result.reason, 'legacy_execution_retired');
+    assert.equal(isolated.store.listTasks('running').length, 0);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a disappearing pre-upgrade queue record cannot starve other retired jobs', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-disappearing-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project }, maxConcurrent: 2 }, directory);
+  const realRead = isolated.store.readTask;
+  try {
+    const missing = isolated.store.enqueueTask({ project: 'demo', priority: 1, prompt: 'disappeared' });
+    const intact = isolated.store.enqueueTask({ project: 'demo', priority: 2, prompt: 'retire me' });
+    isolated.store.readTask = (id, stage) => {
+      if (id === missing.id && stage === 'pending') {
+        const error = new Error('record vanished during scan'); error.code = 'ENOENT'; throw error;
+      }
+      return realRead(id, stage);
+    };
+    isolated.daemon.fillSlots();
+    assert.equal(realRead(intact.id, 'done').reason, 'legacy_execution_retired');
+    assert.equal(isolated.store.listTasks('running').length, 0);
+  } finally {
+    isolated.store.readTask = realRead;
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('restart archives an interrupted historical direct task without replay or lost evidence', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-restart-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({
+    dashboardPort: 0, allowedProjects: { demo: project }, maxConcurrent: 1,
+    enginePaths: { codex: '/nonexistent/highlander-legacy-worker' },
+  }, directory);
+  let started = false;
+  try {
+    const legacy = isolated.store.enqueueTask({ project: 'demo', engine: 'codex', cwd: project, status: 'running', prompt: 'Never rerun this task', startedAt: new Date().toISOString() });
+    isolated.store.moveTask(legacy.id, 'pending', 'running');
+    const previouslyCaptured = Buffer.from('raw worker output before interruption\n');
+    isolated.store.appendExecution(legacy.id, { event: 'output', role: 'worker', stream: 'stdout', base64: previouslyCaptured.toString('base64') });
+    const before = fs.readFileSync(isolated.store.executionPath(legacy.id));
+    isolated.daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+    started = true;
+    const done = isolated.store.readTask(legacy.id, 'done');
+    assert.equal(done.status, 'failed');
+    assert.equal(done.reason, 'daemon_restarted');
+    const result = JSON.parse(fs.readFileSync(path.join(isolated.store.paths.results, legacy.id + '.json'), 'utf8'));
+    assert.equal(result.reason, 'daemon_restarted');
+    assert.equal(isolated.store.listTasks('running').length, 0);
+    assert.equal(isolated.store.listTasks('pending').length, 0);
+    const after = fs.readFileSync(isolated.store.executionPath(legacy.id));
+    assert.deepEqual(after.subarray(0, before.length), before, 'all earlier owner-visible captured bytes survive recovery');
+    const event = after.toString('utf8').trim().split('\n').map(JSON.parse).find(entry => entry.event === 'output' && entry.role === 'worker');
+    assert.deepEqual(Buffer.from(event.base64, 'base64'), previouslyCaptured);
+  } finally {
+    if (started) { await isolated.daemon.stop(() => {}); isolated.daemon.resetStopping(); }
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('restart retires an interrupted classic loop without relaunching either engine', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-classic-restart-'));
+  const project = path.join(directory, 'project'); fs.mkdirSync(project);
+  const config = { dashboardPort: 0, allowedProjects: { demo: project },
+    enginePaths: { codex: '/nonexistent/retired-codex', claude: '/nonexistent/retired-claude' } };
+  let id; let raw;
+  const first = isolatedDaemon(config, directory);
+  let started = false;
+  try {
+    const loop = first.store.enqueueLoop({ project: 'demo', projectPath: project, status: 'running',
+      workerEngine: 'codex', criticEngine: 'claude', maxCycles: 3,
+      cycles: [{ n: 1, status: 'running', phase: 'worker' }] });
+    id = loop.id; first.store.moveTask(id, 'pending', 'running');
+    first.store.appendExecution(id, { event: 'output', role: 'worker', stream: 'stdout',
+      base64: Buffer.from('captured classic worker output\n').toString('base64') });
+    raw = fs.readFileSync(first.store.executionPath(id));
+    first.daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+    started = true;
+    const done = first.store.readTask(id, 'done');
+    assert.equal(done.status, 'failed');
+    assert.equal(done.reason, 'daemon_restarted');
+    assert.equal(done.cycles[0].status, 'failed');
+    assert.deepEqual(fs.readFileSync(first.store.executionPath(id)).subarray(0, raw.length), raw);
+    assert.deepEqual(first.store.listTasks('running'), []);
+  } finally {
+    if (started) { await first.daemon.stop(() => {}); first.daemon.resetStopping(); }
+    first.restore();
+  }
+  const second = isolatedDaemon(config, directory);
+  started = false;
+  try {
+    const before = fs.readFileSync(second.store.executionPath(id));
+    second.daemon.start({ r1: { autopilotDependencies: { discoverReadyIssues: async () => [] } } });
+    started = true;
+    assert.equal(second.store.readTask(id, 'done').reason, 'daemon_restarted');
+    assert.deepEqual(fs.readFileSync(second.store.executionPath(id)), before,
+      'a second restart cannot append another historical terminal transition');
+    assert.deepEqual(second.store.listTasks('running'), []);
+    assert.deepEqual(second.store.listTasks('pending'), []);
+  } finally {
+    if (started) { await second.daemon.stop(() => {}); second.daemon.resetStopping(); }
+    second.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('legacy archival failure cannot prevent other queued jobs from being retired', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-archive-fail-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project }, maxConcurrent: 2 }, directory);
+  const originalWrite = isolated.store.writeResult;
+  try {
+    const first = isolated.store.enqueueTask({ project: 'demo', priority: 1, prompt: 'legacy first' });
+    const second = isolated.store.enqueueLoop({ project: 'demo', priority: 2, projectPath: project });
+    isolated.store.writeResult = result => {
+      if (result.id === first.id) throw new Error('simulated archived-result storage failure');
+      return originalWrite(result);
+    };
+    const terminalEvents = id => fs.readFileSync(isolated.store.executionPath(id), 'utf8')
+      .trim().split('\n').map(JSON.parse).filter(event => event.event === 'legacy_job_terminal');
+    isolated.daemon.fillSlots();
+    assert.equal(isolated.store.readTask(first.id, 'pending').id, first.id);
+    assert.equal(terminalEvents(first.id).length, 0, 'failed archival attempt is not a terminal transition');
+    assert.equal(isolated.store.readTask(second.id, 'done').reason, 'legacy_execution_retired');
+    isolated.store.writeResult = originalWrite;
+    isolated.daemon.fillSlots();
+    assert.equal(isolated.store.readTask(first.id, 'done').reason, 'legacy_execution_retired');
+    assert.equal(terminalEvents(first.id).length, 1, 'retried archival produces one successful terminal transition');
+    isolated.daemon.fillSlots();
+    assert.equal(terminalEvents(first.id).length, 1, 'subsequent ticks cannot duplicate a terminal transition');
+  } finally {
+    isolated.store.writeResult = originalWrite;
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('partial legacy archival resumes once after a fresh daemon without replay or lost logs', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-partial-restart-'));
+  const project = path.join(directory, 'project');
+  fs.mkdirSync(project);
+  const config = { allowedProjects: { demo: project }, maxConcurrent: 1,
+    enginePaths: { codex: '/nonexistent/highlander-worker-must-never-start' } };
+  let id;
+  let captured;
+  const first = isolatedDaemon(config, directory);
+  try {
+    const item = first.store.enqueueTask({ project: 'demo', engine: 'codex', prompt: 'Retired work cannot run.' });
+    id = item.id;
+    first.store.appendExecution(id, { event: 'output', role: 'worker', stream: 'stdout', base64: Buffer.from('earlier captured log\n').toString('base64') });
+    captured = fs.readFileSync(first.store.executionPath(id));
+    const realMove = first.store.moveTask;
+    first.store.moveTask = () => { throw new Error('simulated crash before archive rename'); };
+    try { first.daemon.fillSlots(); } finally { first.store.moveTask = realMove; }
+    assert.equal(first.store.readTask(id, 'pending').status, 'failed', 'intermediate task record is durable');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(first.store.paths.results, id + '.json'))).status, 'failed');
+    assert.equal(fs.readFileSync(first.store.executionPath(id), 'utf8').includes('legacy_job_terminal'), false);
+  } finally { first.restore(); }
+  const restarted = isolatedDaemon(config, directory);
+  try {
+    restarted.daemon.fillSlots();
+    restarted.daemon.fillSlots();
+    const events = fs.readFileSync(restarted.store.executionPath(id), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(events.filter(event => event.event === 'legacy_job_terminal').map(event => event.reason), ['legacy_execution_retired']);
+    assert.deepEqual(fs.readFileSync(restarted.store.executionPath(id)).subarray(0, captured.length), captured);
+    assert.equal(restarted.store.readTask(id, 'done').reason, 'legacy_execution_retired');
+    assert.deepEqual(restarted.store.listTasks('running'), []);
+    assert.deepEqual(restarted.store.listTasks('pending'), []);
+    assert.equal(restarted.store.readTask(id, 'done').prompt, 'Retired work cannot run.');
+  } finally {
+    restarted.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a failed terminal journal append cannot undo an already durable retired archive', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'highlander-journal-failure-'));
+  const project = path.join(directory, 'project'); fs.mkdirSync(project);
+  const isolated = isolatedDaemon({ allowedProjects: { demo: project } }, directory);
+  const oldAppend = isolated.store.appendExecution;
+  const oldError = console.error;
+  const diagnostics = [];
+  try {
+    const legacy = isolated.store.enqueueTask({ project: 'demo', prompt: 'Do not run this old task' });
+    isolated.store.appendExecution = (id, record) => {
+      if (record.event === 'legacy_job_terminal') throw new Error('simulated ENOSPC while recording audit');
+      return oldAppend(id, record);
+    };
+    console.error = line => { diagnostics.push(String(line)); };
+    isolated.daemon.fillSlots();
+    assert.equal(isolated.store.readTask(legacy.id, 'done').reason, 'legacy_execution_retired');
+    assert.equal(isolated.store.listTasks('pending').length, 0);
+    assert.equal(isolated.store.listTasks('running').length, 0);
+    assert.ok(isolated.store.readLogLines(legacy.id).some(line => line.includes('Legacy execution admission retired')), 'owner still has a readable archived summary');
+    assert.ok(diagnostics.some(line => /Execution log persistence failed/.test(line)), 'the existing recorder reports failed audit persistence');
+    assert.ok(!diagnostics.some(line => /could not be archived/.test(line)), 'do not claim the already-completed state move failed');
+    isolated.daemon.fillSlots();
+    assert.equal(isolated.store.readTask(legacy.id, 'done').status, 'failed');
+  } finally {
+    console.error = oldError;
+    isolated.store.appendExecution = oldAppend;
+    isolated.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('historical HTTP jobs remain inspectable after removing new direct submission', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));
   const project = path.join(directory, 'registered-project');
   fs.mkdirSync(project);
@@ -141,20 +373,16 @@ test('authorized HTTP jobs persist under a configured project and expose compact
     if (!await listenHttp(t, server)) return;
     const projects = await requestJson(server, 'GET', '/api/projects');
     assert.deepEqual(projects, { status: 200, body: { projects: ['demo'] } });
-    const submitted = await requestJson(server, 'POST', '/api/jobs', { project: 'demo', prompt: 'Write a focused test.' });
-    assert.equal(submitted.status, 201);
-    assert.match(submitted.body.id, /^t-/);
+    // Simulate an already-captured legacy task. No new HTTP ingress may create one.
+    const legacy = isolated.store.enqueueTask({ project: 'demo', cwd: fs.realpathSync(project), prompt: 'Previously admitted task.' });
+    const submitted = { body: { id: legacy.id } };
+    assert.match(legacy.id, /^t-/);
 
     const pending = isolated.store.readTask(submitted.body.id, 'pending');
     assert.equal(pending.project, 'demo');
     assert.equal(pending.cwd, fs.realpathSync(project));
 
-    fs.writeFileSync(path.join(project, 'PLAN.md'), '# Plan\n');
-    const loopSubmitted = await requestJson(server, 'POST', '/api/loop', { project: 'demo', autoCommit: false });
-    assert.equal(loopSubmitted.status, 201);
-    const pendingLoop = isolated.store.readTask(loopSubmitted.body.id, 'pending');
-    assert.equal(pendingLoop.project, 'demo');
-    assert.equal(pendingLoop.projectPath, fs.realpathSync(project));
+    assert.equal((await requestJson(server, 'POST', '/api/loop', { project: 'demo' })).status, 404);
 
     const queued = await requestJson(server, 'GET', `/api/jobs/${submitted.body.id}`);
     assert.deepEqual(queued.body, { id: submitted.body.id, status: 'pending', project: 'demo' });
@@ -169,6 +397,45 @@ test('authorized HTTP jobs persist under a configured project and expose compact
       project: 'demo',
       result: { id: submitted.body.id, status: 'done', summary: 'Completed.' },
     });
+
+    // Read the same historical result through the actual MCP facade and real HTTP handler.
+    const facade = require('../src/tools');
+    const daemonRequest = async route => {
+      const result = await requestJson(server, 'GET', route);
+      return { statusCode: result.status, value: result.body };
+    };
+    const compactStatus = await facade.callTool({ name: 'get_job_status', arguments: { id: legacy.id } }, { daemonRequest });
+    const compactResult = await facade.callTool({ name: 'get_job_result', arguments: { id: legacy.id } }, { daemonRequest });
+    assert.equal(compactStatus.structuredContent.status, 'done');
+    assert.equal(compactResult.structuredContent.result.status, 'done');
+
+    // Both historic loop and R1 job IDs remain visible through the same read-only route.
+    const pastLoop = isolated.store.enqueueLoop({ project: 'demo', projectPath: fs.realpathSync(project) });
+    const pastR1 = isolated.store.enqueueTask({ project: 'demo', workflow: 'r1', issue: 8 });
+    for (const past of [pastLoop, pastR1]) {
+      isolated.store.writeResult({ id: past.id, status: 'failed', reason: 'archived_test', summary: 'Retained.' });
+      isolated.store.writeTask({ ...past, status: 'failed' }, 'pending');
+      isolated.store.moveTask(past.id, 'pending', 'done');
+      const found = await requestJson(server, 'GET', `/api/jobs/${past.id}`);
+      assert.equal(found.status, 200);
+      assert.equal(found.body.status, 'failed');
+      assert.equal((await facade.callTool({ name: 'get_job_result', arguments: { id: past.id } }, { daemonRequest })).structuredContent.result.status, 'failed');
+    }
+
+    // The owner gets every captured byte from historic records, not only compact summaries.
+    const captured = Buffer.from('owner output /home/owner/raw-file\n' + 'z'.repeat(2000));
+    isolated.store.appendExecution(legacy.id, { event: 'output', role: 'worker', stream: 'stdout', base64: captured.toString('base64') });
+    const source = fs.readFileSync(isolated.store.executionPath(legacy.id));
+    const download = await requestBytes(server, `/api/log/${legacy.id}?download=1`);
+    assert.equal(download.status, 200);
+    assert.deepEqual(download.bytes, source);
+    const page = await requestJson(server, 'GET', `/api/log/${legacy.id}?raw=1&bytes=262144`);
+    assert.equal(page.status, 200);
+    assert.deepEqual(Buffer.from(page.body.base64, 'base64'), source);
+    const records = source.toString('utf8').trim().split('\n').map(JSON.parse);
+    const output = records.find(record => record.event === 'output' && record.role === 'worker' && record.stream === 'stdout');
+    assert.ok(output, 'the archived journal retains the captured stdout event');
+    assert.deepEqual(Buffer.from(output.base64, 'base64'), captured);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     isolated.restore();
@@ -176,7 +443,7 @@ test('authorized HTTP jobs persist under a configured project and expose compact
   }
 });
 
-test('HTTP submission and legacy dispatch/loop fail closed for unknown projects and cwd spoofing', async (t) => {
+test('obsolete HTTP admission stays closed, and canonical R1 rejects unknown projects', async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-http-'));
   const project = path.join(directory, 'registered-project');
   fs.mkdirSync(project);
@@ -196,8 +463,10 @@ test('HTTP submission and legacy dispatch/loop fail closed for unknown projects 
       ['/api/loop', { project: 'missing' }],
     ]) {
       const response = await requestJson(server, 'POST', endpoint, body);
-      assert.equal(response.status, 400);
+      assert.equal(response.status, 404);
     }
+    const denied = await requestJson(server, 'POST', '/api/r1/jobs', { project: 'missing', issue: 5 });
+    assert.equal(denied.status, 400);
     assert.equal(isolated.store.listTasks('pending').length, 0);
     assert.equal((await requestJson(server, 'POST', '/api/projects', { project: 'new' })).status, 404);
   } finally {

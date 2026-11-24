@@ -2,6 +2,7 @@ const { checkMilestoneAdmission } = require('./milestone-admission');
 const { snapshotter } = require('./execution-preview');
 // R1 phases run under the existing queue dispatcher, not a second scheduler.
 const fs = require('node:fs');
+const path = require('node:path');
 const { recorder, captureProcess, withExecution } = require('./execution-log');
 const { verifyTask } = require('./task-runner');
 const crypto = require('node:crypto');
@@ -152,6 +153,22 @@ function createR1Jobs(store, options = {}) {
       .find(([name, candidate]) => candidate === planned && (body.worktree === undefined || name === body.worktree));
     const managed = !named && body.worktree === undefined && managesWorktree(entry, planned);
     if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before R1 submission.');
+    // New jobs may reserve a not-yet-created worktree. If the path already
+    // exists, validate the actual Git repository identity before admission;
+    // a different repository can occupy an otherwise authorized directory.
+    if (fs.existsSync(planned)) {
+      if (fs.realpathSync(planned) !== path.resolve(planned)) {
+        throw new Error('R1 issue worktree is redirected outside its authorized path.');
+      }
+      // A removed worktree may leave an empty directory for a new attempt.
+      // Only nonempty destinations need existing-worktree identity checks.
+      if (fs.readdirSync(planned).length) {
+        const existing = resolveProject(store.config, body.project, named ? named[0] : path.basename(planned), store.paths.config);
+        if (!existing.isolatedWorktree || existing.cwd !== path.resolve(planned)) {
+          throw new Error('R1 issue worktree is not a linked worktree of its registered repository.');
+        }
+      }
+    }
     const enqueue = authorization => {
       const task = store.enqueueTask({
         workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,

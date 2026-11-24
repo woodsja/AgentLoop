@@ -46,6 +46,32 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
   try {
     let port = await launch();
     const bad = await request(port, '/api/r1/jobs', { project: 'demo', issue: 99 }); assert.equal(bad.status, 400);
+    // An alien Git repository must not gain executor access even when its
+    // linked worktree occupies a path explicitly named by the owner registry.
+    const alien = path.join(root, 'alien-repo'); fs.mkdirSync(alien);
+    const alienGit = (...args) => execFileSync('git', args, { cwd: alien, stdio: 'pipe' });
+    alienGit('init', '-b', 'main'); alienGit('config', 'user.name', 'Alien');
+    alienGit('config', 'user.email', 'alien@example.invalid');
+    fs.writeFileSync(path.join(alien, 'README'), 'other repository');
+    alienGit('add', '.'); alienGit('commit', '-m', 'other');
+    fs.mkdirSync(worktreeRoot, { recursive: true });
+    const alienWorktree = path.join(worktreeRoot, 'issue-4');
+    alienGit('worktree', 'add', '-b', 'alien-branch', alienWorktree);
+    try {
+      const denied = await request(port, '/api/r1/jobs', { project: 'demo', issue: 4, worktree: 'issue4' });
+      assert.equal(denied.status, 400, 'wrong-repository linked worktree must be refused at submission');
+    } finally { alienGit('worktree', 'remove', '--force', alienWorktree); }
+    // The surviving HTTP admission must reject spoofed project paths/worktrees before work starts.
+    for (const forged of [
+      { project: 'demo', issue: 1, cwd: '/tmp/forged' },
+      { project: 'demo', issue: 1, projectPath: '/tmp/forged' },
+      { project: 'demo', issue: 1, worktree: '../unrelated' },
+      { project: 'demo', issue: 1, worktree: 'issue4' },
+      { project: 'unregistered', issue: 1 },
+    ]) {
+      const denied = await request(port, '/api/r1/jobs', forged);
+      assert.equal(denied.status, 400, JSON.stringify(forged));
+    }
     const submitted = await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 }); assert.equal(submitted.status, 201);
     const id = submitted.value.id;
     assert.equal(fs.existsSync(path.join(root, 'worker-release')), false, 'HTTP response precedes release of implementation');
@@ -165,7 +191,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.equal(generic.status, 200);
     assert.deepEqual([generic.value.id, generic.value.status, generic.value.project, generic.value.phases], [id, 'passed', 'demo', undefined]);
     const r1Shaped = await request(port, '/api/jobs', { project: 'demo', issue: 1 });
-    assert.deepEqual([r1Shaped.status, r1Shaped.value.error], [400, 'prompt is required.']);
+    assert.deepEqual([r1Shaped.status, r1Shaped.value.error], [404, 'Not found.']);
     await until(async () => (await get(second)).status === 'passed');
     fs.writeFileSync(path.join(root, 'review-error'), '');
     const third = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 3 })).value.id;
@@ -178,7 +204,9 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     await halt(); port = await launch();
     assert.deepEqual(await get(id), completed);
     const before = fs.readFileSync(path.join(root, 'reviews'), 'utf8');
-    const replay = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 })).value.id;
+    const replayResponse = await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 });
+    assert.equal(replayResponse.status, 201, JSON.stringify(replayResponse.value));
+    const replay = replayResponse.value.id;
     await until(async () => (await get(replay)).status === 'passed');
     assert.equal(fs.readFileSync(path.join(root, 'reviews'), 'utf8'), before, 'persisted exact-SHA approval is reused');
     assert.equal((await request(port, '/api/r1/jobs/unknown')).status, 404);
@@ -226,6 +254,10 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   assert.equal(jobs.submit({ project: 'demo', issue: 5 }).id, 't-0000abcd', 'an accepted queue entry remains accepted if transcript metadata cannot be checkpointed');
   assert.equal(queued[0].worktree, undefined);
   assert.throws(() => jobs.submit({ project: 'demo', issue: 5, worktree: 'issue5' }), /explicitly authorized/);
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, worktree: '../unrelated' }), /explicitly authorized/);
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, cwd: '/tmp/forged' }), /R1 paths come from owner configuration/);
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, projectPath: '/tmp/forged' }), /R1 paths come from owner configuration/);
+  assert.throws(() => jobs.submit({ project: 'unregistered', issue: 5 }), /Unknown project/);
   // A worker-writable project file cannot move the worktree outside the owner root.
   current = { ...project, worktreeRoot: path.join(root, 'elsewhere') };
   assert.throws(() => jobs.submit({ project: 'demo', issue: 6 }), /explicitly authorized/);

@@ -525,15 +525,15 @@ body.panel-open{overflow:hidden}
   border-radius:4px;padding:0 6px;margin-left:8px;vertical-align:1px;
 }
 .tlempty{color:var(--mut);padding:16px 2px;font-family:var(--sans)}
-/* ============ start-loop panel ============ */
-#loopPanel,#taskPanel{
+/* ============ canonical development-job panel ============ */
+#jobPanel{
   position:fixed;top:0;right:0;bottom:0;height:100vh;height:100dvh;z-index:100;width:min(430px,94vw);
   background:var(--bg2);border-left:1px solid var(--line2);
   box-shadow:-30px 0 70px -30px rgba(0,0,0,.7);
   transform:translateX(103%);transition:transform .24s ease;
   display:flex;flex-direction:column;
 }
-#loopPanel.open,#taskPanel.open{transform:none}
+#jobPanel.open{transform:none}
 .launch{display:flex;gap:6px;margin:12px 8px 0}
 .launch .btn{flex:1;justify-content:center;padding-inline:8px}
 .btn.primary{background:var(--blue);border-color:transparent;color:var(--bg);width:100%;margin-top:18px}
@@ -600,7 +600,7 @@ body.panel-open{overflow:hidden}
   .rrow .pill{width:auto}
   .rside{min-width:60px}
   #drawer{left:0;width:auto;border-left:none}
-  #loopPanel,#taskPanel{left:0;width:auto;border-left:none}
+  #jobPanel{left:0;width:auto;border-left:none}
   .launch{margin:0;flex:none;gap:4px}
   .launch .btn{flex:none;padding:6px 12px;font-size:11px}
   .pform input,.pform select,.pform textarea{font-size:16px}
@@ -664,8 +664,7 @@ body.panel-open{overflow:hidden}
     <a href="#events"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"></path></svg><span class="nl">Event log</span><span class="nb" id="nEvents"></span></a>
   </nav>
   <div class="launch">
-    <button class="btn" id="newLoopBtn" title="New loop">+ <span class="bw">New </span>loop</button>
-    <button class="btn" id="newTaskBtn" title="New task">+ <span class="bw">New </span>task</button>
+    <button class="btn" id="newJobBtn" title="Submit development job">+ <span class="bw">New </span>job</button>
   </div>
   <div class="railsp"></div>
   <div id="lstat" data-screen-label="Live status">
@@ -768,71 +767,23 @@ body.panel-open{overflow:hidden}
   </div>
   <div id="dbody"></div>
 </aside>
-<aside id="loopPanel" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Start loop" data-screen-label="Start loop" inert>
+<aside id="jobPanel" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Submit development job" data-screen-label="Submit development job" inert>
   <div class="dhead">
-    <span class="eb">Start loop</span>
+    <span class="eb">Submit development job</span>
     <span class="ttl"></span>
-    <button id="lclose" aria-label="Close start loop panel">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"></path></svg>
-    </button>
+    <button id="jclose" aria-label="Close job panel"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"></path></svg></button>
   </div>
   <div class="pform">
-    <form id="loopForm">
-      <label for="lProject" style="margin-top:0">Project</label>
-      <select id="lProject" required disabled>
+    <form id="jobForm">
+      <label for="jobProject" style="margin-top:0">Registered project</label>
+      <select id="jobProject" required disabled>
         <option value="">Loading registered projects…</option>
       </select>
-      <div class="frow">
-        <div>
-          <label for="lMax">Max cycles</label>
-          <input id="lMax" type="number" min="1" max="50" placeholder="3">
-        </div>
-        <div>
-          <label for="lRetries">Task retries</label>
-          <input id="lRetries" type="number" min="1" max="10" placeholder="3">
-        </div>
-      </div>
-      <p class="fhint">Multi-task plans: set cycles to roughly tasks x retries</p>
-      <label for="lWorkerEngine">Worker engine</label>
-      <select id="lWorkerEngine">
-        <option value="claude">Claude Code</option>
-        <option value="codex" selected>Codex</option>
-      </select>
-      <label for="lCriticEngine">Critic engine</label>
-      <select id="lCriticEngine">
-        <option value="claude">Claude Code</option>
-        <option value="codex" selected>Codex</option>
-      </select>
-      <label class="fcheck" for="lCkpt"><input id="lCkpt" type="checkbox" checked> Auto-checkpoint (git)</label>
-      <label class="fcheck" for="lPolish"><input id="lPolish" type="checkbox"> Polish after pass</label>
-      <button class="btn primary" type="submit">Start loop</button>
-      <span class="formmsg" id="loopMsg" aria-live="polite"></span>
-    </form>
-  </div>
-</aside>
-<aside id="taskPanel" role="dialog" aria-modal="true" aria-hidden="true" aria-label="Start task" data-screen-label="Start task" inert>
-  <div class="dhead">
-    <span class="eb">Start task</span>
-    <span class="ttl"></span>
-    <button id="tclose" aria-label="Close start task panel">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"></path></svg>
-    </button>
-  </div>
-  <div class="pform">
-    <form id="taskForm">
-      <label for="tTitle" style="margin-top:0">What should the agent do</label>
-      <textarea id="tTitle" required placeholder="one-shot task - a worker runs once, no critic"></textarea>
-      <label for="tProject">Project</label>
-      <select id="tProject" required disabled>
-        <option value="">Loading registered projects…</option>
-      </select>
-      <label for="tEngine">Engine</label>
-      <select id="tEngine">
-        <option value="claude">Claude Code</option>
-        <option value="codex" selected>Codex</option>
-      </select>
-      <button class="btn primary" type="submit">Start task</button>
-      <span class="formmsg" id="taskMsg" aria-live="polite"></span>
+      <label for="jobIssue">Authorized GitHub issue number</label>
+      <input id="jobIssue" type="number" min="1" required placeholder="e.g. 5">
+      <p class="fhint">The issue must already be authorized and ready for the selected project. The job runs implementation, verification, independent review and GitHub CI without manual phase starts.</p>
+      <button class="btn primary" type="submit">Submit development job</button>
+      <span class="formmsg" id="jobMsg" aria-live="polite"></span>
     </form>
   </div>
 </aside>
@@ -1351,16 +1302,10 @@ function mockEvent(kind, text, taskId){
 }
 function mockPost(url, body){
   if (!mock) mock = buildMock();
-  if (url === '/api/dispatch'){
+  if (url === '/api/r1/jobs'){
     const id = 't-' + Math.random().toString(16).slice(2, 10);
-    mock.tasks.pending.push({id, type: 'task', title: body.title, engine: body.engine || 'claude', createdAt: new Date().toISOString()});
-    mockEvent('queue', 'queued task: ' + String(body.title || '').slice(0, 60), id);
-    return {id};
-  }
-  if (url === '/api/loop'){
-    const id = 't-' + Math.random().toString(16).slice(2, 10);
-    mock.tasks.pending.push({id, type: 'loop', title: 'loop: ' + body.project, project: body.project, engine: body.engine || 'codex', createdAt: new Date().toISOString()});
-    mockEvent('queue', 'queued loop: ' + baseName(body.project), id);
+    mock.tasks.pending.push({id, workflow: 'r1', title: 'Issue #' + body.issue, project: body.project, status: 'queued', createdAt: new Date().toISOString()});
+    mockEvent('queue', 'queued development job for ' + baseName(body.project), id);
     return {id};
   }
   if (url === '/api/bridge/start'){
@@ -1428,18 +1373,14 @@ async function loadProjects(){
     if (!r.ok) throw new Error('http ' + r.status);
     const data = await r.json();
     const projects = Array.isArray(data?.projects) ? data.projects.filter(name => typeof name === 'string' && name) : [];
-    for (const id of ['lProject', 'tProject']) {
-      const select = $('#' + id);
-      select.replaceChildren(new Option(projects.length ? 'Select a project' : 'No registered projects', ''));
-      for (const name of projects) select.add(new Option(name, name));
-      select.disabled = projects.length === 0;
-    }
+    const select = $('#jobProject');
+    select.replaceChildren(new Option(projects.length ? 'Select a project' : 'No registered projects', ''));
+    for (const name of projects) select.add(new Option(name, name));
+    select.disabled = projects.length === 0;
   } catch (e) {
-    for (const id of ['lProject', 'tProject']) {
-      const select = $('#' + id);
-      select.replaceChildren(new Option('Unable to load projects', ''));
-      select.disabled = true;
-    }
+    const select = $('#jobProject');
+    select.replaceChildren(new Option('Unable to load projects', ''));
+    select.disabled = true;
   }
 }
 
@@ -1735,7 +1676,7 @@ function renderHero(hero){
     if (!hero) {
       el.innerHTML = '<div class="heroidle"><span class="eb">Active run</span>' +
         '<h2>No run in flight</h2>' +
-        '<p>The daemon is idle. Point a loop at a project folder containing PLAN.md and GUIDELINES.md to begin.</p></div>';
+        '<p>The daemon is idle. Submit an authorized development job for a registered project to begin.</p></div>';
     } else {
       const id = esc(hero.id ?? '');
       const name = clean(baseName(hero.project || String(hero.title || '').replace(/^loop:\s*/i, '')) || 'run', 60);
@@ -2043,32 +1984,21 @@ function setPanel(el, open){
   el.classList.toggle('open', open);
   el.toggleAttribute('inert', !open);
   el.setAttribute('aria-hidden', open ? 'false' : 'true');
-  const any = document.querySelector('#drawer.open, #loopPanel.open, #taskPanel.open');
+  const any = document.querySelector('#drawer.open, #jobPanel.open');
   $('#scrim').classList.toggle('show', !!any);
   document.body.classList.toggle('panel-open', !!any);
 }
 function setDrawer(open){
   setPanel($('#drawer'), open);
 }
-function openLoop(){
+function openJob(){
   lastFocus = document.activeElement;
-  setPanel($('#loopPanel'), true);
-  $('#lProject').focus({preventScroll: true});
+  setPanel($('#jobPanel'), true);
+  $('#jobProject').focus({preventScroll: true});
 }
-function closeLoop(){
-  if (!$('#loopPanel').classList.contains('open')) return;
-  setPanel($('#loopPanel'), false);
-  if (lastFocus && lastFocus.isConnected) lastFocus.focus({preventScroll: true});
-  lastFocus = null;
-}
-function openTask(){
-  lastFocus = document.activeElement;
-  setPanel($('#taskPanel'), true);
-  $('#tTitle').focus({preventScroll: true});
-}
-function closeTask(){
-  if (!$('#taskPanel').classList.contains('open')) return;
-  setPanel($('#taskPanel'), false);
+function closeJob(){
+  if (!$('#jobPanel').classList.contains('open')) return;
+  setPanel($('#jobPanel'), false);
   if (lastFocus && lastFocus.isConnected) lastFocus.focus({preventScroll: true});
   lastFocus = null;
 }
@@ -2250,8 +2180,7 @@ function closeDrawer(){
 }
 function trapFocus(e){
   if (e.key !== 'Tab') return;
-  const panel = $('#taskPanel').classList.contains('open') ? $('#taskPanel')
-    : $('#loopPanel').classList.contains('open') ? $('#loopPanel')
+  const panel = $('#jobPanel').classList.contains('open') ? $('#jobPanel')
     : $('#drawer').classList.contains('open') ? $('#drawer') : null;
   if (!panel) return;
   const items = [...panel.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(x => x.getClientRects().length);
@@ -2340,53 +2269,23 @@ function init(){
   });
   $('#projectOnboarding').addEventListener('toggle', () => { if ($('#projectOnboarding').open) loadOnboardingDiagnostics(); });
   $('#dclose').addEventListener('click', closeDrawer);
-  $('#scrim').addEventListener('click', () => { closeDrawer(); closeLoop(); closeTask(); });
-  $('#newLoopBtn').addEventListener('click', openLoop);
-  $('#lclose').addEventListener('click', closeLoop);
-  $('#newTaskBtn').addEventListener('click', openTask);
-  $('#tclose').addEventListener('click', closeTask);
-  $('#taskForm').addEventListener('submit', async e => {
+  $('#scrim').addEventListener('click', () => { closeDrawer(); closeJob(); });
+  $('#newJobBtn').addEventListener('click', openJob);
+  $('#jclose').addEventListener('click', closeJob);
+  $('#jobForm').addEventListener('submit', async e => {
     e.preventDefault();
     const submit = e.currentTarget.querySelector('button[type="submit"]');
     if (!submit || submit.disabled) return;
-    const title = $('#tTitle').value.trim();
-    if (!title) return;
-    /* daemon contract: POST /api/dispatch {project, prompt, title?, engine?} */
-    const body = {title, prompt: title, engine: $('#tEngine').value};
-    const project = $('#tProject').value.trim();
-    if (!project) return;
-    body.project = project;
+    const project = $('#jobProject').value.trim();
+    const issue = Number($('#jobIssue').value);
+    if (!project || !Number.isSafeInteger(issue) || issue < 1) return;
     submit.disabled = true;
     try {
-      const j = await post('/api/dispatch', body);
-      flash($('#taskMsg'), 'task queued ' + (j?.id || ''));
-      $('#tTitle').value = '';
+      const j = await post('/api/r1/jobs', {project, issue});
+      flash($('#jobMsg'), 'job queued ' + (j?.id || ''));
+      $('#jobIssue').value = '';
       poll();
-    } catch (err) { flash($('#taskMsg'), err.message, true); }
-    finally { submit.disabled = false; }
-  });
-  $('#loopForm').addEventListener('submit', async e => {
-    e.preventDefault();
-    const submit = e.currentTarget.querySelector('button[type="submit"]');
-    if (!submit || submit.disabled) return;
-    const project = $('#lProject').value.trim();
-    if (!project) return;
-    const body = {project};
-    const mc = parseInt($('#lMax').value, 10);
-    const tr = parseInt($('#lRetries').value, 10);
-    if (mc >= 1) body.maxCycles = Math.min(50, mc);
-    if (tr >= 1) body.taskRetries = Math.min(10, tr);
-    body.workerEngine = $('#lWorkerEngine').value;
-    body.criticEngine = $('#lCriticEngine').value;
-    body.autoCommit = $('#lCkpt').checked;
-    if ($('#lPolish').checked) body.polish = true;
-    submit.disabled = true;
-    try {
-      const j = await post('/api/loop', body);
-      flash($('#loopMsg'), 'loop queued ' + (j?.id || ''));
-      $('#lProject').value = '';
-      poll();
-    } catch (err) { flash($('#loopMsg'), err.message, true); }
+    } catch (err) { flash($('#jobMsg'), err.message, true); }
     finally { submit.disabled = false; }
   });
   document.addEventListener('keydown', e => {
@@ -2394,8 +2293,7 @@ function init(){
     if (e.key !== 'Escape') return;
     if (!$('#themeMenu').hidden) { themeOpen(false); $('#themeBtn').focus({preventScroll: true}); }
     else if (!$('#connectorMenu').hidden) { connectorOpen(false); $('#connectorBtn').focus({preventScroll: true}); }
-    else if ($('#taskPanel').classList.contains('open')) closeTask();
-    else if ($('#loopPanel').classList.contains('open')) closeLoop();
+    else if ($('#jobPanel').classList.contains('open')) closeJob();
     else closeDrawer();
   });
   document.addEventListener('visibilitychange', () => {
