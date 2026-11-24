@@ -44,7 +44,7 @@ test('disposable daemon loads external-only project config and attests sealed ru
   const state=await request(port,'/api/state');assert.equal(state.status,200);
   assert.equal(state.body.daemon.pid,child.pid);
   assert.deepEqual(state.body.daemon.projectConfig,{pathHash:hash(projectFile),hash:hash(bytes)});
-  const submit=()=>request(port,'/api/r1/jobs',{project:'externalonly',issue:30});
+  const submit=()=>request(port,'/api/development/jobs',{project:'externalonly',issue:30});
   const refused=await submit();assert.equal(refused.status,400);
   assert.match(refused.body.error,/enabled Codex project with independent review/);
   fs.appendFileSync(projectFile,' ');
@@ -82,7 +82,7 @@ test('disposable process routes R1 through external-only config and preserves pi
     const identity=configuration.runtimeProjectConfigIdentity();
     assert.equal(identity.path,${JSON.stringify(projects)});
     async function submit(){
-      const req=new PassThrough();req.method='POST';req.url='/api/r1/jobs';req.socket={localPort:1234};req.headers={host:'127.0.0.1:1234'};
+      const req=new PassThrough();req.method='POST';req.url='/api/development/jobs';req.socket={localPort:1234};req.headers={host:'127.0.0.1:1234'};
       const response=new Promise(resolve=>{let status;server.emit('request',req,{writeHead:code=>status=code,end:body=>resolve({status,body:JSON.parse(body)})});});
       req.end(JSON.stringify({project:'externalonly',issue:30}));return response;
     }

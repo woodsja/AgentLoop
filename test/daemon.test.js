@@ -465,7 +465,7 @@ test('obsolete HTTP admission stays closed, and canonical R1 rejects unknown pro
       const response = await requestJson(server, 'POST', endpoint, body);
       assert.equal(response.status, 404);
     }
-    const denied = await requestJson(server, 'POST', '/api/r1/jobs', { project: 'missing', issue: 5 });
+    const denied = await requestJson(server, 'POST', '/api/development/jobs', { project: 'missing', issue: 5 });
     assert.equal(denied.status, 400);
     assert.equal(isolated.store.listTasks('pending').length, 0);
     assert.equal((await requestJson(server, 'POST', '/api/projects', { project: 'new' })).status, 404);
@@ -570,7 +570,7 @@ for (const queueStage of ['pending', 'running']) test(`HTTP cancellation of a ${
   });
   assert.equal((await invoke('POST', '/api/cancel', { id: parent.id })).status, 200);
   d.fillSlots();
-  const result = await invoke('GET', `/api/r1/jobs/${parent.id}`);
+  const result = await invoke('GET', `/api/development/jobs/${parent.id}`);
   assert.equal(result.body.status, 'cancelled');
   assert.equal(result.body.evidence.cancelRequested, true);
   assert.equal(require('../src/autopilot-state').createJobStore(parent.autopilotStateDir).load(1).runs, 0);
@@ -598,23 +598,25 @@ test('HTTP R1 corrected specification retains old status result and raw identity
     server.emit('request', req, { writeHead(status) { this.status = status; }, end(body) { resolve({ status: this.status, body: JSON.parse(body) }); } });
     req.end(body ? JSON.stringify(body) : '');
   });
-  const submitted = await invoke('POST', '/api/r1/jobs', { project: 'demo', issue: 1 });
+  assert.equal((await invoke('POST', '/api/r1/jobs', { project: 'demo', issue: 1 })).status, 404, 'retired public R1 admission must stay closed');
+  assert.equal((await invoke('GET', '/api/r1/jobs/t-retired')).status, 404, 'retired R1 read route must stay closed');
+  const submitted = await invoke('POST', '/api/development/jobs', { project: 'demo', issue: 1 });
   assert.equal(submitted.status, 201);
   const oldId = submitted.body.id;
   d.fillSlots();
   const deadline = Date.now() + 2000;
   while (!s.listTasks('done').some(task => task.id === oldId) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(s.listTasks('done').some(task => task.id === oldId), 'specification outcome finishes within two seconds');
-  const before = await invoke('GET', `/api/r1/jobs/${oldId}`);
+  const before = await invoke('GET', `/api/development/jobs/${oldId}`);
   const raw = await invoke('GET', `/api/log/${oldId}?raw=1&bytes=262144`);
   assert.equal(before.body.status, 'needs_specification');
   issue.body = '## Acceptance\n- Implement a deterministic sum helper with unit tests for two integers. Keep the result explicit.';
-  const [fresh, duplicate] = await Promise.all([invoke('POST', '/api/r1/jobs', { project: 'demo', issue: 1 }), invoke('POST', '/api/r1/jobs', { project: 'demo', issue: 1 })]);
+  const [fresh, duplicate] = await Promise.all([invoke('POST', '/api/development/jobs', { project: 'demo', issue: 1 }), invoke('POST', '/api/development/jobs', { project: 'demo', issue: 1 })]);
   assert.equal(fresh.status, 201); assert.equal(duplicate.body.id, fresh.body.id);
   assert.notEqual(fresh.body.id, oldId);
-  assert.equal((await invoke('GET', `/api/r1/jobs/${fresh.body.id}`)).body.status, 'queued');
+  assert.equal((await invoke('GET', `/api/development/jobs/${fresh.body.id}`)).body.status, 'queued');
   d.testing.initializeRuntime(); // reconstruct service readers without launching a daemon
-  assert.deepEqual(await invoke('GET', `/api/r1/jobs/${oldId}`), before);
+  assert.deepEqual(await invoke('GET', `/api/development/jobs/${oldId}`), before);
   assert.deepEqual(await invoke('GET', `/api/log/${oldId}?raw=1&bytes=262144`), raw);
   const result = await invoke('GET', `/api/jobs/${oldId}`);
   assert.equal(result.body.result.status, 'needs_specification');

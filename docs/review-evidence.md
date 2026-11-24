@@ -127,7 +127,7 @@ node src/review-successor.js /absolute/owner/autopilot-projects.json \
   /absolute/new-evidence-directory
 ```
 
-The source is the `get_r1_job_result` JSON (with `status: blocked`, `project`,
+The source is the `get_development_job_result` JSON (with `status: blocked`, `project`,
 `id`, and `evidence`), not an editable replacement for the old checkpoint. The
 command requires passing source verification for the full delivered SHA and an
 earlier failed/interrupted review. It records source bytes' SHA-256 and the

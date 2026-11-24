@@ -1302,7 +1302,7 @@ function mockEvent(kind, text, taskId){
 }
 function mockPost(url, body){
   if (!mock) mock = buildMock();
-  if (url === '/api/r1/jobs'){
+  if (url === '/api/development/jobs'){
     const id = 't-' + Math.random().toString(16).slice(2, 10);
     mock.tasks.pending.push({id, workflow: 'r1', title: 'Issue #' + body.issue, project: body.project, status: 'queued', createdAt: new Date().toISOString()});
     mockEvent('queue', 'queued development job for ' + baseName(body.project), id);
@@ -2101,7 +2101,7 @@ function executionRecordHtml(line){
 }
 async function mountDecisionStatus(body, requestedId){
   try {
-    const response = await fetch('/api/r1/jobs/' + encodeURIComponent(requestedId), {cache:'no-store'});
+    const response = await fetch('/api/development/jobs/' + encodeURIComponent(requestedId), {cache:'no-store'});
     if (!response.ok) return;
     const job = await response.json();
     if (drawerTaskId !== requestedId || !job.evidence?.decisions?.length) return;
@@ -2281,7 +2281,7 @@ function init(){
     if (!project || !Number.isSafeInteger(issue) || issue < 1) return;
     submit.disabled = true;
     try {
-      const j = await post('/api/r1/jobs', {project, issue});
+      const j = await post('/api/development/jobs', {project, issue});
       flash($('#jobMsg'), 'job queued ' + (j?.id || ''));
       $('#jobIssue').value = '';
       poll();

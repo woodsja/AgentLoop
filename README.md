@@ -12,7 +12,7 @@ For this repository's Woods-controlled autonomous Ralph deployment, the [accepte
 
 ## What it is
 
-AgentLoop coordinates authorized development jobs in registered Git repositories. A single submission through the MCP tool `submit_r1_job` or the corresponding daemon route `POST /api/r1/jobs` advances implementation, deterministic verification, exact-commit GitHub CI, independent Claude review and bounded correction, then leaves an open pull request for an owner to merge separately. The current transport uses the historical `r1` name; the intended public vocabulary is a neutral development job after the coordinator and state are consolidated.
+AgentLoop coordinates authorized development jobs in registered Git repositories. A single submission through the MCP tool `submit_development_job` or the corresponding daemon route `POST /api/development/jobs` advances implementation, deterministic verification, exact-commit GitHub CI, independent Claude review and bounded correction, then leaves an open pull request for an owner to merge separately. The public development-job transport now uses neutral naming; legacy on-disk identifiers remain internal for historical inspection.
 
 Codex handles implementation; Claude reviews independently. The daemon persists job progress and captured raw execution records so the owner can inspect results, cancel running work, or diagnose a failed or interrupted job. New development jobs use the same coordinator regardless of whether a client submits through the dashboard or MCP.
 
@@ -23,12 +23,12 @@ Each agent invocation starts with a fresh process. Durable job state and the rep
 ## How it works
 
 1. Register and activate a project in owner-controlled configuration and authorize its worktree policy. Supply an exact GitHub issue that has **already** received its separately approved executable release and required ready label; creating or drafting an issue alone does not authorize execution.
-2. Submit `{project, issue}` once with `submit_r1_job`, or choose **New job** in the dashboard. The daemon validates project, repository, and worktree authorization before starting work.
+2. Submit `{project, issue}` once with `submit_development_job`, or choose **New job** in the dashboard. The daemon validates project, repository, and worktree authorization before starting work.
 3. Codex implements the change in the authorized worktree, and Ralph runs deterministic verification with complete captured output. Failed implementation or verification receives bounded correction attempts.
 4. Ralph pushes the delivery branch and opens a PR. Required GitHub Actions workflow results are checked against the *exact delivered commit*, followed by independent read-only Claude review of that same commit. Actionable review findings can trigger bounded correction and a fresh exact-commit check.
 5. With `autoMerge: false`, the job ends in a recorded pass/blocked outcome and leaves an approved PR open for owner inspection. Merging and production deployment are separate actions.
 
-The R1-backed delivery coordinator is the currently proven implementation. The internal classic worker/critic loop is still needed for some projects and will be consolidated in a later change; it is not a separately supported submission path. No direct one-shot task or classic-loop submission interface is offered.
+The single development-job coordinator retains the Codex worker and independent Claude critic internally; classic-loop scheduling and public one-shot execution are retired.
 
 Captured raw logs, historical job lookups, cancellation, and owner-decision holds are retained. The system never promises access to model reasoning not exposed by the CLI.
 
@@ -36,7 +36,7 @@ Captured raw logs, historical job lookups, cancellation, and owner-decision hold
 
 ## The dashboard
 
-The local dashboard at `http://127.0.0.1:5757` offers one **New job** form: select a registered project and enter its already-authorized GitHub issue number. The form submits to `POST /api/r1/jobs`; it cannot create or approve GitHub issues or choose an arbitrary filesystem path. The dashboard also shows job status, queue, historical runs, owner messages and execution evidence, including downloadable complete raw NDJSON logs. Cancellation still uses `POST /api/cancel`.
+The local dashboard at `http://127.0.0.1:5757` offers one **New job** form: select a registered project and enter its already-authorized GitHub issue number. The form submits to `POST /api/development/jobs`; it cannot create or approve GitHub issues or choose an arbitrary filesystem path. The dashboard also shows job status, queue, historical runs, owner messages and execution evidence, including downloadable complete raw NDJSON logs. Cancellation still uses `POST /api/cancel`.
 
 The existing read-only visualization includes historical loop timelines and checkpoint details. Those remain for inspection while their underlying execution machinery is consolidated into the canonical delivery coordinator.
 
@@ -97,14 +97,14 @@ Claude Code can connect to the local bridge directly, no tunnel needed:
 claude mcp add --transport http agentloop "http://127.0.0.1:5758/mcp?key=<token-from-Connector>"
 ```
 
-The bridge listens on `127.0.0.1:5758` with its existing token and exposes `submit_r1_job` as its sole development-job submission tool. It also exposes `get_r1_job_status`, `get_r1_job_result`, `get_job_status`, `get_job_result`, `agentloop_status`, and `send_message`. Generic status/result tools retain access to historical job IDs. The separate opt-in `run_bash` diagnostic tool is not a job-submission interface.
+The bridge listens on `127.0.0.1:5758` with its existing token and exposes `submit_development_job` as its sole development-job submission tool. It also exposes `get_development_job_status`, `get_development_job_result`, `get_job_status`, `get_job_result`, `agentloop_status`, and `send_message`. Generic status/result tools retain access to historical job IDs. The separate opt-in `run_bash` diagnostic tool is not a job-submission interface.
 
 ## Submit a development job
 
 With an activated project and an owner-authorized ready-labeled GitHub issue:
 
 1. In the dashboard, select **New job**, choose the registered project, and enter the GitHub issue number. The form does not permit choosing a direct shell command, implementation engine, or arbitrary worktree.
-2. Alternatively, use `submit_r1_job({project: "registered-project", issue: 42})` through MCP. The job ID immediately returned is durable and can be used to retrieve status, results, and raw records.
+2. Alternatively, use `submit_development_job({project: "registered-project", issue: 42})` through MCP. The job ID immediately returned is durable and can be used to retrieve status, results, and raw records.
 3. Follow the same job through implementation, native tests, PR delivery, exact-head CI, and Claude review. With auto-merge disabled, the resulting PR remains open and unmerged.
 
 Do not relabel or release issues automatically when owner authorization or an immutable ticket manifest is required.
@@ -122,7 +122,7 @@ Do not relabel or release issues automatically when owner authorization or an im
 | `mcpBridge.port` | `5758` | Local MCP bridge port. |
 | `models` | `{ "claude": "opus", "codex": "gpt-5.6-terra" }` | Default model per engine. |
 | `enginePaths` | none | Optional absolute path per engine, for a CLI that is not on `PATH`. |
-| `allowedProjects` | none | Admin-owned registered project roots and authorized worktrees used by `/api/r1/jobs`. Missing or invalid entries deny submission. |
+| `allowedProjects` | none | Admin-owned registered project roots and authorized worktrees used by `/api/development/jobs`. Missing or invalid entries deny submission. |
 
 The shipped `config.json` includes every key above except the optional `enginePaths` key.
 
@@ -236,10 +236,10 @@ On Windows, pressing Ctrl-C in the console gracefully finalizes running loops be
 
 MIT. See [LICENSE](LICENSE).
 
-## Durable asynchronous R1 jobs
+## Durable asynchronous development jobs
 
-With the existing daemon running, `submit_r1_job({project, issue, worktree?})` (or
-`POST /api/r1/jobs`) persists a job and immediately returns `{id}`. It selects the
+With the existing daemon running, `submit_development_job({project, issue, worktree?})` (or
+`POST /api/development/jobs`) persists a job and immediately returns `{id}`. It selects the
 specified ready GitHub issue; implementation and deterministic verification run
 in the owner-authorized issue worktree, followed by CI observation and the existing
 independent Claude review. The owner must enable the project in
@@ -247,10 +247,10 @@ independent Claude review. The owner must enable the project in
 `"risk"`, and register its checkout and exact `issue-N` worktree in the existing
 project registry before submission. Requests cannot register paths themselves.
 
-The existing dispatcher runs one R1 job at a time, retains the original per-issue
+The existing dispatcher runs one development job at a time, retains the original per-issue
 lock, retry/correction limits and review history, and checkpoints phases in the
-existing durable queue. `get_r1_job_status({id})`, `get_r1_job_result({id})`, or
-`GET /api/r1/jobs/:id` retrieve persisted phases and complete verification/review
+existing durable queue. `get_development_job_status({id})`, `get_development_job_result({id})`, or
+`GET /api/development/jobs/:id` retrieve persisted phases and complete verification/review
 evidence, including after daemon
 recovery. `passed` requires verification and an
 independent PASS for the exact delivered SHA and means ready for human merge.

@@ -129,12 +129,12 @@ function toolFailure(message) {
 
 const tools = [
   {
-    name: 'submit_r1_job', description: 'Queue an authorized R1 issue for asynchronous implementation, verification and independent review. Returns a job ID immediately.',
+    name: 'submit_development_job', description: 'Queue an authorized development issue for asynchronous implementation, verification and independent review. Returns a job ID immediately.',
     inputSchema: { type: 'object', properties: { project: { type: 'string' }, issue: { type: 'integer', minimum: 1 }, worktree: { type: 'string' } }, required: ['project', 'issue'], additionalProperties: false },
     annotations: { readOnlyHint: false },
   },
-  ...['get_r1_job_status', 'get_r1_job_result'].map(name => ({
-    name, description: 'Retrieve persisted R1 job phases and review evidence by job ID.',
+  ...['get_development_job_status', 'get_development_job_result'].map(name => ({
+    name, description: 'Retrieve persisted development-job phases and review evidence by job ID.',
     inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false },
     annotations: { readOnlyHint: true },
   })),
@@ -268,10 +268,10 @@ async function callTool(params, options = {}) {
     }
   }
 
-  if (['submit_r1_job', 'get_r1_job_status', 'get_r1_job_result'].includes(name)) {
-    const response = name === 'submit_r1_job'
-      ? await requestDaemon(options, '/api/r1/jobs', { project: args.project, issue: args.issue, worktree: args.worktree, source: 'mcp' })
-      : await requestDaemon(options, `/api/r1/jobs/${encodeURIComponent(args.id || '')}`);
+  if (['submit_development_job', 'get_development_job_status', 'get_development_job_result'].includes(name)) {
+    const response = name === 'submit_development_job'
+      ? await requestDaemon(options, '/api/development/jobs', { project: args.project, issue: args.issue, worktree: args.worktree, source: 'mcp' })
+      : await requestDaemon(options, `/api/development/jobs/${encodeURIComponent(args.id || '')}`);
     return response && response.statusCode >= 200 && response.statusCode < 300
       ? toolResult(response.value) : toolFailure(response ? daemonError(response) : 'Daemon unavailable.');
   }

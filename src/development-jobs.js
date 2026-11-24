@@ -37,7 +37,7 @@ function autonomous(project) {
 
 const { evidence, nextAction, deliveryStatus, deliveryPhase } = require('./r1-status');
 
-function createR1Jobs(store, options = {}) {
+function createDevelopmentJobs(store, options = {}) {
   const dependencies = options.autopilotDependencies || {};
   const load = dependencies.loadProjectConfig || loadProjectConfig;
   const discover = dependencies.discoverReadyIssues || discoverReadyIssues;
@@ -101,33 +101,33 @@ function createR1Jobs(store, options = {}) {
   });
 
   function submit(body) {
-    if (!Number.isSafeInteger(body.issue) || body.issue < 1) throw new Error('R1 submission requires a positive issue number.');
-    if (Object.hasOwn(body, 'cwd') || Object.hasOwn(body, 'projectPath')) throw new Error('R1 paths come from owner configuration.');
+    if (!Number.isSafeInteger(body.issue) || body.issue < 1) throw new Error('Development-job submission requires a positive issue number.');
+    if (Object.hasOwn(body, 'cwd') || Object.hasOwn(body, 'projectPath')) throw new Error('Development-job paths come from owner configuration.');
     const scope = resolveProject(store.config, body.project, undefined, store.paths.config);
     const project = load(body.project);
     if (!project.enabled || project.worker !== 'codex' || !['always', 'risk'].includes(project.reviewPolicy)) {
-      throw new Error('R1 async jobs require an enabled Codex project with independent review required.');
+      throw new Error('Development jobs require an enabled Codex project with independent review required.');
     }
-    if (fs.realpathSync(project.checkout) !== scope.cwd) throw new Error('R1 checkout does not match the registered project.');
+    if (fs.realpathSync(project.checkout) !== scope.cwd) throw new Error('Development-job checkout does not match the registered project.');
     const planned = deriveWorktreePath(project, { number: body.issue, title: body.title || 'Queued issue' });
     const entry = store.config.allowedProjects[body.project];
     const named = entry && typeof entry === 'object' && Object.entries(entry.worktrees)
       .find(([name, candidate]) => candidate === planned && (body.worktree === undefined || name === body.worktree));
     const managed = !named && body.worktree === undefined && managesWorktree(entry, planned);
-    if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before R1 submission.');
+    if (!named && !managed) throw new Error('The issue worktree must be explicitly authorized before development-job submission.');
     // New jobs may reserve a not-yet-created worktree. If the path already
     // exists, validate the actual Git repository identity before admission;
     // a different repository can occupy an otherwise authorized directory.
     if (fs.existsSync(planned)) {
       if (fs.realpathSync(planned) !== path.resolve(planned)) {
-        throw new Error('R1 issue worktree is redirected outside its authorized path.');
+        throw new Error('Development-job worktree is redirected outside its authorized path.');
       }
       // A removed worktree may leave an empty directory for a new attempt.
       // Only nonempty destinations need existing-worktree identity checks.
       if (fs.readdirSync(planned).length) {
         const existing = resolveProject(store.config, body.project, named ? named[0] : path.basename(planned), store.paths.config);
         if (!existing.isolatedWorktree || existing.cwd !== path.resolve(planned)) {
-          throw new Error('R1 issue worktree is not a linked worktree of its registered repository.');
+          throw new Error('Development-job worktree is not a linked worktree of its registered repository.');
         }
       }
     }
@@ -188,7 +188,7 @@ function createR1Jobs(store, options = {}) {
         workflow: 'r1', project: body.project, issue: body.issue, cwd: scope.cwd,
         requiredCiWorkflow: project.ciWorkflow || null,
         ...(authorization ? { milestoneAuthorization: authorization } : {}),
-        ...(named ? { worktree: named[0] } : {}), title: body.title || `R1 issue #${body.issue}`,
+        ...(named ? { worktree: named[0] } : {}), title: body.title || `Development issue #${body.issue}`,
         status: 'queued', autopilotStateDir: resolveStateDir(body.project, project), source: body.source || 'api',
         ...(autonomous(project) ? { autonomous: true } : {}),
       });
@@ -571,4 +571,4 @@ function createR1Jobs(store, options = {}) {
   return { submit, advance, admit, recover, read, stop, cancel };
 }
 
-module.exports = { createR1Jobs };
+module.exports = { createDevelopmentJobs };

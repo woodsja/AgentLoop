@@ -45,7 +45,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
   };
   try {
     let port = await launch();
-    const bad = await request(port, '/api/r1/jobs', { project: 'demo', issue: 99 }); assert.equal(bad.status, 400);
+    const bad = await request(port, '/api/development/jobs', { project: 'demo', issue: 99 }); assert.equal(bad.status, 400);
     // An alien Git repository must not gain executor access even when its
     // linked worktree occupies a path explicitly named by the owner registry.
     const alien = path.join(root, 'alien-repo'); fs.mkdirSync(alien);
@@ -58,7 +58,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     const alienWorktree = path.join(worktreeRoot, 'issue-4');
     alienGit('worktree', 'add', '-b', 'alien-branch', alienWorktree);
     try {
-      const denied = await request(port, '/api/r1/jobs', { project: 'demo', issue: 4, worktree: 'issue4' });
+      const denied = await request(port, '/api/development/jobs', { project: 'demo', issue: 4, worktree: 'issue4' });
       assert.equal(denied.status, 400, 'wrong-repository linked worktree must be refused at submission');
     } finally { alienGit('worktree', 'remove', '--force', alienWorktree); }
     // The surviving HTTP admission must reject spoofed project paths/worktrees before work starts.
@@ -69,15 +69,15 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
       { project: 'demo', issue: 1, worktree: 'issue4' },
       { project: 'unregistered', issue: 1 },
     ]) {
-      const denied = await request(port, '/api/r1/jobs', forged);
+      const denied = await request(port, '/api/development/jobs', forged);
       assert.equal(denied.status, 400, JSON.stringify(forged));
     }
-    const submitted = await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 }); assert.equal(submitted.status, 201);
+    const submitted = await request(port, '/api/development/jobs', { project: 'demo', issue: 1 }); assert.equal(submitted.status, 201);
     const id = submitted.value.id;
     assert.equal(fs.existsSync(path.join(root, 'worker-release')), false, 'HTTP response precedes release of implementation');
-    const get = async jobId => (await request(port, `/api/r1/jobs/${jobId}`)).value;
+    const get = async jobId => (await request(port, `/api/development/jobs/${jobId}`)).value;
     await until(async () => (await get(id)).phase === 'implementation');
-    const second = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 2 })).value.id;
+    const second = (await request(port, '/api/development/jobs', { project: 'demo', issue: 2 })).value.id;
     await delay(1700);
     assert.equal((await get(second)).phase, 'queued');
     assert.equal(fs.readFileSync(path.join(root, 'workers'), 'utf8').trim().split('\n').length, 1);
@@ -202,7 +202,7 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     assert.deepEqual([r1Shaped.status, r1Shaped.value.error], [404, 'Not found.']);
     await until(async () => (await get(second)).status === 'cancelled');
     fs.writeFileSync(path.join(root, 'review-error'), '');
-    const third = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 3 })).value.id;
+    const third = (await request(port, '/api/development/jobs', { project: 'demo', issue: 3 })).value.id;
     const failed = await until(async () => { const job = await get(third); return job.status === 'blocked' && job; });
     assert.equal(failed.evidence.reviewHistory[0].status, 'failed');
     assert.equal(failed.evidence.reviewHistory[0].diagnostics, 'Fake reviewer failed: token=private');
@@ -212,14 +212,14 @@ test('R1 submission is independent, serialized, checkpointed, fail closed and re
     await halt(); port = await launch();
     assert.deepEqual(await get(id), completed);
     const before = fs.readFileSync(path.join(root, 'reviews'), 'utf8');
-    const replayResponse = await request(port, '/api/r1/jobs', { project: 'demo', issue: 1 });
+    const replayResponse = await request(port, '/api/development/jobs', { project: 'demo', issue: 1 });
     assert.equal(replayResponse.status, 201, JSON.stringify(replayResponse.value));
     const replay = replayResponse.value.id;
     await until(async () => (await get(replay)).status === 'passed');
     assert.equal(fs.readFileSync(path.join(root, 'reviews'), 'utf8'), before, 'persisted exact-SHA approval is reused');
-    assert.equal((await request(port, '/api/r1/jobs/unknown')).status, 404);
+    assert.equal((await request(port, '/api/development/jobs/unknown')).status, 404);
     fs.unlinkSync(path.join(root, 'review-release'));
-    const interrupted = (await request(port, '/api/r1/jobs', { project: 'demo', issue: 4 })).value.id;
+    const interrupted = (await request(port, '/api/development/jobs', { project: 'demo', issue: 4 })).value.id;
     await until(async () => (await get(interrupted)).phase === 'review');
     const recorded = fs.readFileSync(path.join(root, 'reviews'), 'utf8');
     const died = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await died;
@@ -244,7 +244,7 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   const managed = path.join(root, 'worktrees');
   const registryPath = path.join(root, 'owner.json'); fs.writeFileSync(registryPath, '{}');
   const { configuredProjects } = require('../src/project-registry');
-  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createDevelopmentJobs } = require('../src/development-jobs');
   const queued = [];
   const store = {
     paths: { config: registryPath },
@@ -257,14 +257,14 @@ test('R1 submission accepts issue worktrees planned inside an owner-managed root
   };
   const project = { enabled: true, repo: 'example/repo', checkout, worktreeRoot: managed, baseBranch: 'main', worker: 'codex', reviewPolicy: 'always', verification: 'true' };
   let current = project;
-  const jobs = createR1Jobs(store, { autopilotDependencies: { loadProjectConfig: () => current } });
+  const jobs = createDevelopmentJobs(store, { autopilotDependencies: { loadProjectConfig: () => current } });
 
   assert.equal(jobs.submit({ project: 'demo', issue: 5 }).id, 't-0000abcd', 'an accepted queue entry remains accepted if transcript metadata cannot be checkpointed');
   assert.equal(queued[0].worktree, undefined);
   assert.throws(() => jobs.submit({ project: 'demo', issue: 5, worktree: 'issue5' }), /explicitly authorized/);
   assert.throws(() => jobs.submit({ project: 'demo', issue: 5, worktree: '../unrelated' }), /explicitly authorized/);
-  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, cwd: '/tmp/forged' }), /R1 paths come from owner configuration/);
-  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, projectPath: '/tmp/forged' }), /R1 paths come from owner configuration/);
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, cwd: '/tmp/forged' }), /Development-job paths come from owner configuration/);
+  assert.throws(() => jobs.submit({ project: 'demo', issue: 5, projectPath: '/tmp/forged' }), /Development-job paths come from owner configuration/);
   assert.throws(() => jobs.submit({ project: 'unregistered', issue: 5 }), /Unknown project/);
   // A worker-writable project file cannot move the worktree outside the owner root.
   current = { ...project, worktreeRoot: path.join(root, 'elsewhere') };
@@ -313,7 +313,7 @@ test('R1 navigation summaries retain bounded failure facts alongside the complet
 });
 
 test('new job inspection follows the durable delivery checkpoint and leaves stale queue data untouched', t => {
-  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createDevelopmentJobs } = require('../src/development-jobs');
   const { createJob, createJobStore, markTerminal } = require('../src/autopilot-state');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-authority-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -322,7 +322,7 @@ test('new job inspection follows the durable delivery checkpoint and leaves stal
     autopilotStateDir: directory, createdAt: '2026-11-22T00:00:00.000Z', r1: { terminalState: 'merged' } };
   const before = JSON.stringify(queue);
   const store = { paths: {}, readTask: () => structuredClone(queue) };
-  const jobs = createR1Jobs(store);
+  const jobs = createDevelopmentJobs(store);
   const durable = createJobStore(directory);
   const job = createJob({ projectName: 'demo', repo: 'example/repo', issue: { number: 1, title: 'One authority' },
     branch: 'ralph/issue-1', worktreePath: '/tmp/owned', now: () => queue.createdAt });
@@ -333,7 +333,7 @@ test('new job inspection follows the durable delivery checkpoint and leaves stal
   job.status = 'cancelled'; markTerminal(job, 'cancelled'); durable.save(job);
   assert.equal(jobs.read(id).status, 'cancelled', 'canonical cancellation wins over queue status');
   assert.equal(JSON.stringify(queue), before, 'inspection never repairs or rewrites history');
-  const restarted = createR1Jobs(store);
+  const restarted = createDevelopmentJobs(store);
   assert.deepEqual(restarted.read(id), jobs.read(id), 'fresh coordinator observes the same authority');
   job.r1ParentJobId = 't-0000ffff'; durable.save(job);
   assert.equal(restarted.read(id).status, 'blocked');
@@ -341,7 +341,7 @@ test('new job inspection follows the durable delivery checkpoint and leaves stal
 });
 
 test('restart reconciles a dead process claim on an already terminal checkpoint before releasing dispatch', async t => {
-  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createDevelopmentJobs } = require('../src/development-jobs');
   const { createJob, createJobStore, markTerminal } = require('../src/autopilot-state');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-terminal-recovery-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -362,7 +362,7 @@ test('restart reconciles a dead process claim on an already terminal checkpoint 
     readTask: () => structuredClone(task), listR1ChildLoops: () => [], appendLogLine() {}, appendExecution(id, event) { events.push(event); },
     moveTask() { archived = true; },
   };
-  const jobs = createR1Jobs(queue, { autopilotDependencies: { loadProjectConfig: () => project,
+  const jobs = createDevelopmentJobs(queue, { autopilotDependencies: { loadProjectConfig: () => project,
     discoverReadyIssues: async () => [], createRalphTaskService() { throw new Error('Terminal work must never replay'); } } });
   jobs.advance(task);
   const deadline = Date.now() + 1000;
@@ -374,7 +374,7 @@ test('restart reconciles a dead process claim on an already terminal checkpoint 
 });
 
 test('revoked executor configuration creates one durable supervisor hold without retrying or inventing a delivery verdict', async () => {
-  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createDevelopmentJobs } = require('../src/development-jobs');
   let task = { id: 't-0000abcd', workflow: 'r1', project: 'demo', issue: 5,
     status: 'running', autopilotStateDir: '/tmp/r1-held-job-state', createdAt: new Date().toISOString() };
   let loads = 0; const events = [];
@@ -383,7 +383,7 @@ test('revoked executor configuration creates one durable supervisor hold without
     writeTask(value, stage) { assert.equal(stage, 'running'); task = structuredClone(value); },
     appendExecution(_id, event) { events.push(event); }, appendLogLine() {},
   };
-  const jobs = createR1Jobs(queue, { autopilotDependencies: {
+  const jobs = createDevelopmentJobs(queue, { autopilotDependencies: {
     loadProjectConfig() { loads++; throw new Error('Owner configuration revoked the executor ' + 'detail '.repeat(500) + 'DIAGNOSTIC TAIL'); },
   } });
   jobs.advance(task);
@@ -400,11 +400,11 @@ test('revoked executor configuration creates one durable supervisor hold without
 });
 
 test('missing, corrupt and mismatched canonical records remain inspectable per job with raw journal link', t => {
-  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createDevelopmentJobs } = require('../src/development-jobs');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-diagnostic-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const task = { id: 't-0000abcd', workflow: 'r1', project: 'demo', issue: 1, autopilotStateDir: directory };
-  const jobs = createR1Jobs({ paths: {}, readTask: () => task });
+  const jobs = createDevelopmentJobs({ paths: {}, readTask: () => task });
   for (const contents of [null, '{broken', JSON.stringify({ schemaVersion: 900 })]) {
     if (contents !== null) fs.writeFileSync(path.join(directory, 'issue-1.json'), contents);
     const value = jobs.read(task.id);
@@ -415,7 +415,7 @@ test('missing, corrupt and mismatched canonical records remain inspectable per j
 });
 
 test('corrected specification reserves a fresh parent and preserves the old checkpoint and journal', async t => {
-  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createDevelopmentJobs } = require('../src/development-jobs');
   const { createJob, createJobStore, markTerminal } = require('../src/autopilot-state');
   const { configuredProjects } = require('../src/project-registry');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-spec-rearm-'));
@@ -437,7 +437,7 @@ test('corrected specification reserves a fresh parent and preserves the old chec
     enqueueTask: task => { const saved = { ...task, id: 't-0000ffff' }; tasks.push(saved); return saved; },
     appendExecution() {}, appendLogLine() {},
   };
-  const jobs = createR1Jobs(store, { autopilotDependencies: { loadProjectConfig: () => project, discoverReadyIssues: async () => [issue] } });
+  const jobs = createDevelopmentJobs(store, { autopilotDependencies: { loadProjectConfig: () => project, discoverReadyIssues: async () => [issue] } });
   assert.equal((await jobs.submit({ project: 'demo', issue: 1 })).id, previous.id, 'unchanged bad spec cannot rearm');
   issue.body = '## Acceptance criteria\n- Create the requested answer file and verify the exact value with deterministic tests.';
   const [fresh, duplicate] = await Promise.all([jobs.submit({ project: 'demo', issue: 1 }), jobs.submit({ project: 'demo', issue: 1 })]);
@@ -454,7 +454,7 @@ test('corrected specification reserves a fresh parent and preserves the old chec
 });
 
 test('ownership hold is observed once and owner cancellation completes without launching an executor', async t => {
-  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createDevelopmentJobs } = require('../src/development-jobs');
   const { createJob, createJobStore } = require('../src/autopilot-state');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-cancel-hold-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -464,7 +464,7 @@ test('ownership hold is observed once and owner cancellation completes without l
   job.r1ParentJobId = task.id; job.ownershipBlocked = 'Requirements unavailable'; durable.save(job);
   const before = fs.readFileSync(durable.jobPath(1), 'utf8');
   let loads = 0, moved = false;
-  const jobs = createR1Jobs({ paths: {}, config: {}, readTask: () => task,
+  const jobs = createDevelopmentJobs({ paths: {}, config: {}, readTask: () => task,
     moveTask: () => { moved = true; }, writeTask: value => { task = value; }, appendExecution() {}, appendLogLine() {},
   }, { ciPollMs: 0, autopilotDependencies: { loadProjectConfig: () => { loads++; throw new Error('revoked'); } } });
   jobs.advance(task); await delay(20); jobs.advance(task); await delay(20);

@@ -392,7 +392,7 @@ after the final read cannot be atomically coupled to GitHub's merge operation.
 The validator uses the same owner configuration, projects file and global
 `AGENTLOOP_STATE_DIR/milestone-grants.json` as the grant/ticket commands, rather
 than a worker-provided path or the per-project job store. Embedders can supply
-`projectsPath` to `createR1Jobs` when using an isolated owner projects file.
+`projectsPath` to `createDevelopmentJobs` when using an isolated owner projects file.
 Denied checks append and fsync specific diagnostics to
 `$AGENTLOOP_STATE_DIR/milestone-admission.ndjson`. Existing task execution records
 also retain execution/merge authorization failures. Authorization holds preserve

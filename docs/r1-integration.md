@@ -134,7 +134,7 @@ registry and historical jobs are outside this implementation's mutation scope.
 
 ## Read-only R1 status
 
-`GET /api/r1/jobs/<id>` and MCP `get_r1_job_status` project the existing
+`GET /api/development/jobs/<id>` and MCP `get_development_job_status` project the existing
 checkpoint without observing GitHub, retrying work, or granting merge authority.
 `evidence.ci` keeps the `state` field (`pending`, `green`, `red`) and adds
 `category`, `requiredWorkflow`, `prNumber`, `headCommit`, `observedAt`,

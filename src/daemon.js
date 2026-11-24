@@ -6,9 +6,9 @@ const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 
 const store = require('./store');
-const { createR1Jobs } = require('./r1-jobs');
+const { createDevelopmentJobs } = require('./development-jobs');
 const { terminatePriorR1Worker } = require('./r1-process-claim');
-let r1Jobs = createR1Jobs(store);
+let developmentJobs = createDevelopmentJobs(store);
 const engines = require('./engines');
 const state = require('./state');
 
@@ -333,9 +333,9 @@ function fillSlots() {
   const running = store.listTasks('running', { dashboard: true })
     .filter(task => task.workflow !== 'r1' || task.autopilotStateDir);
   const r1 = running.find(task => task.workflow === 'r1');
-  if (r1) { r1Jobs.advance(r1); return; }
+  if (r1) { developmentJobs.advance(r1); return; }
   if (running.some(task => task.r1Child)) return;
-  r1Jobs.admit();
+  developmentJobs.admit();
   const runningCount = running.length;
   const slots = Math.max(0, maxConcurrent - runningCount);
   if (!slots) return;
@@ -379,7 +379,7 @@ function fillSlots() {
     }
     if (store.listTasks('running', { dashboard: true }).length) return;
     store.moveTask(task.id, 'pending', 'running');
-    r1Jobs.advance(task);
+    developmentJobs.advance(task);
     return;
   }
 }
@@ -396,7 +396,7 @@ function sendJson(res, statusCode, value) {
 function resultForTask(task, dashboard = false) {
   try {
     if (task.autopilotStateDir) {
-      const job = r1Jobs.read(task.id);
+      const job = developmentJobs.read(task.id);
       const result = { id: task.id, status: job.status, project: task.project, evidence: job.evidence };
       return dashboard ? require('./execution-preview').preview(result) : result;
     }
@@ -548,7 +548,7 @@ function daemonState() {
   const defaultEngine = store.config.defaultEngine;
   const projectTask = task => {
     if (!task.autopilotStateDir) return task;
-    const current = r1Jobs.read(task.id) || { status: 'blocked', diagnostic: 'Canonical checkpoint unavailable.', executionJournal: { raw: `/api/log/${task.id}?raw=1` } };
+    const current = developmentJobs.read(task.id) || { status: 'blocked', diagnostic: 'Canonical checkpoint unavailable.', executionJournal: { raw: `/api/log/${task.id}?raw=1` } };
     return { ...task, ...require('./execution-preview').preview(current),
       ...(current.evidence?.updatedAt ? { finishedAt: current.evidence.updatedAt } : {}) };
   };
@@ -786,7 +786,7 @@ function readJob(id) {
   for (const stage of ['pending', 'running', 'done']) {
     try {
       const task = store.readTask(id, stage);
-      const canonical = task.autopilotStateDir ? r1Jobs.read(task.id) : null;
+      const canonical = task.autopilotStateDir ? developmentJobs.read(task.id) : null;
       const result = canonical?.evidence ? { id: task.id, status: canonical.status, evidence: canonical.evidence } : resultForTask(task);
       return {
         id: task.id,
@@ -839,7 +839,7 @@ async function cancelTask(req, res) {
       const { queueStage, ...reservation } = parent;
       store.writeTask({ ...reservation, cancelRequested: true, lastActivity: 'Cancellation requested.' }, queueStage);
     }
-    r1Jobs.cancel(id, terminateWorker);
+    developmentJobs.cancel(id, terminateWorker);
     for (const child of attached) {
       if (child.stage === 'running') {
         const stopped = cancelRunningLoop(child.id);
@@ -905,18 +905,18 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // R1 issue workflows keep their own namespace so the generic job contract
-  // above stays unchanged for existing clients.
-  if (req.method === 'GET' && requestPath.startsWith('/api/r1/jobs/')) {
-    const job = r1Jobs.read(requestPath.slice('/api/r1/jobs/'.length));
+  // Development jobs have one canonical admission and read namespace.
+  // Generic historical job reads remain available separately.
+  if (req.method === 'GET' && requestPath.startsWith('/api/development/jobs/')) {
+    const job = developmentJobs.read(requestPath.slice('/api/development/jobs/'.length));
     sendJson(res, job ? 200 : 404, job || { error: 'Job not found.' });
     return;
   }
 
-  if (req.method === 'POST' && requestPath === '/api/r1/jobs') {
+  if (req.method === 'POST' && requestPath === '/api/development/jobs') {
     try {
       const body = await readJsonBody(req);
-      const job = await r1Jobs.submit(body);
+      const job = await developmentJobs.submit(body);
       sendJson(res, 201, { id: job.id });
     } catch (error) { sendJson(res, 400, { error: error.message }); }
     return;
@@ -976,7 +976,7 @@ function recoverRunningTasks() {
     if (task.workflow === 'r1') {
       // A held session never started a process. Keep its parent attached so
       // canonical authorization can be rechecked without inventing a failure.
-      r1Jobs.recover(task);
+      developmentJobs.recover(task);
       continue;
     }
     if (terminalTaskStatuses.has(task.status)) {
@@ -1044,7 +1044,7 @@ async function stop(exitFn = process.exit) {
 
   clearInterval(ticker);
   stopBridge();
-  const r1Stopped = r1Jobs.stop(terminateWorker);
+  const r1Stopped = developmentJobs.stop(terminateWorker);
 
   if (server) {
     try {
@@ -1091,7 +1091,7 @@ async function stop(exitFn = process.exit) {
 
 function initializeRuntime(options = {}) {
   require('./autopilot-config').runtimeProjectConfigIdentity();
-  r1Jobs = createR1Jobs(store, { projectsPath: require('./autopilot-config').projectConfigPath(), ...options.r1 });
+  developmentJobs = createDevelopmentJobs(store, { projectsPath: require('./autopilot-config').projectConfigPath(), ...options.r1 });
   store.ensureDirs();
 
   daemonInfo = {

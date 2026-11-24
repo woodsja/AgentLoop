@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createR1Jobs } = require('../src/r1-jobs');
+const { createDevelopmentJobs } = require('../src/development-jobs');
 const { createJobStore, createJob, markTerminal } = require('../src/autopilot-state');
 const { configuredProjects } = require('../src/project-registry');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -36,7 +36,7 @@ function fixture(t) {
     },
     createRalphTaskService: () => assert.fail('no duplicate worker'),
   };
-  const jobs = createR1Jobs(queue, { ciPollMs: 0, admitIntervalMs: 0, autopilotDependencies: deps });
+  const jobs = createDevelopmentJobs(queue, { ciPollMs: 0, admitIntervalMs: 0, autopilotDependencies: deps });
   t.after(() => jobs.stop(() => {}));
   function saved(status = 'failed') {
     const task = queue.enqueueTask({ workflow: 'r1', project: 'demo', issue: 1, title: 'Recovery', status: 'running', autonomous: true, autopilotStateDir: durable.directory, repo: project.repo });

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createR1Jobs } = require('../src/r1-jobs');
+const { createDevelopmentJobs } = require('../src/development-jobs');
 const { run: runAutopilot } = require('../src/autopilot');
 const { createJob, createJobStore, recordVerification, recordDelivery, recordCiState, beginReviewAttempt, recordReview, recordMerge, recordIssueReconciled, markTerminal } = require('../src/autopilot-state');
 const { configuredProjects } = require('../src/project-registry');
@@ -33,7 +33,7 @@ const fixture = (t, names = ['ralph', 'other']) => {
     enqueueTask: task => { selected.push(task); return { ...task, id: 't-12345678' }; },
     appendLogLine: () => {}, writeTask: () => {},
   };
-  const scanner = () => createR1Jobs(store, { admitIntervalMs: 0, autopilotDependencies: {
+  const scanner = () => createDevelopmentJobs(store, { admitIntervalMs: 0, autopilotDependencies: {
     loadProjectConfig: name => projects[name], discoverReadyIssues: async project => typeof issueList === 'function' ? issueList(project) : issueList,
   } });
   return { jobs: scanner(), scanner, selected, setIssues: issues => { issueList = issues; }, projects };

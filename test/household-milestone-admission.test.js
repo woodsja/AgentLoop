@@ -191,12 +191,12 @@ for (const damage of ['missing', 'ambiguous', 'out-of-scope', 'stale-body', 'wro
 
 test('R1 scanner yields receipted Household work to its existing autopilot', async t => {
   const f = await householdFixture(t); await f.release();
-  const { createR1Jobs } = require('../src/r1-jobs');
+  const { createDevelopmentJobs } = require('../src/development-jobs');
   const { configuredProjects } = require('../src/project-registry');
   const store = { paths: { config: f.options.configPath, state: f.root },
     config: { allowedProjects: configuredProjects({ demo: f.project.checkout }, f.options.configPath) },
     listTasks: () => [], enqueueTask: () => { throw new Error('R1 must not enqueue Household work'); } };
-  const jobs = createR1Jobs(store, { projectsPath: f.options.projectsPath, admitIntervalMs: 0,
+  const jobs = createDevelopmentJobs(store, { projectsPath: f.options.projectsPath, admitIntervalMs: 0,
     autopilotDependencies: { loadProjectConfig: () => f.project,
       discoverReadyIssues: async () => { throw new Error('R1 must not scan Household'); } } });
   assert.equal(await jobs.admit(), null);

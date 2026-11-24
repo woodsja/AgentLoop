@@ -66,7 +66,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
   const outcome = async number => until(async () => {
     const [task] = tasksFor(number);
     if (!task) return false;
-    const job = await get(port, `/api/r1/jobs/${task.id}`);
+    const job = await get(port, `/api/development/jobs/${task.id}`);
     return ['merged', 'needs_specification', 'failed'].includes(job.status) && { task: tasksFor(number)[0], job };
   }, `outcome for #${number}`, 60000).catch(error => {
     const [task] = tasksFor(number);
@@ -78,7 +78,7 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     await launch();
     // The original line endpoint keeps short navigation labels. Complete raw
     // output is covered through the owner journal in r1-mixed-e2e.test.js.
-    const [inFlight] = await until(async () => { const tasks = tasksFor(7); return tasks[0] && (await get(port, `/api/r1/jobs/${tasks[0].id}`)).phase === 'implementation' && tasks; }, '#7 implementation');
+    const [inFlight] = await until(async () => { const tasks = tasksFor(7); return tasks[0] && (await get(port, `/api/development/jobs/${tasks[0].id}`)).phase === 'implementation' && tasks; }, '#7 implementation');
     const progress = await get(port, `/api/log/${inFlight.id}?lines=200`);
     assert.deepEqual(Object.keys(progress), ['lines'], 'the established log endpoint response shape is preserved');
     assert.ok(Array.isArray(progress.lines));
@@ -155,10 +155,10 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     recoveryFixture.ciTimeoutMs = 20000;
     fs.writeFileSync(fixture, JSON.stringify(recoveryFixture));
     ready([11]);
-    const [waiting] = await until(async () => { const tasks = tasksFor(11); return tasks[0] && (await get(port, `/api/r1/jobs/${tasks[0].id}`)).phase === 'ci' && tasks; }, '#11 waiting for CI');
+    const [waiting] = await until(async () => { const tasks = tasksFor(11); return tasks[0] && (await get(port, `/api/development/jobs/${tasks[0].id}`)).phase === 'ci' && tasks; }, '#11 waiting for CI');
     fs.writeFileSync(path.join(root, 'ci-error'), '');
     const unavailable = await until(async () => {
-      const job = await get(port, `/api/r1/jobs/${waiting.id}`);
+      const job = await get(port, `/api/development/jobs/${waiting.id}`);
       return job.evidence?.ci?.category === 'provider_error' && job;
     }, '#11 provider error visible through HTTP');
     assert.equal(unavailable.evidence.ci.state, 'pending');
@@ -173,12 +173,12 @@ test('the continuous runner admits ready issues itself and drives each to exactl
     for (let restart = 0; restart < 2; restart += 1) {
       const died = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await died;
       await launch();
-      if (restart === 0) await until(async () => { const tasks = tasksFor(11); return tasks[0] && (await get(port, `/api/r1/jobs/${tasks[0].id}`)).phase === 'ci'; }, '#11 resumed CI');
+      if (restart === 0) await until(async () => { const tasks = tasksFor(11); return tasks[0] && (await get(port, `/api/development/jobs/${tasks[0].id}`)).phase === 'ci'; }, '#11 resumed CI');
     }
-    assert.equal((await get(port, `/api/r1/jobs/${waiting.id}`)).evidence.ci.category, 'provider_error');
+    assert.equal((await get(port, `/api/development/jobs/${waiting.id}`)).evidence.ci.category, 'provider_error');
     fs.unlinkSync(path.join(root, 'ci-error'));
     await until(async () => {
-      const job = await get(port, `/api/r1/jobs/${waiting.id}`);
+      const job = await get(port, `/api/development/jobs/${waiting.id}`);
       return job.evidence.ci.category === 'required_run_pending' && !job.evidence.ci.providerError;
     }, '#11 provider error clears after a successful scheduled poll');
     fs.writeFileSync(path.join(root, 'ci-release'), '');
